@@ -94,15 +94,27 @@ EPSILON = 1e-10
 # ファイル名中の update_type の変換（9 → -1）
 UPDATE_TYPE_MAP = {9: -1, 0: 0, 1: 1, 2: 2}
 
-UPDATE_TYPE_LABEL = {
+UPDATE_TYPE_LABEL = {       # 日本語（テキストサマリー用）
     -1: "type-1: 静的",
      0: "type0:  逐次更新",
      1: "type1:  WMA",
      2: "type2:  動的WMA",
 }
+UPDATE_TYPE_LABEL_EN = {    # 英語（グラフラベル用 ─ フォント非依存）
+    -1: "type-1: Static",
+     0: "type0:  Periodic",
+     1: "type1:  WMA",
+     2: "type2:  Dyn-WMA",
+}
 UPDATE_TYPE_COLOR = {-1: "#757575", 0: "#1976D2", 1: "#388E3C", 2: "#F57C00"}
 UPDATE_TYPE_STYLE = {-1: ":",       0: "--",      1: "-",       2: "-."}
 UPDATE_TYPE_MARKER= {-1: "s",       0: "^",       1: "o",       2: "D"}
+
+# size_correction 別のマーカー形状・塗りつぶし
+# 0=補正なし: 四角(s)・中空  /  1=補正あり: 丸(o)・塗りつぶし
+SC_MARKER      = {0: "s",    1: "o"}
+SC_FILLSTYLE   = {0: "none", 1: "full"}   # 中空 vs 塗りつぶし
+SC_LABEL       = {0: "size_corr=0 (off)", 1: "size_corr=1 (on)"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,9 +370,9 @@ def plot_ma_convergence(agg: pd.DataFrame, out_dir: str, trace: str):
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     metrics = [
-        ("mean_js_inherent",   "JS(D_{t-1}, D_t)\n固有ドリフト（全手法共通）"),
-        ("mean_js_effective",  "JS(MA_{t-1}, D_t)\n閾値生成入力のズレ"),
-        ("mean_js_ma_current", "JS(MA_t, D_t)\n更新直後のMA精度"),
+        ("mean_js_inherent",   "JS(D_prev, D_t)\nInherent drift (common)"),
+        ("mean_js_effective",  "JS(MA_prev, D_t)\nEffective mismatch"),
+        ("mean_js_ma_current", "JS(MA_t, D_t)\nMA accuracy after update"),
     ]
 
     for ax, (col, title) in zip(axes, metrics):
@@ -370,7 +382,7 @@ def plot_ma_convergence(agg: pd.DataFrame, out_dir: str, trace: str):
             if sub.empty or col not in sub or sub[col].isna().all():
                 continue
             vals.append(sub[col].mean())
-            labels.append(UPDATE_TYPE_LABEL.get(ut, f"type{ut}"))
+            labels.append(UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"))
             colors.append(UPDATE_TYPE_COLOR.get(ut, "#333"))
 
         bars = ax.bar(range(len(vals)), vals, color=colors,
@@ -381,19 +393,19 @@ def plot_ma_convergence(agg: pd.DataFrame, out_dir: str, trace: str):
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
         ax.set_title(title, fontsize=10)
-        ax.set_ylabel("平均 JS ダイバージェンス（小さいほど良い）", fontsize=8)
+        ax.set_ylabel("Mean JS Divergence (lower is better)", fontsize=8)
         ax.grid(True, alpha=0.3, axis="y")
         ax.set_ylim(bottom=0, top=max(vals) * 1.15 if vals else 1)
 
-    plt.suptitle(f"[MA収束性] 3種のJSダイバージェンス比較  |  Trace: {trace}\n"
-                 f"type-1 では js_effective が最大（累積ズレ）、"
-                 f"type1・2では js_ma_current < js_effective（更新で近づく）",
+    plt.suptitle(f"[MA Convergence] 3 JS Divergence metrics | Trace: {trace}\n"
+                 f"type-1: js_effective is largest (accumulated drift), "
+                 f"type1/2: js_ma_current < js_effective (MA update helps)",
                  fontsize=11)
     plt.tight_layout()
     path = os.path.join(out_dir, f"{trace}_fig0_ma_convergence.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  保存: {path}")
+    print(f"  Saved: {path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -428,7 +440,7 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
         if sub.empty:
             continue
         data_to_plot.append(sub["mean_js_effective"].values)
-        labels_plot.append(UPDATE_TYPE_LABEL.get(ut, f"type{ut}"))
+        labels_plot.append(UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"))
 
     bars = ax.bar(range(len(data_to_plot)),
                   [d[0] if len(d)==1 else np.mean(d) for d in data_to_plot],
@@ -436,8 +448,8 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
                   edgecolor="white", alpha=0.85)
     ax.set_xticks(range(len(labels_plot)))
     ax.set_xticklabels(labels_plot, rotation=20, ha="right", fontsize=8)
-    ax.set_ylabel("Mean JS_effective  (小さいほど良い)", fontsize=9)
-    ax.set_title(f"(a) 実効ミスマッチ JS_effective\nK={best_k}, corr={best_sc}", fontsize=10)
+    ax.set_ylabel("Mean JS_effective  (lower is better)", fontsize=9)
+    ax.set_title(f"(a) Effective Mismatch JS_effective\nK={best_k}, corr={best_sc}", fontsize=10)
     ax.grid(True, alpha=0.3, axis="y")
 
     # ── (b) js_effective vs MR（手法別散布図） ──────────────────────────
@@ -448,15 +460,24 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
             continue
         for sc in sorted(sub["size_correction"].unique()):
             ssub = sub[sub["size_correction"]==sc]
-            ls   = "-" if sc==1 else "--"
+            mkr = SC_MARKER.get(sc, "o")
+            fst = SC_FILLSTYLE.get(sc, "full")
+            col = UPDATE_TYPE_COLOR.get(ut, "#333")
             ax.scatter(ssub["mean_js_effective"], ssub["mean_MR"],
-                       color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                       marker=UPDATE_TYPE_MARKER.get(ut,"o"), s=40, alpha=0.7,
-                       label=f"{UPDATE_TYPE_LABEL.get(ut,f'type{ut}')} sc={sc}" if sc==0 else None)
+                       color=col, marker=mkr, s=55, alpha=0.75,
+                       fillstyle=fst, linewidths=1.2)
             ax.plot(ssub["mean_js_effective"], ssub["mean_MR"],
-                    color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                    linestyle=ls, linewidth=0.8, alpha=0.5)
+                    color=col, linestyle=UPDATE_TYPE_STYLE.get(ut,"--"),
+                    linewidth=0.8, alpha=0.5)
 
+    # 凡例：色=update_type、形=size_correction
+    for ut in ut_list:
+        ax.scatter([], [], color=UPDATE_TYPE_COLOR.get(ut,"#333"), marker="o",
+                   label=UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"), s=40)
+    for sc in [0, 1]:
+        ax.scatter([], [], color="gray", marker=SC_MARKER[sc],
+                   fillstyle=SC_FILLSTYLE[sc], linewidths=1.2,
+                   label=SC_LABEL[sc], s=40)
     if len(agg) > 2:
         r, p = pearsonr(agg["mean_js_effective"], agg["mean_MR"])
         coeffs = np.polyfit(agg["mean_js_effective"], agg["mean_MR"], 1)
@@ -464,11 +485,11 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
                               agg["mean_js_effective"].max(), 100)
         ax.plot(x_line, np.polyval(coeffs, x_line),
                 color="red", linestyle="--", linewidth=1.2,
-                label=f"回帰線 r={r:+.3f}  p={p:.3f}")
+                label=f"regression r={r:+.3f} p={p:.3f}")
     ax.legend(fontsize=7, ncol=1)
     ax.set_xlabel("Mean JS_effective", fontsize=9)
-    ax.set_ylabel("Mean Miss Rate  (小さいほど良い)", fontsize=9)
-    ax.set_title("(b) JS_effective vs MR\n（全K・全補正・全手法）", fontsize=10)
+    ax.set_ylabel("Mean Miss Rate  (lower is better)", fontsize=9)
+    ax.set_title("(b) JS_effective vs MR\ncolor=update_type / shape=size_corr", fontsize=10)
     ax.grid(True, alpha=0.3)
 
     # ── (c) js_effective vs BMR（手法別散布図） ─────────────────────────
@@ -479,14 +500,23 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
             continue
         for sc in sorted(sub["size_correction"].unique()):
             ssub = sub[sub["size_correction"]==sc]
-            ls   = "-" if sc==1 else "--"
+            mkr = SC_MARKER.get(sc, "o")
+            fst = SC_FILLSTYLE.get(sc, "full")
+            col = UPDATE_TYPE_COLOR.get(ut, "#333")
             ax.scatter(ssub["mean_js_effective"], ssub["mean_BMR"],
-                       color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                       marker=UPDATE_TYPE_MARKER.get(ut,"o"), s=40, alpha=0.7)
+                       color=col, marker=mkr, s=55, alpha=0.75,
+                       fillstyle=fst, linewidths=1.2)
             ax.plot(ssub["mean_js_effective"], ssub["mean_BMR"],
-                    color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                    linestyle=ls, linewidth=0.8, alpha=0.5)
+                    color=col, linestyle=UPDATE_TYPE_STYLE.get(ut,"--"),
+                    linewidth=0.8, alpha=0.5)
 
+    for ut in ut_list:
+        ax.scatter([], [], color=UPDATE_TYPE_COLOR.get(ut,"#333"), marker="o",
+                   label=UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"), s=40)
+    for sc in [0, 1]:
+        ax.scatter([], [], color="gray", marker=SC_MARKER[sc],
+                   fillstyle=SC_FILLSTYLE[sc], linewidths=1.2,
+                   label=SC_LABEL[sc], s=40)
     if len(agg) > 2:
         r_b, p_b = pearsonr(agg["mean_js_effective"], agg["mean_BMR"])
         coeffs_b = np.polyfit(agg["mean_js_effective"], agg["mean_BMR"], 1)
@@ -494,39 +524,39 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
                               agg["mean_js_effective"].max(), 100)
         ax.plot(x_line, np.polyval(coeffs_b, x_line),
                 color="red", linestyle="--", linewidth=1.2,
-                label=f"回帰線 r={r_b:+.3f}  p={p_b:.3f}")
+                label=f"regression r={r_b:+.3f} p={p_b:.3f}")
     ax.legend(fontsize=7)
     ax.set_xlabel("Mean JS_effective", fontsize=9)
-    ax.set_ylabel("Mean Byte Miss Rate  (小さいほど良い)", fontsize=9)
-    ax.set_title("(c) JS_effective vs BMR\n（全K・全補正・全手法）", fontsize=10)
+    ax.set_ylabel("Mean Byte Miss Rate  (lower is better)", fontsize=9)
+    ax.set_title("(c) JS_effective vs BMR\ncolor=update_type / shape=size_corr", fontsize=10)
     ax.grid(True, alpha=0.3)
 
     # ── (d) js_inherent vs js_effective（手法別） ───────────────────────
     ax = axes[3]
     ax.plot([0, agg["mean_js_inherent"].max()],
             [0, agg["mean_js_inherent"].max()],
-            color="gray", linestyle=":", linewidth=1, label="js_eff = js_inh (type0相当)")
+            color="gray", linestyle=":", linewidth=1, label="js_eff = js_inh (type0 baseline)")
     for ut in ut_list:
         sub = agg[agg["update_type"]==ut]
         if sub.empty:
             continue
         ax.scatter(sub["mean_js_inherent"], sub["mean_js_effective"],
                    color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                   label=UPDATE_TYPE_LABEL.get(ut,f"type{ut}"),
+                   label=UPDATE_TYPE_LABEL_EN.get(ut,f"type{ut}"),
                    s=30, alpha=0.8)
 
-    ax.set_xlabel("JS_inherent（トレース固有ドリフト）", fontsize=9)
-    ax.set_ylabel("JS_effective（実効ミスマッチ）", fontsize=9)
-    ax.set_title("(d) 固有ドリフト vs 実効ミスマッチ\n対角線下 = 手法がドリフトを吸収できている", fontsize=10)
+    ax.set_xlabel("JS_inherent (trace-specific drift)", fontsize=9)
+    ax.set_ylabel("JS_effective (effective mismatch)", fontsize=9)
+    ax.set_title("(d) Inherent drift vs Effective mismatch\nbelow diagonal = method absorbs drift", fontsize=10)
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
-    plt.suptitle(f"[核心図] 実効ミスマッチ分析  |  Trace: {trace}", fontsize=12)
+    plt.suptitle(f"[Core] Effective Mismatch Analysis | Trace: {trace}", fontsize=12)
     plt.tight_layout()
     path = os.path.join(out_dir, f"{trace}_fig1_effective_mismatch.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  保存: {path}")
+    print(f"  Saved: {path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -534,37 +564,46 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def plot_k_curves(agg: pd.DataFrame, out_dir: str, trace: str):
+    # 色=update_type / マーカー形状=size_correction（他の図と統一）
+    #   sc=1 補正あり: 丸(o) 塗りつぶし  実線
+    #   sc=0 補正なし: 四角(s) 中空      破線
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     for sc in sorted(agg["size_correction"].unique()):
-        ls = "-" if sc==1 else "--"
-        sc_label = "補正あり" if sc else "補正なし"
+        mkr = SC_MARKER.get(sc, "o")
+        fst = SC_FILLSTYLE.get(sc, "full")
+        ls  = UPDATE_TYPE_STYLE.get(1, "-") if sc==1 else UPDATE_TYPE_STYLE.get(0, "--")
         for ut in sorted(agg["update_type"].unique()):
             sub = agg[(agg["update_type"]==ut)&(agg["size_correction"]==sc)].sort_values("k")
             if sub.empty:
                 continue
-            color = UPDATE_TYPE_COLOR.get(ut,"#333")
-            label = f"{UPDATE_TYPE_LABEL.get(ut,f'type{ut}')} {sc_label}"
+            color = UPDATE_TYPE_COLOR.get(ut, "#333")
+            label = f"{UPDATE_TYPE_LABEL_EN.get(ut,f'type{ut}')} {SC_LABEL[sc]}"
             axes[0].plot(sub["k"], sub["mean_MR"],
-                         color=color, linestyle=ls, linewidth=1.5,
-                         marker="o", markersize=4, label=label, alpha=0.85)
+                         color=color, linestyle=UPDATE_TYPE_STYLE.get(ut,"--"),
+                         linewidth=1.5, marker=mkr, markersize=6,
+                         fillstyle=fst, markeredgewidth=1.2,
+                         label=label, alpha=0.85)
             axes[1].plot(sub["k"], sub["mean_BMR"],
-                         color=color, linestyle=ls, linewidth=1.5,
-                         marker="o", markersize=4, label=label, alpha=0.85)
+                         color=color, linestyle=UPDATE_TYPE_STYLE.get(ut,"--"),
+                         linewidth=1.5, marker=mkr, markersize=6,
+                         fillstyle=fst, markeredgewidth=1.2,
+                         label=label, alpha=0.85)
 
-    for ax, title in [(axes[0],"Mean Miss Rate  (小さいほど良い)"), (axes[1],"Mean Byte Miss Rate  (小さいほど良い)")]:
+    for ax, title in [(axes[0],"Mean Miss Rate  (lower is better)"),
+                      (axes[1],"Mean Byte Miss Rate  (lower is better)")]:
         ax.set_xlabel("Threshold Count K", fontsize=10)
         ax.set_ylabel(title, fontsize=10)
-        ax.set_title(title, fontsize=11)
+        ax.set_title(f"{title}\ncolor=update_type / shape=size_corr", fontsize=10)
         ax.set_xticks(range(1, 9))
         ax.legend(fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
 
-    plt.suptitle(f"[RQ4] 最適閾値数 K  |  Trace: {trace}", fontsize=12)
+    plt.suptitle(f"[RQ4] Optimal Threshold Count K | Trace: {trace}", fontsize=12)
     plt.tight_layout()
     path = os.path.join(out_dir, f"{trace}_fig2_optimal_k.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  保存: {path}")
+    print(f"  Saved: {path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -572,14 +611,22 @@ def plot_k_curves(agg: pd.DataFrame, out_dir: str, trace: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def plot_size_correction(agg: pd.DataFrame, out_dir: str, trace: str):
+    # size_correction の視覚表現を他の図と統一:
+    #   sc=1 (補正あり) : 塗りつぶし・ハッチなし  (散布図の ● に対応)
+    #   sc=0 (補正なし) : 中塗り薄・斜線ハッチ    (散布図の □ に対応)
+    SC_BAR_COLOR  = {0: "#90CAF9", 1: "#1976D2"}   # 補正なし=薄青 / 補正あり=濃青
+    SC_BAR_HATCH  = {0: "//",      1: ""}           # 補正なし=斜線 / 補正あり=無地
+    SC_BAR_ALPHA  = {0: 0.70,      1: 0.90}
+    SC_BAR_EDGE   = {0: "#1976D2", 1: "white"}
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     ut_list = sorted(agg["update_type"].unique())
 
     for ax, metric, title, hypothesis in [
-        (axes[0], "mean_MR",  "Miss Rate  (小さいほど良い)",
-         "仮説: サイズ補正はMRに影響しない（BMR向け補正）"),
-        (axes[1], "mean_BMR", "Byte Miss Rate  (小さいほど良い)",
-         "仮説: 補正あり(1) < 補正なし(0)  ← BMR改善"),
+        (axes[0], "mean_MR",  "Miss Rate  (lower is better)",
+         "Hypothesis: size-corr does not affect MR (BMR-targeted)"),
+        (axes[1], "mean_BMR", "Byte Miss Rate  (lower is better)",
+         "Hypothesis: corr=on(1) < corr=off(0)  <- BMR improvement"),
     ]:
         x = np.arange(len(ut_list))
         w = 0.35
@@ -589,21 +636,25 @@ def plot_size_correction(agg: pd.DataFrame, out_dir: str, trace: str):
                 sub = agg[(agg["update_type"]==ut)&(agg["size_correction"]==sc)]
                 vals.append(sub[metric].mean() if not sub.empty else 0)
             ax.bar(x + (i-0.5)*w, vals, width=w,
-                   label=f"補正{'あり' if sc else 'なし'}",
-                   color=["#90CAF9","#1976D2"][i], alpha=0.85, edgecolor="white")
+                   label=SC_LABEL[sc],
+                   color=SC_BAR_COLOR[sc],
+                   hatch=SC_BAR_HATCH[sc],
+                   alpha=SC_BAR_ALPHA[sc],
+                   edgecolor=SC_BAR_EDGE[sc],
+                   linewidth=0.8)
         ax.set_xticks(x)
-        ax.set_xticklabels([UPDATE_TYPE_LABEL.get(u,f"type{u}") for u in ut_list],
+        ax.set_xticklabels([UPDATE_TYPE_LABEL_EN.get(u,f"type{u}") for u in ut_list],
                             rotation=15, ha="right", fontsize=8)
         ax.set_title(f"{title}\n{hypothesis}", fontsize=10)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, axis="y")
 
-    plt.suptitle(f"[RQ3] サイズ補正の効果  |  Trace: {trace}", fontsize=12)
+    plt.suptitle(f"[RQ3] Effect of Size Correction | Trace: {trace}", fontsize=12)
     plt.tight_layout()
     path = os.path.join(out_dir, f"{trace}_fig3_size_correction.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  保存: {path}")
+    print(f"  Saved: {path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -767,10 +818,12 @@ def plot_pareto(agg, out_dir, trace):
         sub = agg[agg["update_type"] == ut]
         for sc in sorted(sub["size_correction"].unique()):
             ssub = sub[sub["size_correction"] == sc]
-            mkr  = "o" if sc == 1 else "s"
+            mkr = SC_MARKER.get(sc, "o")
+            fst = SC_FILLSTYLE.get(sc, "full")
             ax.scatter(ssub["mean_MR"], ssub["mean_BMR"],
                        color=UPDATE_TYPE_COLOR.get(ut, "#333"),
-                       marker=mkr, s=55, alpha=0.45, zorder=2)
+                       marker=mkr, fillstyle=fst, linewidths=1.2,
+                       s=60, alpha=0.55, zorder=2)
 
     # Pareto front highlight
     if len(pf) > 0:
@@ -791,9 +844,11 @@ def plot_pareto(agg, out_dir, trace):
     # Legend dummies
     for ut in ut_list:
         ax.scatter([], [], color=UPDATE_TYPE_COLOR.get(ut, "#333"),
-                   label=UPDATE_TYPE_LABEL.get(ut, f"type{ut}"), s=40)
-    ax.scatter([], [], color="gray", marker="o", s=40, label="size_corr=1 (on)")
-    ax.scatter([], [], color="gray", marker="s", s=40, label="size_corr=0 (off)")
+                   label=UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"), s=40)
+    for sc in [0, 1]:
+        ax.scatter([], [], color="gray", marker=SC_MARKER[sc],
+                   fillstyle=SC_FILLSTYLE[sc], linewidths=1.2,
+                   s=40, label=SC_LABEL[sc])
 
     ax.set_xlabel("Mean Miss Rate (MR)  <- lower is better", fontsize=10)
     ax.set_ylabel("Mean Byte Miss Rate (BMR)  <- lower is better", fontsize=10)
@@ -910,56 +965,72 @@ def run_one_trace(meta_trace, trace: str, out_dir: str, w_mr: float = 0.5, w_bmr
     return agg
 
 
+
 def main():
-    parser = argparse.ArgumentParser(description="All-condition analysis (SIZEDIVIDE format)")
+    parser = argparse.ArgumentParser(
+        description="All-condition analysis (SIZEDIVIDE format)",
+    )
     parser.add_argument("--dir",   required=True, help="Directory containing CSVs")
     parser.add_argument("--trace", default=None,
-                        help="Process only this trace prefix (e.g. mrsBlk-0.3). "
-                             "If omitted, all traces in directory are processed separately.")
+                        help="Only process files whose trace prefix matches this value "
+                             "(e.g. mrsBlk-0.3).")
+    parser.add_argument("--label", default=None,
+                        help="Output filename prefix when combining all CSVs "
+                             "(default: directory name).")
+    parser.add_argument("--split-traces", action="store_true",
+                        help="Auto-detect trace prefixes and process each separately. "
+                             "Default: all CSVs combined into one analysis.")
     parser.add_argument("--out",   default="./output", help="Output directory")
     parser.add_argument("--w-mr",  type=float, default=0.5,
-                        help="Weight for MR in combined score (default 0.5). "
-                             "Use --w-mr 0.7 --w-bmr 0.3 to prioritize MR.")
+                        help="Weight for MR in combined score (default 0.5).")
     parser.add_argument("--w-bmr", type=float, default=0.5,
                         help="Weight for BMR in combined score (default 0.5).")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
 
-    print("[1/4] Scanning CSVs...")
-    meta = collect_csvs(args.dir)
-
-    all_traces = sorted(meta["trace"].unique())
-    if args.trace is not None:
-        if args.trace not in all_traces:
-            raise ValueError(
-                f"Trace '{args.trace}' not found. Available: {all_traces}"
-            )
-        target_traces = [args.trace]
-    else:
-        target_traces = all_traces
-
-    # Normalize weights
     total_w = args.w_mr + args.w_bmr
     w_mr  = args.w_mr  / total_w
     w_bmr = args.w_bmr / total_w
-    print(f"  Combined score weights: MR={w_mr:.2f}  BMR={w_bmr:.2f}")
 
-    print(f"  Target traces: {target_traces}")
+    print("[1/4] Scanning CSVs...")
+    meta = collect_csvs(args.dir)
+    all_traces = sorted(meta["trace"].unique())
 
-    all_agg = []
-    for trace in target_traces:
-        meta_trace = meta[meta["trace"] == trace].copy()
-        agg = run_one_trace(meta_trace, trace, args.out, w_mr=w_mr, w_bmr=w_bmr)
-        all_agg.append(agg)
-
-    if len(all_agg) > 1:
-        combined = pd.concat(all_agg, ignore_index=True)
-        combined_path = os.path.join(args.out, "all_traces_agg.csv")
-        combined.to_csv(combined_path, index=False, encoding="utf-8-sig")
-        print(f"  Cross-trace aggregate: {combined_path}")
-        print(f"  Traces: {len(all_agg)}  Total conditions: {len(combined)}")
-        print(f"{'='*70}")
+    if args.split_traces:
+        # Mode: process each trace prefix separately
+        target_traces = all_traces
+        if args.trace:
+            if args.trace not in all_traces:
+                raise ValueError(f"Trace '{args.trace}' not found. Available: {all_traces}")
+            target_traces = [args.trace]
+        print(f"  Split mode: {len(target_traces)} trace(s)")
+        print(f"  Weights: MR={w_mr:.2f}  BMR={w_bmr:.2f}")
+        all_agg = []
+        for trace in target_traces:
+            meta_trace = meta[meta["trace"] == trace].copy()
+            agg = run_one_trace(meta_trace, trace, args.out, w_mr=w_mr, w_bmr=w_bmr)
+            all_agg.append(agg)
+        if len(all_agg) > 1:
+            combined = pd.concat(all_agg, ignore_index=True)
+            out_p = os.path.join(args.out, "all_traces_agg.csv")
+            combined.to_csv(out_p, index=False, encoding="utf-8-sig")
+            print(f"  Cross-trace aggregate: {out_p}")
+    else:
+        # Default: combine all (or filtered) CSVs into one analysis
+        if args.trace:
+            if args.trace not in all_traces:
+                raise ValueError(f"Trace '{args.trace}' not found. Available: {all_traces}")
+            meta_use = meta[meta["trace"] == args.trace].copy()
+            label = args.label or args.trace
+        else:
+            meta_use = meta.copy()
+            label = args.label or Path(args.dir).name
+        n = meta_use["trace"].nunique()
+        if n > 1:
+            print(f"  Combining {n} trace prefix(es) -> label='{label}'")
+        print(f"  Weights: MR={w_mr:.2f}  BMR={w_bmr:.2f}")
+        run_one_trace(meta_use, label, args.out, w_mr=w_mr, w_bmr=w_bmr)
 
     print(f"\nAll done. Output: {args.out}/")
 
