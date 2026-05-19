@@ -651,7 +651,10 @@ def print_summary(agg: pd.DataFrame, trace: str):
     best_sc = int(agg.loc[agg["mean_MR"].idxmin(), "size_correction"])
     for ut in sorted(agg["update_type"].unique()):
         sub = agg[(agg["update_type"]==ut)&(agg["k"]==best_k)&(agg["size_correction"]==best_sc)]
-        if sub.empty or sub["pearson_r_MR_eff"].isna().all():
+        if (sub.empty
+                or "pearson_r_MR_eff" not in sub.columns
+                or "pearson_p_MR_eff" not in sub.columns
+                or sub["pearson_r_MR_eff"].isna().all()):
             continue
         r  = sub["pearson_r_MR_eff"].values[0]
         p  = sub["pearson_p_MR_eff"].values[0]
@@ -668,7 +671,10 @@ def print_summary(agg: pd.DataFrame, trace: str):
     best_sc_bmr = int(agg.loc[agg["mean_BMR"].idxmin(), "size_correction"])
     for ut in sorted(agg["update_type"].unique()):
         sub = agg[(agg["update_type"]==ut)&(agg["k"]==best_k_bmr)&(agg["size_correction"]==best_sc_bmr)]
-        if sub.empty or sub["pearson_r_BMR_eff"].isna().all():
+        if (sub.empty
+                or "pearson_r_BMR_eff" not in sub.columns
+                or "pearson_p_BMR_eff" not in sub.columns
+                or sub["pearson_r_BMR_eff"].isna().all()):
             continue
         r  = sub["pearson_r_BMR_eff"].values[0]
         p  = sub["pearson_p_BMR_eff"].values[0]
@@ -951,7 +957,6 @@ def main():
         combined = pd.concat(all_agg, ignore_index=True)
         combined_path = os.path.join(args.out, "all_traces_agg.csv")
         combined.to_csv(combined_path, index=False, encoding="utf-8-sig")
-        print(f"\n{'='*70}")
         print(f"  Cross-trace aggregate: {combined_path}")
         print(f"  Traces: {len(all_agg)}  Total conditions: {len(combined)}")
         print(f"{'='*70}")
