@@ -155,24 +155,22 @@ def collect_csvs(dir_path: str) -> pd.DataFrame:
 
 def find_series_cols(df: pd.DataFrame, base: str) -> list[str]:
     """
-    base, base_1, base_2, ... の連番列を返す。
+    base_1, base_2, ... の連番列を返す（base そのものは除外）。
+
+    除外する理由:
+        count, view_counts_now, threshold_use, threshold_make,
+        view_counts_make, count_make などの基底列には
+        数値ではなく人間可読な系列名（文字列）が入っているため。
+        数値データは base_1, base_2, ... にのみ存在する。
+
     base__1（アンダースコア2つ）も base_1 として扱う。
     """
-    cols = df.columns.tolist()
-
-    # 全列名を正規化して base_N → N のマッピングを作る
     normalized = {}
-    for c in cols:
-        # base そのまま → インデックス 0
-        if c == base:
-            normalized[0] = c
-            continue
-        # base_N または base__N （N は整数）
+    for c in df.columns:
         m = re.fullmatch(re.escape(base) + r"_{1,2}(\d+)", c)
         if m:
             normalized[int(m.group(1))] = c
 
-    # 連番順にソートして返す
     return [normalized[i] for i in sorted(normalized)]
 
 
