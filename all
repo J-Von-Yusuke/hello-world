@@ -326,6 +326,7 @@ def aggregate(master: pd.DataFrame) -> pd.DataFrame:
             "pearson_r_MR_eff":     r_mr,   # 正が仮説通り（JS↑→MR↑）
             "pearson_p_MR_eff":     p_mr,
             "pearson_r_BMR_eff":    r_bmr,  # 正が仮説通り（JS↑→BMR↑）
+            "pearson_p_BMR_eff":    p_bmr,
             "n_windows":            len(g),
         })
     return pd.DataFrame(recs)
