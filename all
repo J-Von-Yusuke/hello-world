@@ -327,6 +327,38 @@ def load_one(filepath: str) -> tuple[pd.DataFrame, dict]:
             df = df[~warmup_mask].copy()
     cond["n_warmup_excluded"] = n_warmup
 
+    # ── 区間ミス率（窓ごとのリアルタイム性能） ─────────────────────────
+    df["inter_miss_rate"]      = df["inter_miss_ratio"]      if "inter_miss_ratio"      in df.columns else np.nan
+    df["inter_byte_miss_rate"] = df["inter_miss_byte_ratio"] if "inter_miss_byte_ratio" in df.columns else np.nan
+
+    # リクエスト量（ボリューム補正分析用）
+    for _vc in ["n_req", "req_byte"]:
+        if _vc in df.columns:
+            df[_vc] = pd.to_numeric(df[_vc], errors="coerce")
+
+    # 各ベースラインの区間ミス率
+    _INTER_BL_MAP = [
+        ("inter_miss_ratio_lru",          "inter_miss_rate_LRU"),
+        ("inter_miss_byte_ratio_lru",      "inter_byte_miss_rate_LRU"),
+        ("inter_miss_ratio_m1",            "inter_miss_rate_M1"),
+        ("inter_miss_byte_ratio_m1",       "inter_byte_miss_rate_M1"),
+        ("inter_miss_ratio_s3fifo",        "inter_miss_rate_S3FIFO"),
+        ("inter_miss_byte_ratio_s3fifo",   "inter_byte_miss_rate_S3FIFO"),
+        ("inter_miss_ratio_m2s3fifo",      "inter_miss_rate_M2S3FIFO"),
+        ("inter_miss_byte_ratio_m2s3fifo", "inter_byte_miss_rate_M2S3FIFO"),
+    ]
+    for _raw, _new in _INTER_BL_MAP:
+        df[_new] = df[_raw].astype(float) if _raw in df.columns else np.nan
+
+    # ベースライン(LRU)との窓ごと差分（負 = 本手法がLRUより良い）
+    _has_inter_lru = "inter_miss_ratio_lru" in df.columns
+    if _has_inter_lru:
+        df["delta_inter_MR_LRU"]  = df["inter_miss_rate"]      - df["inter_miss_rate_LRU"]
+        df["delta_inter_BMR_LRU"] = df["inter_byte_miss_rate"] - df["inter_byte_miss_rate_LRU"]
+    else:
+        df["delta_inter_MR_LRU"]  = np.nan
+        df["delta_inter_BMR_LRU"] = np.nan
+
     # ── JS ダイバージェンスを行ごとに計算 ────────────────────────────────
     now_arr  = df[now_cols].values.astype(float)
     make_arr = df[make_cols].values.astype(float)
@@ -401,6 +433,37 @@ def aggregate(master: pd.DataFrame) -> pd.DataFrame:
             "pearson_r_BMR_eff":    r_bmr,  # 正が仮説通り（JS↑→BMR↑）
             "pearson_p_BMR_eff":    p_bmr,
             "n_windows":            len(g),
+            # ── 区間ミス率（窓ごとのリアルタイム性能）─────────────────
+            "mean_inter_MR":   g["inter_miss_rate"].mean()      if "inter_miss_rate"      in g.columns else np.nan,
+            "mean_inter_BMR":  g["inter_byte_miss_rate"].mean() if "inter_byte_miss_rate" in g.columns else np.nan,
+            "std_inter_MR":    g["inter_miss_rate"].std()       if "inter_miss_rate"      in g.columns else np.nan,
+            "std_inter_BMR":   g["inter_byte_miss_rate"].std()  if "inter_byte_miss_rate" in g.columns else np.nan,
+            # ── ボリューム加重区間ミス率（低ボリューム窓の影響を補正）──
+            # vw_inter_MR = sum(inter_MR * n_req) / sum(n_req)  ≒ cumulative MR
+            # ただし区間ごとに計算するため時系列特性を保持
+            "vw_inter_MR": (
+                (g["inter_miss_rate"] * g["n_req"]).sum() / g["n_req"].sum()
+                if ("inter_miss_rate" in g.columns and "n_req" in g.columns
+                    and not g["n_req"].isna().all() and g["n_req"].sum() > 0)
+                else np.nan
+            ),
+            "vw_inter_BMR": (
+                (g["inter_byte_miss_rate"] * g["req_byte"]).sum() / g["req_byte"].sum()
+                if ("inter_byte_miss_rate" in g.columns and "req_byte" in g.columns
+                    and not g["req_byte"].isna().all() and g["req_byte"].sum() > 0)
+                else np.nan
+            ),
+            # ── 窓ごとデルタ(本手法 - LRU)の統計 ────────────────────
+            # 負 = 本手法がLRUより良い（各窓での実際の差分）
+            "mean_delta_MR_LRU":  g["delta_inter_MR_LRU"].mean()  if "delta_inter_MR_LRU"  in g.columns else np.nan,
+            "mean_delta_BMR_LRU": g["delta_inter_BMR_LRU"].mean() if "delta_inter_BMR_LRU" in g.columns else np.nan,
+            "std_delta_MR_LRU":   g["delta_inter_MR_LRU"].std()   if "delta_inter_MR_LRU"  in g.columns else np.nan,
+            # ── 区間ベースライン ───────────────────────────────────────
+            "mean_inter_MR_LRU":     g["inter_miss_rate_LRU"].mean()     if "inter_miss_rate_LRU"     in g.columns else np.nan,
+            "mean_inter_BMR_LRU":    g["inter_byte_miss_rate_LRU"].mean() if "inter_byte_miss_rate_LRU" in g.columns else np.nan,
+            "mean_inter_MR_M1":      g["inter_miss_rate_M1"].mean()      if "inter_miss_rate_M1"      in g.columns else np.nan,
+            "mean_inter_MR_S3FIFO":  g["inter_miss_rate_S3FIFO"].mean()  if "inter_miss_rate_S3FIFO"  in g.columns else np.nan,
+            "mean_inter_MR_M2S3FIFO":g["inter_miss_rate_M2S3FIFO"].mean() if "inter_miss_rate_M2S3FIFO" in g.columns else np.nan,
             # ── LRU / M1 ベースライン ────────────────────────────────────
             "mean_MR_LRU":  g["miss_rate_LRU"].mean()      if "miss_rate_LRU"      in g.columns else np.nan,
             "mean_BMR_LRU": g["byte_miss_rate_LRU"].mean() if "byte_miss_rate_LRU" in g.columns else np.nan,
@@ -748,6 +811,215 @@ def plot_baseline_comparison(agg: pd.DataFrame, out_dir: str, trace: str):
     )
     plt.tight_layout()
     fpath = os.path.join(out_dir, f'{trace}_fig5_baseline_comparison.png')
+    plt.savefig(fpath, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {fpath}')
+
+
+
+# ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+# 図6: 区間ミス率・リクエスト量・ベースライン差分の分析
+# ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+def plot_interval_analysis(agg: pd.DataFrame, master: pd.DataFrame,
+                           out_dir: str, trace: str):
+    has_inter = ('inter_miss_rate' in master.columns and
+                 not master['inter_miss_rate'].isna().all())
+    has_lru_inter = ('inter_miss_rate_LRU' in master.columns and
+                     not master['inter_miss_rate_LRU'].isna().all())
+    has_nreq  = 'n_req'    in master.columns and not master['n_req'].isna().all()
+    has_rbyte = 'req_byte' in master.columns and not master['req_byte'].isna().all()
+
+    if not has_inter:
+        print(f'  [fig6 skip] inter_miss_ratio列がありません: {trace}')
+        return
+
+    ut_list = sorted(master['update_type'].unique())
+    fig, axes = plt.subplots(1, 5, figsize=(30, 5))
+
+    # ── (a) n_req vs inter_MR 散布図 ────────────────────────────
+    # 目的: 低ミス率が「リクエスト数が少ない窓」に偏っていないか確認
+    # 偏っている場合 → 低ミス率は低ボリュームが原因（見かけ上の改善）
+    # 偏っていない場合 → 低ミス率は手法の真の改善
+    ax = axes[0]
+    if has_nreq:
+        for ut in ut_list:
+            sub = master[master['update_type'] == ut].copy()
+            if sub.empty: continue
+            col = UPDATE_TYPE_COLOR.get(ut, '#333')
+            ax.scatter(sub['n_req'], sub['inter_miss_rate'],
+                       color=col, s=6, alpha=0.35,
+                       label=UPDATE_TYPE_LABEL_EN.get(ut, f'type{ut}'))
+        ax.set_xscale('log')
+        ax.set_xlabel('n_req per window (log scale)', fontsize=9)
+        ax.set_ylabel('inter_miss_rate', fontsize=9)
+        ax.set_title('(a) Request volume vs Interval MR\n'
+                     'If low MR clusters at low n_req -> spurious', fontsize=10)
+        ax.legend(fontsize=7, markerscale=3)
+        ax.grid(True, alpha=0.3)
+        # 相関係数を表示
+        valid = master[['n_req','inter_miss_rate']].dropna()
+        if len(valid) > 10:
+            from scipy.stats import spearmanr as _sp
+            r, p = _sp(valid['n_req'], valid['inter_miss_rate'])
+            ax.text(0.03, 0.96, f'Spearman r={r:.3f} p={p:.3f}',
+                    transform=ax.transAxes, fontsize=8, va='top',
+                    bbox=dict(boxstyle='round', fc='white', alpha=0.7))
+    else:
+        ax.text(0.5, 0.5, 'No n_req column', ha='center', va='center',
+                transform=ax.transAxes, color='gray')
+        ax.axis('off')
+
+    # ── (b) req_byte vs inter_BMR 散布図 ─────────────────────────
+    # 目的: 低バイトミス率が「バイト転送量が少ない窓」に偏っていないか確認
+    ax = axes[1]
+    has_ibmr = 'inter_byte_miss_rate' in master.columns and not master['inter_byte_miss_rate'].isna().all()
+    if has_rbyte and has_ibmr:
+        for ut in ut_list:
+            sub = master[master['update_type'] == ut].copy()
+            if sub.empty: continue
+            col = UPDATE_TYPE_COLOR.get(ut, '#333')
+            ax.scatter(sub['req_byte'], sub['inter_byte_miss_rate'],
+                       color=col, s=6, alpha=0.35,
+                       label=UPDATE_TYPE_LABEL_EN.get(ut, f'type{ut}'))
+        ax.set_xscale('log')
+        ax.set_xlabel('req_byte per window (log scale)', fontsize=9)
+        ax.set_ylabel('inter_byte_miss_rate (BMR)', fontsize=9)
+        ax.set_title('(b) Byte volume vs Interval BMR\n'
+                     'If low BMR clusters at low req_byte -> spurious', fontsize=10)
+        ax.legend(fontsize=7, markerscale=3)
+        ax.grid(True, alpha=0.3)
+        valid_b = master[['req_byte','inter_byte_miss_rate']].dropna()
+        if len(valid_b) > 10:
+            from scipy.stats import spearmanr as _sp2
+            r2, p2 = _sp2(valid_b['req_byte'], valid_b['inter_byte_miss_rate'])
+            ax.text(0.03, 0.96, f'Spearman r={r2:.3f} p={p2:.3f}',
+                    transform=ax.transAxes, fontsize=8, va='top',
+                    bbox=dict(boxstyle='round', fc='white', alpha=0.7))
+    else:
+        ax.text(0.5, 0.5, 'No req_byte / inter_BMR', ha='center', va='center',
+                transform=ax.transAxes, color='gray')
+        ax.axis('off')
+
+    # ── (c) 窓ごとデルタ(本手法 - LRU) の分布 boxplot ──────────
+    # 目的: 各update_typeで「LRUより良い窓」がどの程度あるかを分布で示す
+    # 負 = 本手法がLRUより低いミス率 = 改善。中央値が負ならば一貫した改善。
+    ax = axes[2]
+    if has_lru_inter:
+        box_data, box_labels, box_colors = [], [], []
+        for ut in ut_list:
+            vals = master.loc[master['update_type']==ut, 'delta_inter_MR_LRU'].dropna().values
+            if len(vals) == 0: continue
+            box_data.append(vals)
+            box_labels.append(UPDATE_TYPE_LABEL_EN.get(ut, f'type{ut}'))
+            box_colors.append(UPDATE_TYPE_COLOR.get(ut, '#333'))
+        if box_data:
+            bp = ax.boxplot(box_data, patch_artist=True,
+                            medianprops=dict(color='white', linewidth=2),
+                            flierprops=dict(marker='.', markersize=2, alpha=0.3))
+            for patch, col in zip(bp['boxes'], box_colors):
+                patch.set_facecolor(col); patch.set_alpha(0.80)
+            for w_ in bp['whiskers']: w_.set(color='#555', linewidth=1.2)
+            for c_ in bp['caps']:     c_.set(color='#555', linewidth=1.2)
+            ax.axhline(0, color='red', linewidth=1.2, linestyle='--', label='LRU baseline')
+            ax.set_xticks(range(1, len(box_labels)+1))
+            ax.set_xticklabels(box_labels, rotation=15, ha='right', fontsize=8)
+            ax.set_ylabel('inter_MR(method) - inter_MR(LRU)\nnegative = method better', fontsize=8)
+            ax.set_title('(c) Per-window delta MR vs LRU\n'
+                         'Box=IQR, line=median. negative=improvement', fontsize=10)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax.text(0.5, 0.5, 'No LRU interval baseline', ha='center', va='center',
+                transform=ax.transAxes, color='gray')
+        ax.axis('off')
+
+    # ── (d) ボリューム加重 inter MR vs K 曲線 ────────────────────
+    # 目的: 低ボリューム窓の影響を補正した「真の」性能曲線
+    # 単純平均 mean_inter_MR と比較し、差があれば低ボリューム窓に偏りあり
+    ax = axes[3]
+    has_vw = 'vw_inter_MR' in agg.columns and not agg['vw_inter_MR'].isna().all()
+    k_vals = sorted(agg['k'].unique())
+    if has_vw:
+        for ut in ut_list:
+            for sc in sorted(agg['size_correction'].unique()):
+                sub = agg[(agg['update_type']==ut)&(agg['size_correction']==sc)].sort_values('k')
+                if sub.empty: continue
+                col = UPDATE_TYPE_COLOR.get(ut, '#333')
+                ls  = UPDATE_TYPE_STYLE.get(ut, '--')
+                mkr = SC_MARKER.get(sc, 'o')
+                fst = SC_FILLSTYLE.get(sc, 'full')
+                # ボリューム加重（実線）
+                ax.plot(sub['k'], sub['vw_inter_MR'],
+                        color=col, linestyle=ls, linewidth=2.0,
+                        marker=mkr, markersize=6, fillstyle='full',
+                        markeredgewidth=1.5, alpha=0.90)
+                # 単純平均（細い点線）
+                if 'mean_inter_MR' in sub.columns:
+                    ax.plot(sub['k'], sub['mean_inter_MR'],
+                            color=col, linestyle=':', linewidth=1.0,
+                            marker=mkr, markersize=4, fillstyle=fst,
+                            markeredgewidth=1.0, alpha=0.55)
+        ax.plot([], [], color='gray', linewidth=2.0, label='volume-weighted (thick)')
+        ax.plot([], [], color='gray', linewidth=1.0, linestyle=':', label='simple mean (dotted)')
+        for ut in ut_list:
+            ax.plot([], [], color=UPDATE_TYPE_COLOR.get(ut,'#333'),
+                    linestyle=UPDATE_TYPE_STYLE.get(ut,'--'),
+                    label=UPDATE_TYPE_LABEL_EN.get(ut, f'type{ut}'), linewidth=1.4)
+        ax.set_xlabel('Threshold Count K', fontsize=9)
+        ax.set_ylabel('Inter MR (volume-weighted)', fontsize=9)
+        ax.set_title('(d) Volume-weighted inter MR vs K\n'
+                     'thick=vol-weighted  dotted=simple mean\n'
+                     'gap = low-volume window effect', fontsize=9)
+        ax.set_xticks(k_vals)
+        ax.legend(fontsize=6, ncol=1)
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.text(0.5, 0.5, 'No volume data\n(n_req column missing)', ha='center', va='center',
+                transform=ax.transAxes, color='gray', fontsize=10)
+        ax.axis('off')
+
+    # ── (e) 区間 vs 累積 ミス率 比較 ────────────────────────────
+    # 目的: 累積MRが改善を過小評価していないか確認
+    # 累積MR: ウォームアップ期間に引きずられる / 区間MR: 安定期の真の性能
+    ax = axes[4]
+    has_cum = 'mean_MR' in agg.columns
+    has_int = 'mean_inter_MR' in agg.columns and not agg['mean_inter_MR'].isna().all()
+    if has_cum and has_int:
+        x = np.arange(len(ut_list))
+        w_b = 0.30
+        for i, (col_key, label_s, color_s, hatch_s) in enumerate([
+            ('mean_MR',       'Cumulative MR', '#BDBDBD', '//'),
+            ('mean_inter_MR', 'Interval MR',   '#1976D2', ''),
+        ]):
+            vals = []
+            for ut in ut_list:
+                sub = agg[agg['update_type']==ut]
+                vals.append(sub[col_key].mean() if not sub.empty else 0.0)
+            ax.bar(x + (i - 0.5)*w_b, vals, w_b,
+                   label=label_s, color=color_s, hatch=hatch_s,
+                   edgecolor='white', alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels([UPDATE_TYPE_LABEL_EN.get(u,f'type{u}') for u in ut_list],
+                           rotation=15, ha='right', fontsize=8)
+        ax.set_ylabel('Miss Rate', fontsize=9)
+        ax.set_title('(e) Cumulative vs Interval MR\n'
+                     'gray=cumulative(warm-up bias)  blue=interval(real-time)\n'
+                     'large gap -> warm-up dominates cumulative metric', fontsize=9)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax.text(0.5, 0.5, 'No interval MR data', ha='center', va='center',
+                transform=ax.transAxes, color='gray')
+        ax.axis('off')
+
+    plt.suptitle(
+        f'[Interval Analysis] Request volume & baseline delta  |  Trace: {trace}\n'
+        '(a)(b): volume check  (c): per-window delta  (d): vol-weighted K-curve  (e): cumul vs interval',
+        fontsize=10,
+    )
+    plt.tight_layout()
+    fpath = os.path.join(out_dir, f'{trace}_fig6_interval_analysis.png')
     plt.savefig(fpath, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'  Saved: {fpath}')
@@ -1381,6 +1653,7 @@ def run_one_trace(meta_trace, trace: str, out_dir: str, w_mr: float = 0.5, w_bmr
     plot_size_correction(agg,    out_dir, trace)   # fig3
     plot_pareto(agg,             out_dir, trace)   # fig4: Pareto + combined ranking
     plot_baseline_comparison(agg, out_dir, trace) # fig5: LRU/M1 vs M2 baseline
+    plot_interval_analysis(agg, master, out_dir, trace) # fig6: interval & volume analysis
 
     # Add combined score to agg CSV
     scored = combined_score(agg, w_mr=w_mr, w_bmr=w_bmr)
@@ -1397,6 +1670,7 @@ def run_one_trace(meta_trace, trace: str, out_dir: str, w_mr: float = 0.5, w_bmr
     print(f"     {trace}_fig3_size_correction.png")
     print(f"     {trace}_fig4_pareto_combined.png     <- Pareto + combined ranking")
     print(f"     {trace}_fig5_baseline_comparison.png  <- LRU/M1/M2 comparison (if columns present)")
+    print(f"     {trace}_fig6_interval_analysis.png    <- volume check / delta / vw-K-curve")
     print(f"     {trace}_agg.csv  (includes norm_MR, norm_BMR, combined_score)")
 
     return agg
