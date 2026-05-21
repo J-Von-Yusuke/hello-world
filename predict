@@ -303,8 +303,11 @@ FEATURE_NAMES = [
     "mean_drift", "std_drift", "max_drift", "drift_trend",
     "byte_concentration", "byte_gini", "byte_mean_size",
     "cv_dist",
-    # 区間ミス率（利用可能な場合のみ有効値; NaN の場合は列平均で補完）
-    "mean_inter_mr", "std_inter_mr", "mean_delta_mr_lru", "byte_vol_cv",
+    # byte_vol_cv: req_byte の変動係数（ワークロード特性 — 提案手法の出力ではない）
+    # NOTE: mean_inter_mr / std_inter_mr / mean_delta_mr_lru は提案手法の効果測定値
+    #       (ラベル/結果)であり、「どのパラメータを選ぶか」の入力特徴量として
+    #       使用するのは循環参照になるため削除。
+    "byte_vol_cv",
 ]
 
 FEATURE_EXPLANATION = {
@@ -322,12 +325,8 @@ FEATURE_EXPLANATION = {
     "byte_concentration": "Fraction of BYTES carried by top-3 largest size buckets",
     "byte_gini":          "Gini of byte-weighted distribution (high=bytes concentrated in large files)",
     "byte_mean_size":     "Byte-weighted mean bucket index (higher=traffic dominated by large files)",
-    "cv_dist":            "Mean coefficient of variation of per-bucket request counts over time",
-    # 区間ミス率（interval列がある場合のみ）
-    "mean_inter_mr":      "Mean per-window interval miss ratio (real-time MR, not cumulative)",
-    "std_inter_mr":       "Std dev of per-window interval miss ratio (temporal variability of MR)",
-    "mean_delta_mr_lru":  "Mean (inter_MR - inter_MR_LRU) per window; negative = better than LRU",
-    "byte_vol_cv":        "CV of req_byte across windows (high=bursty byte traffic)",
+    "cv_dist":     "Mean coefficient of variation of per-bucket request counts over time",
+    "byte_vol_cv": "CV of req_byte across windows (high=bursty byte traffic) — workload characteristic",
 }
 
 
@@ -905,418 +904,708 @@ def write_text_report(result_k: dict,
 # 実験トレース向けオンライン予測
 # ══════════════════════════════════════════════════════════════════════════════
 
-def recommend_update_strategy() -> str:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Window-based aligned feature extraction (per-window, cross-condition)
+# ──────────────────────────────────────────────────────────────────────────────
+# Design rationale:
+#   Load ALL condition CSVs for one trace simultaneously, align by time window.
+#   At each window t, compare all (K, sc, update_type) conditions and label
+#   the best one. Features come from view_counts_now only (workload, not method).
+#
+#   Removed from features (method outcomes, not workload inputs):
+#     - miss_ratio, inter_miss_ratio  -> label side
+#     - mean_delta_mr_lru             -> label side
+#
+#   Valid workload features:
+#     - view_counts_now statistics (entropy, gini, concentration)
+#     - JS(view_counts_now[t-1], view_counts_now[t])  pure drift
+#     - n_req, req_byte
+#     - inter_miss_ratio_lru  (LRU difficulty, independent of our method)
+# ══════════════════════════════════════════════════════════════════════════════
+
+WINDOW_FEATURE_NAMES = [
+    "wt_entropy", "wt_norm_entropy",
+    "wt_top1_conc", "wt_top3_conc",
+    "wt_gini", "wt_n_peaks", "wt_peak_bin",
+    "wt_js_vs_prev",
+    "wt_n_req", "wt_req_byte",
+    "wt_byte_concentration", "wt_byte_mean_size",
+    "wt_lru_cum_mr", "wt_lru_inter_mr",
+]
+
+WINDOW_FEATURE_EXPLANATION = {
+    "wt_entropy":            "Shannon entropy of view_counts_now at this window",
+    "wt_norm_entropy":       "Normalized entropy [0,1] at this window",
+    "wt_top1_conc":          "Top-1 bucket concentration at this window",
+    "wt_top3_conc":          "Top-3 bucket concentration at this window",
+    "wt_gini":               "Gini of request distribution at this window",
+    "wt_n_peaks":            "Number of local maxima in request distribution",
+    "wt_peak_bin":           "Most popular size bucket index at this window",
+    "wt_js_vs_prev":         "JS(view_counts_now[t-1], view_counts_now[t]) pure workload drift",
+    "wt_n_req":              "Number of requests in this window",
+    "wt_req_byte":           "Total byte volume in this window",
+    "wt_byte_concentration": "Fraction of bytes in top-3 size buckets at this window",
+    "wt_byte_mean_size":     "Byte-weighted mean bucket index at this window",
+    "wt_lru_cum_mr":         "Cumulative LRU miss ratio (workload difficulty, method-independent)",
+    "wt_lru_inter_mr":       "Interval LRU miss ratio (workload difficulty, method-independent)",
+}
+
+
+def extract_single_window_features(df, t):
     """
-    「並列シャドウ実行 + 遅延コミット」(Parallel Shadow + Deferred Commit) 戦略の説明文を返す。
-
-    設計根拠:
-    - WMAは履歴が必要なため「途中から有効化」が難しいが、
-      全 update_type を最初から並列に shadow 実行しておけばコストは軽い。
-    - 観測フェーズ終了時点で js_effective が最も小さい type をコミットする。
-    - 一度コミットした後は原則変更しない（ヒステリシス付き再評価で例外対応）。
+    Extract workload features for time window t from a DataFrame.
+    Uses view_counts_now (shared across all conditions) and LRU baseline only.
+    Does NOT use proposed-method outcomes (miss_ratio etc.).
     """
-    return textwrap.dedent(f"""
-    ═══════════════════════════════════════════════════════════════
-     更新戦略: 並列シャドウ実行 + 遅延コミット
-     (Parallel Shadow Execution + Deferred Commit)
-    ═══════════════════════════════════════════════════════════════
+    now_cols = find_series_cols(df, "view_counts_now")
+    if not now_cols or t >= len(df):
+        return None
 
-    Phase 1  [観測フェーズ: 最初の {SHADOW_OBSERVATION_WINDOWS} 窓]
-    ────────────────────────────────────────────────────────────────
-    - 4 種類の update_type (-1, 0, 1, 2) を並列にシャドウ実行する。
-      実際の閾値更新は行わず、各 type が適用された場合の
-      js_effective (=JS(view_counts_make, view_counts_now)) を記録。
-    - WMAは観測フェーズ中から履歴を蓄積するので、コミット後すぐ利用可能。
-    - ML予測モデル（本スクリプト）が推奨する K と sc もこの期間に確定する。
+    B       = len(now_cols)
+    bin_idx = np.arange(B)
+    now_t   = df[now_cols].iloc[t].values.astype(float)
+    prob_t  = to_prob(now_t)
 
-    Phase 2  [決定フェーズ: 窓 {SHADOW_OBSERVATION_WINDOWS} 時点]
-    ────────────────────────────────────────────────────────────────
-    - 4 type のうち mean(js_effective) が最小だった type をコミット。
-    - K と sc は ML予測値を採用（教師トレースで学習済みモデルを使用）。
-    - 推奨値と ML予測値が一致した type を最優先でコミット。
+    ent      = float(scipy_entropy(prob_t))
+    norm_ent = ent / np.log(B) if B > 1 else 0.0
+    sp       = np.sort(prob_t)[::-1]
+    top1     = float(sp[0])
+    top3     = float(sp[:3].sum())
+    gini     = gini_coeff(prob_t)
+    n_pk     = count_peaks(prob_t)
+    pk_bin   = int(np.argmax(prob_t))
 
-    Phase 3  [運用フェーズ: 窓 {SHADOW_OBSERVATION_WINDOWS}+ 以降]
-    ────────────────────────────────────────────────────────────────
-    - 一度コミットした設定は原則維持する。
-    - ドリフト監視: 各窓で js_inherent を計算し、
-        |js_inherent_current - js_inherent_initial| > {DRIFT_REEVAL_THRESHOLD}
-      が M 窓連続した場合のみ再評価をトリガー（M はハイパーパラメータ）。
-    - 再評価時は Phase 1 に戻り、再び {SHADOW_OBSERVATION_WINDOWS} 窓の
-      シャドウ観測を行ってからコミットし直す（二重コミット防止）。
+    if t > 0:
+        now_prev = df[now_cols].iloc[t - 1].values.astype(float)
+        js_prev  = js_div(to_prob(now_prev), prob_t)
+    else:
+        js_prev  = 0.0
 
-    利点
-    ────────────────────────────────────────────────────────────────
-    - WMA の履歴問題を「観測フェーズ中の事前暖気」で解決。
-    - 逐次更新より安定（ヒステリシスにより短期ノイズを無視できる）。
-    - 「決めたら変えない」方針でキャッシュの安定性を確保しつつ、
-      長期ドリフトへの適応も可能。
+    def _sc(col):
+        if col in df.columns:
+            return float(pd.to_numeric(df[col].iloc[t], errors="coerce"))
+        return np.nan
 
-    """).strip()
+    n_req    = _sc("n_req")
+    req_byte = _sc("req_byte")
+
+    byte_w  = np.power(2.0, bin_idx.astype(float))
+    byte_d  = prob_t * byte_w
+    byte_dn = byte_d / (byte_d.sum() + EPSILON)
+    byte_t3 = float(np.sort(byte_dn)[::-1][:3].sum())
+    byte_ms = float(np.dot(bin_idx, byte_dn))
+
+    lru_cum   = _sc("miss_ratio_lru")
+    lru_inter = _sc("inter_miss_ratio_lru")
+
+    return {
+        "wt_entropy":            ent,
+        "wt_norm_entropy":       norm_ent,
+        "wt_top1_conc":          top1,
+        "wt_top3_conc":          top3,
+        "wt_gini":               gini,
+        "wt_n_peaks":            n_pk,
+        "wt_peak_bin":           pk_bin,
+        "wt_js_vs_prev":         js_prev,
+        "wt_n_req":              n_req,
+        "wt_req_byte":           req_byte,
+        "wt_byte_concentration": byte_t3,
+        "wt_byte_mean_size":     byte_ms,
+        "wt_lru_cum_mr":         lru_cum,
+        "wt_lru_inter_mr":       lru_inter,
+    }
+
+
+def compute_pareto_front(perf_dict):
+    """
+    Given {key: {"mr": float, "bmr": float}},
+    return keys on the Pareto front (not dominated in MR+BMR space).
+    key_j dominates key_i iff mr_j<=mr_i AND bmr_j<=bmr_i AND at least one <.
+    """
+    valid = {k: v for k, v in perf_dict.items()
+             if not (np.isnan(v.get("mr", np.nan)) or np.isnan(v.get("bmr", np.nan)))}
+    dominated = set()
+    keys = list(valid.keys())
+    for ki in keys:
+        vi = valid[ki]
+        for kj in keys:
+            if ki == kj:
+                continue
+            vj = valid[kj]
+            if (vj["mr"] <= vi["mr"] and vj["bmr"] <= vi["bmr"] and
+                    (vj["mr"] < vi["mr"] or vj["bmr"] < vi["bmr"])):
+                dominated.add(ki)
+                break
+    return set(keys) - dominated
+
+
+def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=0.5):
+    """
+    Build per-window samples by aligning all condition CSVs for each trace.
+
+    Correct design for online parameter selection:
+      - 1 row = (trace, time window t)
+      - Features = workload state at window t (shared across all conditions)
+      - Label = which (K, sc, update_type) is best at window t
+
+    This avoids the per-file design flaw where identical workload distributions
+    appear as separate (and supposedly different) training samples.
+
+    target: "mr" | "bmr" | "combined" | "pareto"
+    """
+    all_rows = []
+
+    for trace_name, grp in trace_meta.groupby("trace"):
+        cond_dfs = {}
+        for _, row in grp.iterrows():
+            key = (int(row["k"]), int(row["size_correction"]), int(row["update_type"]))
+            try:
+                df = pd.read_csv(row["filepath"])
+                df.columns = df.columns.str.strip().str.lower()
+                cond_dfs[key] = df
+            except Exception as e:
+                print(f"  [load error] {row['filepath']}: {e}")
+        if not cond_dfs:
+            continue
+
+        ref_df = next(
+            (df for df in cond_dfs.values() if "miss_ratio_lru" in df.columns),
+            list(cond_dfs.values())[0],
+        )
+        T = len(ref_df)
+
+        mr_all, bmr_all = [], []
+        for df in cond_dfs.values():
+            if "miss_ratio"      in df.columns:
+                mr_all.extend( pd.to_numeric(df["miss_ratio"],      errors="coerce").dropna())
+            if "miss_byte_ratio" in df.columns:
+                bmr_all.extend(pd.to_numeric(df["miss_byte_ratio"], errors="coerce").dropna())
+        mr_min,  mr_max  = (float(min(mr_all)),  float(max(mr_all)))  if mr_all  else (0.0, 1.0)
+        bmr_min, bmr_max = (float(min(bmr_all)), float(max(bmr_all))) if bmr_all else (0.0, 1.0)
+        mr_r  = mr_max  - mr_min  if mr_max  > mr_min  else 1.0
+        bmr_r = bmr_max - bmr_min if bmr_max > bmr_min else 1.0
+
+        for t in range(T):
+            wt_feat = extract_single_window_features(ref_df, t)
+            if wt_feat is None:
+                continue
+
+            perf_t = {}
+            for key, df in cond_dfs.items():
+                if t >= len(df):
+                    continue
+                mr  = float(pd.to_numeric(df["miss_ratio"].iloc[t],      errors="coerce"))                       if "miss_ratio"      in df.columns else np.nan
+                bmr = float(pd.to_numeric(df["miss_byte_ratio"].iloc[t], errors="coerce"))                       if "miss_byte_ratio" in df.columns else np.nan
+                perf_t[key] = {"mr": mr, "bmr": bmr}
+            if not perf_t:
+                continue
+
+            scores = {}
+            for key, v in perf_t.items():
+                if np.isnan(v["mr"]) or np.isnan(v["bmr"]):
+                    continue
+                if target == "mr":
+                    scores[key] = v["mr"]
+                elif target == "bmr":
+                    scores[key] = v["bmr"]
+                else:
+                    scores[key] = (w_mr * (v["mr"] - mr_min) / mr_r
+                                   + w_bmr * (v["bmr"] - bmr_min) / bmr_r)
+            if not scores:
+                continue
+
+            best_key          = min(scores, key=scores.get)
+            opt_k, opt_sc, opt_ut = best_key
+
+            pareto_keys = compute_pareto_front(perf_t)
+            if pareto_keys:
+                p_sc = {k: scores[k] for k in pareto_keys if k in scores}
+                par_best = min(p_sc, key=p_sc.get) if p_sc else best_key
+            else:
+                par_best = best_key
+            par_k, par_sc, par_ut = par_best
+
+            all_rows.append({
+                "trace":               trace_name,
+                "window":              t,
+                "optimal_K":           opt_k,
+                "optimal_sc":          opt_sc,
+                "optimal_update_type": opt_ut,
+                "pareto_K":            par_k,
+                "pareto_sc":           par_sc,
+                "pareto_update_type":  par_ut,
+                **wt_feat,
+            })
+
+    return pd.DataFrame(all_rows)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Online prediction and update strategy
+# ══════════════════════════════════════════════════════════════════════════════
+
+def recommend_update_strategy():
+    """Return Parallel Shadow + Deferred Commit strategy description."""
+    return "\n".join([
+        "=" * 63,
+        " Update Strategy: Parallel Shadow + Deferred Commit",
+        "=" * 63,
+        "",
+        f"Phase 1  [Observation: first {SHADOW_OBSERVATION_WINDOWS} windows]",
+        "-" * 63,
+        "  Run all 4 update_types (-1,0,1,2) in shadow (no commit).",
+        "  Record js_effective for each type per window.",
+        "  WMA history is pre-warmed during this phase.",
+        "  ML model predicts K and sc from workload features.",
+        "",
+        f"Phase 2  [Decision: at window {SHADOW_OBSERVATION_WINDOWS}]",
+        "-" * 63,
+        "  Commit the type with minimum mean(js_effective).",
+        "  Apply ML-predicted K and sc.",
+        "",
+        f"Phase 3  [Operation: window {SHADOW_OBSERVATION_WINDOWS}+]",
+        "-" * 63,
+        "  Settings remain fixed (no frequent changes).",
+        f"  Re-evaluate if |js_inherent_delta| > {DRIFT_REEVAL_THRESHOLD:.2f} for M windows.",
+        "  If triggered, repeat Phase 1 (pre-warm WMA again).",
+        "",
+        "Advantages:",
+        "  - WMA history problem solved by pre-warming in Phase 1.",
+        "  - Hysteresis prevents short-term noise instability.",
+        "  - Set-and-forget policy ensures cache stability.",
+        "=" * 63,
+    ])
 
 
 
 
 def predict_for_experiment_traces(
-        experiment_filepaths: list[str],
-        result_k:   dict,
-        result_sc:  dict,
-        result_ut:  dict,
-        feature_names_used: list[str],
-        out_dir: str,
-        label: str,
-) -> "pd.DataFrame":
+        experiment_meta,
+        result_k, result_sc, result_ut,
+        feature_names_used,
+        out_dir, label,
+        target="combined", w_mr=0.5, w_bmr=0.5,
+):
     """
-    Experiment trace CSV files -> extract features -> predict K/sc/update_type.
+    Online evaluation for experiment traces.
+
+    Core idea (per user request):
+      - Load ALL condition CSV files for each experiment trace (K x sc x update_type).
+      - At each window t:
+          * Ground truth  = best (K, sc, update_type) at window t
+                            (determined by comparing all conditions, same as teacher phase)
+          * Prediction    = model output using features from window t-1
+                            (simulates real-time decision: "what to use next window?")
+      - Compare prediction vs ground truth => online accuracy metric.
+
+    Note on distribution shapes:
+      For the same (sc, update_type), view_counts_make evolves identically regardless
+      of K (K only shifts threshold positions, not the MA update logic).
+      So the 2 x 4 = 8 shape families are correctly captured across conditions.
 
     Parameters
     ----------
-    experiment_filepaths : list[str]
-    result_k, result_sc, result_ut : dict  (from train_and_evaluate)
-    feature_names_used : list[str]
-    out_dir, label : str
-
-    Returns
-    -------
-    pd.DataFrame  with pred_K, pred_sc, pred_update_type per file
+    experiment_meta : pd.DataFrame   full collect_csvs() output for experiment traces
+    result_k/sc/ut  : dict           trained models from run_prediction()
+    feature_names_used : list[str]   must be WINDOW_FEATURE_NAMES subset
+    target          : str            "mr" | "bmr" | "combined" | "pareto"
+    w_mr, w_bmr     : float          weights for combined score
     """
+    # Step 1: build the same aligned ground-truth matrix as the teacher phase
+    aligned_df = build_aligned_feature_matrix(
+        experiment_meta, target=target, w_mr=w_mr, w_bmr=w_bmr
+    )
+    if aligned_df.empty:
+        print("  [warning] No valid experiment trace windows.")
+        return pd.DataFrame()
+
+    # Label column names depend on target
+    if target == "pareto":
+        lbl_k, lbl_sc, lbl_ut = "pareto_K", "pareto_sc", "pareto_update_type"
+    else:
+        lbl_k, lbl_sc, lbl_ut = "optimal_K", "optimal_sc", "optimal_update_type"
+
+    # Step 2: for each window t, predict with features from t-1, compare to truth at t
     rows = []
-    for fp in experiment_filepaths:
-        info = parse_filename(fp)
-        if info is None:
-            print(f"  [skip] Not SIZEDIVIDE format: {fp}")
-            continue
+    for trace_name, grp in aligned_df.groupby("trace"):
+        grp = grp.sort_values("window").reset_index(drop=True)
+        T   = len(grp)
 
-        feat = extract_features(fp)
-        if feat is None:
-            print(f"  [skip] Feature extraction failed: {fp}")
-            continue
+        for t in range(1, T):          # t=0 has no t-1, skip
+            # --- features at t-1 (what we observe before deciding for t) ---
+            feat_prev = {fn: grp.loc[t - 1, fn]
+                         for fn in feature_names_used if fn in grp.columns}
 
-        x_vec = np.array([feat.get(fn, np.nan) for fn in feature_names_used],
-                         dtype=float).reshape(1, -1)
-        nan_mask = np.isnan(x_vec)
-        if nan_mask.any():
-            x_vec[nan_mask] = 0.0
+            x_vec = np.array(
+                [feat_prev.get(fn, 0.0) for fn in feature_names_used],
+                dtype=float,
+            ).reshape(1, -1)
+            x_vec[np.isnan(x_vec)] = 0.0
 
-        pred_k = info["k"];            conf_k = np.nan
-        pred_sc = info["size_correction"]; conf_sc = np.nan
-        pred_ut = info["update_type"]; conf_ut = np.nan
+            def _pred(res):
+                if res.get("model") is None:
+                    return None, np.nan
+                proba = res["model"].predict_proba(x_vec)[0]
+                idx   = int(np.argmax(proba))
+                val   = int(res["le"].inverse_transform([idx])[0])
+                return val, float(proba[idx])
 
-        if result_k.get("model") is not None:
-            proba = result_k["model"].predict_proba(x_vec)[0]
-            idx   = int(np.argmax(proba))
-            pred_k = int(result_k["le"].inverse_transform([idx])[0])
-            conf_k = float(proba[idx])
+            pk,  ck  = _pred(result_k)
+            psc, csc = _pred(result_sc)
+            put, cut = _pred(result_ut)
 
-        if result_sc.get("model") is not None:
-            proba = result_sc["model"].predict_proba(x_vec)[0]
-            idx   = int(np.argmax(proba))
-            pred_sc = int(result_sc["le"].inverse_transform([idx])[0])
-            conf_sc = float(proba[idx])
+            # --- ground truth at t ---
+            true_k  = int(grp.loc[t, lbl_k])
+            true_sc = int(grp.loc[t, lbl_sc])
+            true_ut = int(grp.loc[t, lbl_ut])
 
-        if result_ut.get("model") is not None:
-            proba = result_ut["model"].predict_proba(x_vec)[0]
-            idx   = int(np.argmax(proba))
-            pred_ut = int(result_ut["le"].inverse_transform([idx])[0])
-            conf_ut = float(proba[idx])
-
-        rows.append({
-            "trace":            info["trace"],
-            "filepath":         fp,
-            "file_k":           info["k"],
-            "file_sc":          info["size_correction"],
-            "file_update_type": info["update_type"],
-            "pred_K":           pred_k,
-            "conf_K":           conf_k,
-            "pred_sc":          pred_sc,
-            "conf_sc":          conf_sc,
-            "pred_update_type": pred_ut,
-            "conf_update_type": conf_ut,
-            **{fn: feat.get(fn, np.nan) for fn in feature_names_used},
-        })
+            rows.append({
+                "trace":             trace_name,
+                "window":            t,
+                # ground truth at t
+                "true_K":            true_k,
+                "true_sc":           true_sc,
+                "true_update_type":  true_ut,
+                # prediction from t-1
+                "pred_K":            pk,
+                "conf_K":            ck,
+                "pred_sc":           psc,
+                "conf_sc":           csc,
+                "pred_update_type":  put,
+                "conf_update_type":  cut,
+                # correctness flags
+                "hit_K":             int(pk  == true_k)  if pk  is not None else 0,
+                "hit_sc":            int(psc == true_sc) if psc is not None else 0,
+                "hit_ut":            int(put == true_ut) if put is not None else 0,
+                "hit_all":           int(pk == true_k and psc == true_sc and put == true_ut)
+                                     if None not in (pk, psc, put) else 0,
+                # t-1 features for reference
+                **{fn: feat_prev.get(fn, np.nan) for fn in feature_names_used},
+            })
 
     if not rows:
-        print("  [warning] No valid experiment traces.")
+        print("  [warning] No windows with t-1 predecessor.")
         return pd.DataFrame()
 
     pred_df = pd.DataFrame(rows)
 
-    # ---- text report ---------------------------------------------------
-    lines_out = []
-    sep = "=" * 72
-    lines_out.append(sep)
-    lines_out.append(f"  実験トレース オンライン予測レポート  |  Label: {label}")
-    lines_out.append(sep)
-    lines_out.append("")
-    lines_out.append(recommend_update_strategy())
-    lines_out.append("")
-    lines_out.append("── ML予測結果（実験トレース別） " + "─" * 38)
-    lines_out.append("")
+    # Step 3: accuracy per trace + overall
+    report_lines = [
+        "=" * 72,
+        f"  Experiment Trace Online Prediction Report  |  Label: {label}",
+        f"  target={target}   evaluation: predict(t-1 features) vs best(t)",
+        "=" * 72,
+        "",
+        recommend_update_strategy(),
+        "",
+        "--- Per-Trace Accuracy ---",
+        "",
+    ]
 
     for trace_name, grp in pred_df.groupby("trace"):
-        def _mode(s):
-            vc = s.value_counts()
+        n = len(grp)
+        acc_k  = grp["hit_K"].mean()
+        acc_sc = grp["hit_sc"].mean()
+        acc_ut = grp["hit_ut"].mean()
+        acc_all = grp["hit_all"].mean()
+        # mode of predictions (overall recommendation)
+        def _mode(col):
+            vc = grp[col].value_counts()
             return vc.index[0] if len(vc) > 0 else None
+        rec_k  = _mode("pred_K")
+        rec_sc = _mode("pred_sc")
+        rec_ut = _mode("pred_update_type")
+        ut_lbl = UPDATE_TYPE_LABEL_EN.get(rec_ut, str(rec_ut))
 
-        rec_k  = _mode(grp["pred_K"])
-        rec_sc = _mode(grp["pred_sc"])
-        rec_ut = _mode(grp["pred_update_type"])
-        ut_label = UPDATE_TYPE_LABEL_EN.get(rec_ut, str(rec_ut))
+        report_lines += [
+            f"  Trace: {trace_name}  (n_windows={n})",
+            f"    K           accuracy (t-1 -> t): {acc_k:.1%}",
+            f"    sc          accuracy (t-1 -> t): {acc_sc:.1%}",
+            f"    update_type accuracy (t-1 -> t): {acc_ut:.1%}",
+            f"    all-correct accuracy (t-1 -> t): {acc_all:.1%}",
+            f"    Most-frequent prediction:  K={rec_k}, sc={rec_sc}, "
+            f"update_type={rec_ut} ({ut_lbl})",
+            "",
+            f"    Parallel Shadow + Deferred Commit steps:",
+            f"      1. Shadow-run all update_types for {SHADOW_OBSERVATION_WINDOWS} windows",
+            f"      2. Commit type with min js_effective (ML recommends: {rec_ut})",
+            f"      3. Apply K={rec_k}, sc={rec_sc} -> start normal operation",
+            f"      4. Re-evaluate if js_inherent drift > {DRIFT_REEVAL_THRESHOLD:.2f}",
+            "",
+        ]
 
-        lines_out.append(f"  Trace: {trace_name}")
-        lines_out.append(f"    推奨 K           : {rec_k}  (avg conf={grp['conf_K'].mean():.2f})")
-        lines_out.append(f"    推奨 sc          : {rec_sc}  (avg conf={grp['conf_sc'].mean():.2f})")
-        lines_out.append(f"    推奨 update_type : {rec_ut} ({ut_label})")
-        lines_out.append(f"                       avg conf={grp['conf_update_type'].mean():.2f}")
-        lines_out.append(f"    対象ファイル数   : {len(grp)}")
-        lines_out.append("")
-        lines_out.append("    Parallel Shadow + Deferred Commit 運用手順:")
-        lines_out.append(f"      1. 最初の {SHADOW_OBSERVATION_WINDOWS} 窓で全 update_type を並列シャドウ実行")
-        lines_out.append(f"      2. js_effective が最小の type を採用（ML推奨: {rec_ut}）")
-        lines_out.append(f"      3. K={rec_k}, sc={rec_sc} を適用して通常運用を開始")
-        lines_out.append(f"      4. js_inherent 変動が >{DRIFT_REEVAL_THRESHOLD:.2f} で M 窓連続したら再評価")
-        lines_out.append("")
+    # Overall accuracy
+    n_total = len(pred_df)
+    report_lines += [
+        "--- Overall ---",
+        f"  total windows evaluated: {n_total}",
+        f"  K           accuracy: {pred_df['hit_K'].mean():.1%}",
+        f"  sc          accuracy: {pred_df['hit_sc'].mean():.1%}",
+        f"  update_type accuracy: {pred_df['hit_ut'].mean():.1%}",
+        f"  all-correct accuracy: {pred_df['hit_all'].mean():.1%}",
+        "=" * 72,
+    ]
 
-    lines_out.append(sep)
+    rpath = os.path.join(out_dir, f"{label}_experiment_predictions.txt")
+    with open(rpath, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(report_lines))
+    print(f"  Saved: {rpath}")
 
-    report_path = os.path.join(out_dir, f"{label}_experiment_predictions.txt")
-    with open(report_path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines_out))
-    print(f"  Saved: {report_path}")
+    cpath = os.path.join(out_dir, f"{label}_experiment_predictions.csv")
+    pred_df.to_csv(cpath, index=False, encoding="utf-8-sig")
+    print(f"  Saved: {cpath}")
 
-    csv_path = os.path.join(out_dir, f"{label}_experiment_predictions.csv")
-    pred_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    print(f"  Saved: {csv_path}")
+    # Accuracy summary plot
+    _plot_experiment_accuracy(pred_df, out_dir, label)
 
     return pred_df
 
 
+def _plot_experiment_accuracy(pred_df, out_dir, label):
+    """Per-window hit rate plot for experiment trace evaluation."""
+    if pred_df.empty:
+        return
+    traces = pred_df["trace"].unique()
+    n_tr = len(traces)
+    fig, axes = plt.subplots(n_tr, 1, figsize=(14, 3 * n_tr), squeeze=False)
+
+    for ax, trace_name in zip(axes[:, 0], traces):
+        grp = pred_df[pred_df["trace"] == trace_name].sort_values("window")
+        ws  = grp["window"].values
+        # rolling accuracy (window=20)
+        for col, color, lbl in [
+            ("hit_K",  "#1976D2", "K"),
+            ("hit_sc", "#388E3C", "sc"),
+            ("hit_ut", "#F57C00", "update_type"),
+            ("hit_all","#9C27B0", "all"),
+        ]:
+            roll = pd.Series(grp[col].values).rolling(20, min_periods=1).mean().values
+            ax.plot(ws, roll, color=color, linewidth=1.2, label=lbl)
+
+        ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+        ax.set_ylim(0, 1.05)
+        ax.set_title(f"Trace: {trace_name}  |  rolling-20 hit rate (predict t-1 -> t)")
+        ax.set_xlabel("Window t")
+        ax.set_ylabel("Hit rate")
+        ax.legend(fontsize=8, ncol=4)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fpath = os.path.join(out_dir, f"{label}_experiment_accuracy.png")
+    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {fpath}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# メイン処理
+# Main pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_prediction(meta: pd.DataFrame,
-                   label: str,
-                   out_dir: str,
-                   target: str = "combined",
-                   w_mr: float = 0.5,
-                   w_bmr: float = 0.5,
-                   max_depth: int = 4) -> dict:
+def run_prediction(meta, label, out_dir,
+                   target="combined", w_mr=0.5, w_bmr=0.5, max_depth=4):
     """
-    教師データ (meta) を使って K・sc・update_type の予測モデルを学習・評価する。
+    Train prediction models using aligned per-window features.
 
-    Returns
-    -------
-    dict: result_k, result_sc, result_ut, feature_names_used, feat_df
-          (失敗時は空 dict)
+    target: "mr" | "bmr" | "combined" | "pareto"
+      mr       -> label = condition minimising MR at each window
+      bmr      -> label = condition minimising BMR at each window
+      combined -> label = condition minimising w_mr*norm_MR + w_bmr*norm_BMR
+      pareto   -> label = Pareto-front representative at each window
+
+    Returns dict with result_k, result_sc, result_ut, feature_names_used, aligned_df.
     """
-    print(f"\n  [1/6] 性能データを読み込んで最適条件を決定中...")
-    perf_df = determine_targets(meta, target=target, w_mr=w_mr, w_bmr=w_bmr)
-    if perf_df.empty:
-        print("  [スキップ] 有効データなし")
+    print(f"\n  [1/6] Building aligned per-window feature matrix...")
+    aligned_df = build_aligned_feature_matrix(meta, target=target,
+                                              w_mr=w_mr, w_bmr=w_bmr)
+    if aligned_df.empty:
+        print("  [skip] No valid data.")
         return {}
 
-    print(f"  [2/6] 特徴量を抽出中 ({len(perf_df)} 条件)...")
-    feat_df = build_feature_matrix(perf_df)
-    if feat_df.empty:
-        print("  [スキップ] 特徴量抽出失敗")
-        return {}
+    feat_path = os.path.join(out_dir, f"{label}_aligned_features.csv")
+    aligned_df.to_csv(feat_path, index=False, encoding="utf-8-sig")
+    print(f"  Saved: {feat_path}  ({len(aligned_df)} window samples)")
 
-    feat_path = os.path.join(out_dir, f"{label}_features.csv")
-    feat_df.to_csv(feat_path, index=False, encoding="utf-8-sig")
-    print(f"  Saved: {feat_path}")
+    if target == "pareto":
+        lbl_k, lbl_sc, lbl_ut = "pareto_K", "pareto_sc", "pareto_update_type"
+    else:
+        lbl_k, lbl_sc, lbl_ut = "optimal_K", "optimal_sc", "optimal_update_type"
 
-    X = feat_df[[f for f in FEATURE_NAMES if f in feat_df.columns]].values.astype(float)
-    feature_names_used = [f for f in FEATURE_NAMES if f in feat_df.columns]
-
+    fn_used = [f for f in WINDOW_FEATURE_NAMES if f in aligned_df.columns]
+    X = aligned_df[fn_used].values.astype(float)
     col_means = np.nanmean(X, axis=0)
     inds = np.where(np.isnan(X))
     X[inds] = np.take(col_means, inds[1])
 
-    print(f"\n  [3/6] optimal_K を予測 (target={target})...")
-    y_k      = feat_df["optimal_K"].values.astype(int)
-    result_k = train_and_evaluate(X, y_k, feature_names_used, "optimal_K", max_depth)
-    print(f"         LOO accuracy = {result_k['accuracy']:.1%}")
+    print(f"  [2/6] Predict {lbl_k} (target={target}, n={len(X)})...")
+    y_k      = aligned_df[lbl_k].values.astype(int)
+    result_k = train_and_evaluate(X, y_k, fn_used, lbl_k, max_depth)
+    print(f"         accuracy = {result_k['accuracy']:.1%}")
     print(result_k["report"])
 
-    print(f"  [3/6] optimal_sc を予測 (target={target})...")
-    y_sc      = feat_df["optimal_sc"].values.astype(int)
-    result_sc = train_and_evaluate(X, y_sc, feature_names_used, "optimal_sc", max_depth)
-    print(f"         LOO accuracy = {result_sc['accuracy']:.1%}")
+    print(f"  [3/6] Predict {lbl_sc}...")
+    y_sc      = aligned_df[lbl_sc].values.astype(int)
+    result_sc = train_and_evaluate(X, y_sc, fn_used, lbl_sc, max_depth)
+    print(f"         accuracy = {result_sc['accuracy']:.1%}")
     print(result_sc["report"])
 
-    print(f"  [3/6] optimal_update_type を予測 (target={target})...")
-    y_ut      = feat_df["optimal_update_type"].values.astype(int)
-    result_ut = train_and_evaluate(X, y_ut, feature_names_used, "optimal_update_type", max_depth)
-    print(f"         LOO accuracy = {result_ut['accuracy']:.1%}")
+    print(f"  [4/6] Predict {lbl_ut}...")
+    y_ut      = aligned_df[lbl_ut].values.astype(int)
+    result_ut = train_and_evaluate(X, y_ut, fn_used, lbl_ut, max_depth)
+    print(f"         accuracy = {result_ut['accuracy']:.1%}")
     print(result_ut["report"])
 
-    print(f"\n  [4/6] 誤差分析中...")
-    errors_k  = analyze_errors(feat_df, y_k,  result_k["y_pred"],
-                               feature_names_used, result_k["importances"],  "optimal_K")
-    errors_sc = analyze_errors(feat_df, y_sc, result_sc["y_pred"],
-                               feature_names_used, result_sc["importances"], "optimal_sc")
-    errors_ut = analyze_errors(feat_df, y_ut, result_ut["y_pred"],
-                               feature_names_used, result_ut["importances"], "optimal_update_type")
-    print(f"         K           予測失敗: {len(errors_k)}  / {len(y_k)} 件")
-    print(f"         sc          予測失敗: {len(errors_sc)} / {len(y_sc)} 件")
-    print(f"         update_type 予測失敗: {len(errors_ut)} / {len(y_ut)} 件")
+    print(f"\n  [5/6] Error analysis...")
+    errors_k  = analyze_errors(aligned_df, y_k,  result_k["y_pred"],
+                               fn_used, result_k["importances"],  lbl_k)
+    errors_sc = analyze_errors(aligned_df, y_sc, result_sc["y_pred"],
+                               fn_used, result_sc["importances"], lbl_sc)
+    errors_ut = analyze_errors(aligned_df, y_ut, result_ut["y_pred"],
+                               fn_used, result_ut["importances"], lbl_ut)
+    print(f"         K           errors: {len(errors_k)}  / {len(y_k)}")
+    print(f"         sc          errors: {len(errors_sc)} / {len(y_sc)}")
+    print(f"         update_type errors: {len(errors_ut)} / {len(y_ut)}")
 
-    print(f"\n  [5/6] グラフとレポートを出力中...")
-    plot_prediction_result(feat_df, y_k,  result_k,  "optimal_K",           out_dir, label)
-    plot_prediction_result(feat_df, y_sc, result_sc, "optimal_sc",           out_dir, label)
-    plot_prediction_result(feat_df, y_ut, result_ut, "optimal_update_type",  out_dir, label)
-    plot_error_analysis(feat_df, errors_k, errors_sc,
+    print(f"\n  [6/6] Saving plots and reports...")
+    plot_prediction_result(aligned_df, y_k,  result_k,  lbl_k,  out_dir, label)
+    plot_prediction_result(aligned_df, y_sc, result_sc, lbl_sc, out_dir, label)
+    plot_prediction_result(aligned_df, y_ut, result_ut, lbl_ut, out_dir, label)
+    plot_error_analysis(aligned_df, errors_k, errors_sc,
                         result_k["importances"], result_sc["importances"],
                         out_dir, label)
-    write_text_report(result_k, result_sc, errors_k, errors_sc,
-                      feat_df, out_dir, label, target)
 
-    print(f"\n  [6/6] update_type 予測ルールをテキスト出力...")
-    ut_report_path = os.path.join(out_dir, f"{label}_update_type_rules.txt")
-    with open(ut_report_path, "w", encoding="utf-8") as fh:
-        fh.write(f"optimal_update_type 予測ルール  |  LOO accuracy={result_ut['accuracy']:.1%}\n")
+    ut_rpath = os.path.join(out_dir, f"{label}_update_type_rules.txt")
+    with open(ut_rpath, "w", encoding="utf-8") as fh:
+        fh.write(f"{lbl_ut} prediction rules  |  accuracy={result_ut['accuracy']:.1%}\n")
         fh.write("=" * 60 + "\n")
         fh.write(result_ut["rules_text"])
         fh.write("\n\n" + recommend_update_strategy())
-    print(f"  Saved: {ut_report_path}")
+    print(f"  Saved: {ut_rpath}")
 
-    print(f"\n  ── サマリー ({label}) ──")
-    print(f"     optimal_K           LOO accuracy: {result_k['accuracy']:.1%}")
-    print(f"     optimal_sc          LOO accuracy: {result_sc['accuracy']:.1%}")
-    print(f"     optimal_update_type LOO accuracy: {result_ut['accuracy']:.1%}")
-    print(f"     K           予測失敗: {len(errors_k)} 件")
-    print(f"     sc          予測失敗: {len(errors_sc)} 件")
-    print(f"     update_type 予測失敗: {len(errors_ut)} 件")
-    top_k_feat  = result_k["importances"].idxmax()
-    top_sc_feat = result_sc["importances"].idxmax()
-    top_ut_feat = result_ut["importances"].idxmax()
-    print(f"     K           予測の最重要特徴量: {top_k_feat}")
-    print(f"     sc          予測の最重要特徴量: {top_sc_feat}")
-    print(f"     update_type 予測の最重要特徴量: {top_ut_feat}")
+    print(f"\n  Summary ({label}):")
+    for lbl_name, res in [(lbl_k, result_k), (lbl_sc, result_sc), (lbl_ut, result_ut)]:
+        print(f"    {lbl_name:<30} accuracy={res['accuracy']:.1%}  "
+              f"top_feat={res['importances'].idxmax()}")
 
     return {
         "result_k":           result_k,
         "result_sc":          result_sc,
         "result_ut":          result_ut,
-        "feature_names_used": feature_names_used,
-        "feat_df":            feat_df,
+        "feature_names_used": fn_used,
+        "aligned_df":         aligned_df,
+        "target":             target,
+        "w_mr":               w_mr,
+        "w_bmr":              w_bmr,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="最適K・sc・update_type 予測（教師/実験トレース分割対応）",
+        description="Aligned per-window prediction: optimal K / sc / update_type",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
-        使用例:
-          # 全トレースで学習（TEACHER_TRACES/EXPERIMENT_TRACES をコード内にハードコーディング）
+        Examples:
+          # Teacher + experiment split (hardcoded lists)
           python predict_optimal_params.py --dir ./results --out ./output
 
-          # CLI で教師/実験トレースを明示指定
-          python predict_optimal_params.py --dir ./results --out ./output \\
+          # CLI override of trace lists
+          python predict_optimal_params.py --dir ./results \
               --teacher wiki2019 twitter --experiment cachelib_cdn01
 
-          # MR重視の combined score で学習
-          python predict_optimal_params.py --dir ./results --target combined --w-mr 0.7 --w-bmr 0.3
+          # BMR-only target
+          python predict_optimal_params.py --dir ./results --target bmr
 
-          # トレースごとに個別に予測
-          python predict_optimal_params.py --dir ./results --split-traces
+          # Pareto-optimal label
+          python predict_optimal_params.py --dir ./results --target pareto
+
+          # Weighted combined (MR=70%, BMR=30%)
+          python predict_optimal_params.py --dir ./results --target combined \
+              --w-mr 0.7 --w-bmr 0.3
         """),
     )
-    parser.add_argument("--dir",       required=True, help="CSVディレクトリ")
-    parser.add_argument("--out",       default="./output", help="出力ディレクトリ")
-    parser.add_argument("--target",    default="combined",
-                        choices=["mr", "bmr", "combined"],
-                        help="最適化ターゲット (default: combined)")
-    parser.add_argument("--w-mr",      type=float, default=0.5)
-    parser.add_argument("--w-bmr",     type=float, default=0.5)
-    parser.add_argument("--trace",     default=None,
-                        help="特定トレースのみ処理（教師側のみに適用）")
-    parser.add_argument("--split-traces", action="store_true",
-                        help="トレースごとに個別に予測（教師フェーズ）")
-    parser.add_argument("--label",     default=None,
-                        help="出力ファイル名プレフィックス（省略時: ディレクトリ名）")
-    parser.add_argument("--max-depth", type=int, default=4,
-                        help="決定木の最大深さ (default 4)")
-    parser.add_argument("--teacher",   nargs="*", default=None, metavar="TRACE",
-                        help="教師トレース名（複数可）。指定するとコード内 TEACHER_TRACES を上書き")
-    parser.add_argument("--experiment", nargs="*", default=None, metavar="TRACE",
-                        help="実験トレース名（複数可）。指定するとコード内 EXPERIMENT_TRACES を上書き")
+    parser.add_argument("--dir",        required=True)
+    parser.add_argument("--out",        default="./output")
+    parser.add_argument("--target",     default="combined",
+                        choices=["mr", "bmr", "combined", "pareto"])
+    parser.add_argument("--w-mr",       type=float, default=0.5)
+    parser.add_argument("--w-bmr",      type=float, default=0.5)
+    parser.add_argument("--trace",      default=None)
+    parser.add_argument("--split-traces", action="store_true")
+    parser.add_argument("--label",      default=None)
+    parser.add_argument("--max-depth",  type=int, default=4)
+    parser.add_argument("--teacher",    nargs="*", default=None, metavar="TRACE")
+    parser.add_argument("--experiment", nargs="*", default=None, metavar="TRACE")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
-
     total_w = args.w_mr + args.w_bmr
     w_mr  = args.w_mr  / total_w
     w_bmr = args.w_bmr / total_w
 
-    print("[1/3] CSVをスキャン中...")
+    print("[1/3] Scanning CSVs...")
     meta = collect_csvs(args.dir)
     all_traces = sorted(meta["trace"].unique())
-    print(f"  {len(meta)} 件, トレース={all_traces}")
+    print(f"  {len(meta)} files, traces={all_traces}")
 
     teacher_list    = args.teacher    if args.teacher    is not None else TEACHER_TRACES
     experiment_list = args.experiment if args.experiment is not None else EXPERIMENT_TRACES
-
     has_split = bool(teacher_list) or bool(experiment_list)
 
     if has_split:
         if not teacher_list:
-            teacher_list = [t for t in all_traces if t not in experiment_list]
+            teacher_list    = [t for t in all_traces if t not in experiment_list]
         if not experiment_list:
             experiment_list = [t for t in all_traces if t not in teacher_list]
-
         overlap = set(teacher_list) & set(experiment_list)
         if overlap:
-            print(f"  [警告] 教師と実験に重複トレースがあります: {overlap}")
+            print(f"  [warning] Overlap between teacher/experiment: {overlap}")
 
-        print(f"\n[2/3] 教師フェーズ: {teacher_list}")
+        print(f"\n[2/3] Teacher phase: {teacher_list}")
         meta_teacher = meta[meta["trace"].isin(teacher_list)].copy()
         if meta_teacher.empty:
-            raise ValueError(f"教師トレースが見つかりません: {teacher_list}")
-
+            raise ValueError(f"Teacher traces not found: {teacher_list}")
         label_teacher = args.label or f"{Path(args.dir).name}_teacher"
         trained = run_prediction(
             meta_teacher, label_teacher, args.out,
             target=args.target, w_mr=w_mr, w_bmr=w_bmr,
             max_depth=args.max_depth,
         )
-
         if not trained:
-            print("  [エラー] 教師フェーズで学習に失敗しました。")
+            print("  [error] Teacher phase failed.")
             return
 
-        print(f"\n[3/3] 実験フェーズ: {experiment_list}")
+        print(f"\n[3/3] Experiment phase: {experiment_list}")
         meta_exp = meta[meta["trace"].isin(experiment_list)].copy()
         if meta_exp.empty:
-            print(f"  [警告] 実験トレースが見つかりません: {experiment_list}")
+            print(f"  [warning] Experiment traces not found: {experiment_list}")
         else:
             label_exp = args.label or f"{Path(args.dir).name}_experiment"
             predict_for_experiment_traces(
-                experiment_filepaths = meta_exp["filepath"].tolist(),
-                result_k             = trained["result_k"],
-                result_sc            = trained["result_sc"],
-                result_ut            = trained["result_ut"],
-                feature_names_used   = trained["feature_names_used"],
-                out_dir              = args.out,
-                label                = label_exp,
+                experiment_meta    = meta_exp,
+                result_k           = trained["result_k"],
+                result_sc          = trained["result_sc"],
+                result_ut          = trained["result_ut"],
+                feature_names_used = trained["feature_names_used"],
+                out_dir            = args.out,
+                label              = label_exp,
+                target             = trained["target"],
+                w_mr               = trained["w_mr"],
+                w_bmr              = trained["w_bmr"],
             )
     else:
-        print(f"\n[2/3] 通常モードで学習中（教師/実験分割なし）...")
+        print("\n[2/3] Standard mode (no teacher/experiment split)...")
         if args.split_traces:
-            target_traces = all_traces
-            if args.trace:
-                target_traces = [args.trace]
-            for trace in target_traces:
-                meta_t = meta[meta["trace"] == trace].copy()
-                run_prediction(meta_t, trace, args.out,
+            tgt = [args.trace] if args.trace else all_traces
+            for tr in tgt:
+                mt = meta[meta["trace"] == tr].copy()
+                run_prediction(mt, tr, args.out,
                                target=args.target, w_mr=w_mr, w_bmr=w_bmr,
                                max_depth=args.max_depth)
         else:
             if args.trace:
                 meta = meta[meta["trace"] == args.trace].copy()
-            label = args.label or Path(args.dir).name
-            run_prediction(meta, label, args.out,
+            lbl = args.label or Path(args.dir).name
+            run_prediction(meta, lbl, args.out,
                            target=args.target, w_mr=w_mr, w_bmr=w_bmr,
                            max_depth=args.max_depth)
 
