@@ -51,7 +51,9 @@ from sklearn.metrics import (
     accuracy_score, confusion_matrix, classification_report,
     ConfusionMatrixDisplay
 )
-from sklearn.model_selection import LeaveOneOut, cross_val_predict
+from sklearn.model_selection import (
+    LeaveOneOut, LeaveOneGroupOut, TimeSeriesSplit, cross_val_predict,
+)
 
 # ── analyze_all_conditions.py と共通のユーティリティ ──────────────────────────
 EPSILON = 1e-10
@@ -445,13 +447,24 @@ def build_feature_matrix(perf_df: pd.DataFrame) -> pd.DataFrame:
 def train_and_evaluate(X: np.ndarray, y: np.ndarray,
                        feature_names: list,
                        target_name: str,
-                       max_depth: int = 4) -> dict:
+                       max_depth: int = 4,
+                       groups: np.ndarray | None = None) -> dict:
     """
-    決定木を LeaveOneOut 交差検証で評価する。
-    少数サンプルでも過学習の影響を確認できる。
+    Decision tree training with temporally-correct cross-validation.
+
+    CV strategy (avoids temporal leakage from autocorrelated windows):
+      - Multiple traces (groups != None, 2+ unique values):
+          LeaveOneGroupOut — train on all-but-one trace, test on held-out trace.
+          This is the correct evaluation for cross-trace generalisation.
+      - Single trace (no groups):
+          TimeSeriesSplit(n_splits=5) — train on past windows only.
+          Prevents future windows from leaking into training.
+      *** NOTE: StratifiedKFold/LOO on temporally-ordered windows is WRONG
+          because adjacent windows share high autocorrelation. ***
 
     Returns:
-        dict with keys: model, y_pred, accuracy, report, importances, rules_text
+        dict with keys: model, y_pred, accuracy, report, importances,
+                        rules_text, le, classes, cv_strategy (str)
     """
     le = LabelEncoder()
     y_enc = le.fit_transform(y)
@@ -477,14 +490,19 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray,
             "classes": le.classes_,
         }
 
-    # Leave-One-Out cross-validation
-    if len(X) <= 10:
-        cv = LeaveOneOut()
+    # Temporally-correct cross-validation
+    n_groups = len(np.unique(groups)) if groups is not None else 0
+    if groups is not None and n_groups >= 2:
+        # Leave-One-Trace-Out: no future/neighbour leakage between traces
+        cv             = LeaveOneGroupOut()
+        cv_strategy    = f"LeaveOneGroupOut ({n_groups} traces)"
+        y_pred_enc     = cross_val_predict(clf, X, y_enc, cv=cv, groups=groups)
     else:
-        from sklearn.model_selection import StratifiedKFold
-        cv = StratifiedKFold(n_splits=min(5, len(X)), shuffle=True, random_state=42)
-
-    y_pred_enc = cross_val_predict(clf, X, y_enc, cv=cv)
+        # Single-trace: strictly forward-looking splits
+        n_splits       = min(5, max(2, len(X) // 10))
+        cv             = TimeSeriesSplit(n_splits=n_splits)
+        cv_strategy    = f"TimeSeriesSplit (n_splits={n_splits})"
+        y_pred_enc     = cross_val_predict(clf, X, y_enc, cv=cv)
     y_pred     = le.inverse_transform(y_pred_enc)
     acc        = accuracy_score(y_enc, y_pred_enc)
     report     = classification_report(
@@ -507,6 +525,7 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray,
         "rules_text": rules_text,
         "le": le,
         "classes": le.classes_,
+        "cv_strategy": cv_strategy,
     }
 
 
@@ -1040,7 +1059,8 @@ def compute_pareto_front(perf_dict):
     return set(keys) - dominated
 
 
-def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=0.5):
+def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=0.5,
+                                  return_perf: bool = False):
     """
     Build per-window samples by aligning all condition CSVs for each trace.
 
@@ -1053,8 +1073,13 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
     appear as separate (and supposedly different) training samples.
 
     target: "mr" | "bmr" | "combined" | "pareto"
+
+    return_perf: if True, also return perf_matrix dict:
+        {trace_name: {window_t: {(K,sc,ut): {"mr": float, "bmr": float}}}}
+        Used by predict_for_experiment_traces() to compute regret.
     """
-    all_rows = []
+    all_rows   = []
+    perf_matrix: dict = {}   # only populated when return_perf=True
 
     for trace_name, grp in trace_meta.groupby("trace"):
         cond_dfs = {}
@@ -1068,6 +1093,9 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
                 print(f"  [load error] {row['filepath']}: {e}")
         if not cond_dfs:
             continue
+
+        if return_perf:
+            perf_matrix[trace_name] = {}
 
         ref_df = next(
             (df for df in cond_dfs.values() if "miss_ratio_lru" in df.columns),
@@ -1101,6 +1129,10 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
             if not perf_t:
                 continue
 
+            # Store raw per-condition performance for regret calculation
+            if return_perf:
+                perf_matrix[trace_name][t] = dict(perf_t)
+
             scores = {}
             for key, v in perf_t.items():
                 if np.isnan(v["mr"]) or np.isnan(v["bmr"]):
@@ -1117,6 +1149,11 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
 
             best_key          = min(scores, key=scores.get)
             opt_k, opt_sc, opt_ut = best_key
+
+            # score_margin: 1位と2位の差（小さいほどラベルノイズが大きい）
+            sorted_scores = sorted(scores.values())
+            score_margin  = float(sorted_scores[1] - sorted_scores[0]) \
+                            if len(sorted_scores) >= 2 else np.nan
 
             pareto_keys = compute_pareto_front(perf_t)
             if pareto_keys:
@@ -1135,10 +1172,14 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
                 "pareto_K":            par_k,
                 "pareto_sc":           par_sc,
                 "pareto_update_type":  par_ut,
+                "score_margin":        score_margin,
                 **wt_feat,
             })
 
-    return pd.DataFrame(all_rows)
+    df_out = pd.DataFrame(all_rows)
+    if return_perf:
+        return df_out, perf_matrix
+    return df_out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1190,75 +1231,108 @@ def predict_for_experiment_traces(
     """
     Online evaluation for experiment traces.
 
-    Core idea (per user request):
+    Core idea:
       - Load ALL condition CSV files for each experiment trace (K x sc x update_type).
       - At each window t:
-          * Ground truth  = best (K, sc, update_type) at window t
-                            (determined by comparing all conditions, same as teacher phase)
+          * Ground truth  = best (K, sc, update_type) at t
+                            (determined across all conditions, same as teacher phase)
           * Prediction    = model output using features from window t-1
-                            (simulates real-time decision: "what to use next window?")
-      - Compare prediction vs ground truth => online accuracy metric.
+                            (simulates real-time decision: what to use next window?)
+      - Compare prediction vs ground truth => classification accuracy + REGRET.
+
+    Regret (MR/BMR) at window t:
+      regret_mr  = MR(predicted_config_at_t)  - MR(best_config_at_t)  >= 0
+      regret_bmr = BMR(predicted_config_at_t) - BMR(best_config_at_t) >= 0
+
+    Baselines included for comparison:
+      Lag-1 : use optimal(t-1) as prediction for t (assumes config is stable)
+      Majority: always predict the most frequent optimal config in this trace
 
     Note on distribution shapes:
-      For the same (sc, update_type), view_counts_make evolves identically regardless
-      of K (K only shifts threshold positions, not the MA update logic).
+      For the same (sc, update_type), view_counts_make evolves identically
+      regardless of K (K only shifts threshold positions).
       So the 2 x 4 = 8 shape families are correctly captured across conditions.
-
-    Parameters
-    ----------
-    experiment_meta : pd.DataFrame   full collect_csvs() output for experiment traces
-    result_k/sc/ut  : dict           trained models from run_prediction()
-    feature_names_used : list[str]   must be WINDOW_FEATURE_NAMES subset
-    target          : str            "mr" | "bmr" | "combined" | "pareto"
-    w_mr, w_bmr     : float          weights for combined score
     """
-    # Step 1: build the same aligned ground-truth matrix as the teacher phase
-    aligned_df = build_aligned_feature_matrix(
-        experiment_meta, target=target, w_mr=w_mr, w_bmr=w_bmr
+    # Step 1: build aligned ground-truth matrix + raw per-condition performance
+    aligned_df, perf_matrix = build_aligned_feature_matrix(
+        experiment_meta, target=target, w_mr=w_mr, w_bmr=w_bmr, return_perf=True
     )
     if aligned_df.empty:
         print("  [warning] No valid experiment trace windows.")
         return pd.DataFrame()
 
-    # Label column names depend on target
     if target == "pareto":
         lbl_k, lbl_sc, lbl_ut = "pareto_K", "pareto_sc", "pareto_update_type"
     else:
         lbl_k, lbl_sc, lbl_ut = "optimal_K", "optimal_sc", "optimal_update_type"
 
-    # Step 2: for each window t, predict with features from t-1, compare to truth at t
+    def _pred(res):
+        if res.get("model") is None:
+            return None, np.nan
+        proba = res["model"].predict_proba(x_vec)[0]
+        idx   = int(np.argmax(proba))
+        val   = int(res["le"].inverse_transform([idx])[0])
+        return val, float(proba[idx])
+
     rows = []
     for trace_name, grp in aligned_df.groupby("trace"):
-        grp = grp.sort_values("window").reset_index(drop=True)
-        T   = len(grp)
+        grp  = grp.sort_values("window").reset_index(drop=True)
+        T    = len(grp)
+        tpm  = perf_matrix.get(trace_name, {})
 
-        for t in range(1, T):          # t=0 has no t-1, skip
-            # --- features at t-1 (what we observe before deciding for t) ---
+        # Majority baseline: most frequent optimal config across all windows
+        maj_k  = int(pd.Series(grp[lbl_k].values).mode()[0])
+        maj_sc = int(pd.Series(grp[lbl_sc].values).mode()[0])
+        maj_ut = int(pd.Series(grp[lbl_ut].values).mode()[0])
+
+        for t in range(1, T):
+            # ── features at t-1 (observed before deciding for t) ────────────
             feat_prev = {fn: grp.loc[t - 1, fn]
                          for fn in feature_names_used if fn in grp.columns}
-
             x_vec = np.array(
                 [feat_prev.get(fn, 0.0) for fn in feature_names_used],
                 dtype=float,
             ).reshape(1, -1)
             x_vec[np.isnan(x_vec)] = 0.0
 
-            def _pred(res):
-                if res.get("model") is None:
-                    return None, np.nan
-                proba = res["model"].predict_proba(x_vec)[0]
-                idx   = int(np.argmax(proba))
-                val   = int(res["le"].inverse_transform([idx])[0])
-                return val, float(proba[idx])
-
             pk,  ck  = _pred(result_k)
             psc, csc = _pred(result_sc)
             put, cut = _pred(result_ut)
 
-            # --- ground truth at t ---
+            # ── ground truth at t ───────────────────────────────────────────
             true_k  = int(grp.loc[t, lbl_k])
             true_sc = int(grp.loc[t, lbl_sc])
             true_ut = int(grp.loc[t, lbl_ut])
+
+            # ── actual performance at window t ──────────────────────────────
+            perf_at_t   = tpm.get(t, {})
+            true_key    = (true_k, true_sc, true_ut)
+            best_mr     = perf_at_t.get(true_key, {}).get("mr",  np.nan)
+            best_bmr    = perf_at_t.get(true_key, {}).get("bmr", np.nan)
+
+            # ML model regret
+            pred_key    = (pk, psc, put) if None not in (pk, psc, put) else None
+            chosen_mr   = perf_at_t.get(pred_key, {}).get("mr",  np.nan) if pred_key else np.nan
+            chosen_bmr  = perf_at_t.get(pred_key, {}).get("bmr", np.nan) if pred_key else np.nan
+            regret_mr   = float(chosen_mr  - best_mr)  if not (np.isnan(chosen_mr)  or np.isnan(best_mr))  else np.nan
+            regret_bmr  = float(chosen_bmr - best_bmr) if not (np.isnan(chosen_bmr) or np.isnan(best_bmr)) else np.nan
+
+            # Lag-1 baseline regret
+            lag_k   = int(grp.loc[t - 1, lbl_k])
+            lag_sc  = int(grp.loc[t - 1, lbl_sc])
+            lag_ut  = int(grp.loc[t - 1, lbl_ut])
+            lag_key = (lag_k, lag_sc, lag_ut)
+            lag_mr  = perf_at_t.get(lag_key, {}).get("mr",  np.nan)
+            lag_bmr = perf_at_t.get(lag_key, {}).get("bmr", np.nan)
+            regret_mr_lag1  = float(lag_mr  - best_mr)  if not (np.isnan(lag_mr)  or np.isnan(best_mr))  else np.nan
+            regret_bmr_lag1 = float(lag_bmr - best_bmr) if not (np.isnan(lag_bmr) or np.isnan(best_bmr)) else np.nan
+
+            # Majority baseline regret
+            maj_key    = (maj_k, maj_sc, maj_ut)
+            maj_mr_val = perf_at_t.get(maj_key, {}).get("mr",  np.nan)
+            maj_bmr_val= perf_at_t.get(maj_key, {}).get("bmr", np.nan)
+            regret_mr_maj  = float(maj_mr_val  - best_mr)  if not (np.isnan(maj_mr_val)  or np.isnan(best_mr))  else np.nan
+            regret_bmr_maj = float(maj_bmr_val - best_bmr) if not (np.isnan(maj_bmr_val) or np.isnan(best_bmr)) else np.nan
 
             rows.append({
                 "trace":             trace_name,
@@ -1267,19 +1341,38 @@ def predict_for_experiment_traces(
                 "true_K":            true_k,
                 "true_sc":           true_sc,
                 "true_update_type":  true_ut,
-                # prediction from t-1
+                # ML prediction from t-1
                 "pred_K":            pk,
                 "conf_K":            ck,
                 "pred_sc":           psc,
                 "conf_sc":           csc,
                 "pred_update_type":  put,
                 "conf_update_type":  cut,
-                # correctness flags
-                "hit_K":             int(pk  == true_k)  if pk  is not None else 0,
-                "hit_sc":            int(psc == true_sc) if psc is not None else 0,
-                "hit_ut":            int(put == true_ut) if put is not None else 0,
-                "hit_all":           int(pk == true_k and psc == true_sc and put == true_ut)
-                                     if None not in (pk, psc, put) else 0,
+                # correctness flags (ML model)
+                "hit_K":    int(pk  == true_k)  if pk  is not None else 0,
+                "hit_sc":   int(psc == true_sc) if psc is not None else 0,
+                "hit_ut":   int(put == true_ut) if put is not None else 0,
+                "hit_all":  int(pk == true_k and psc == true_sc and put == true_ut)
+                            if None not in (pk, psc, put) else 0,
+                # actual performance
+                "best_mr":           best_mr,
+                "best_bmr":          best_bmr,
+                "chosen_mr":         chosen_mr,
+                "chosen_bmr":        chosen_bmr,
+                # regret (ML model) — >= 0; 0 = perfect choice
+                "regret_mr":         regret_mr,
+                "regret_bmr":        regret_bmr,
+                # lag-1 baseline
+                "lag1_K":            lag_k,
+                "lag1_sc":           lag_sc,
+                "lag1_update_type":  lag_ut,
+                "hit_all_lag1":      int(lag_k==true_k and lag_sc==true_sc and lag_ut==true_ut),
+                "regret_mr_lag1":    regret_mr_lag1,
+                "regret_bmr_lag1":   regret_bmr_lag1,
+                # majority baseline
+                "hit_all_maj":       int(maj_k==true_k and maj_sc==true_sc and maj_ut==true_ut),
+                "regret_mr_maj":     regret_mr_maj,
+                "regret_bmr_maj":    regret_bmr_maj,
                 # t-1 features for reference
                 **{fn: feat_prev.get(fn, np.nan) for fn in feature_names_used},
             })
@@ -1290,62 +1383,149 @@ def predict_for_experiment_traces(
 
     pred_df = pd.DataFrame(rows)
 
-    # Step 3: accuracy per trace + overall
+    # ── Step 3: build accuracy + regret report ──────────────────────────────
+    def _fmt_regret(series, label):
+        valid = series.dropna()
+        if len(valid) == 0:
+            return f"  {label}: n/a"
+        return (f"  {label}: mean={valid.mean():.4f}  "
+                f"median={valid.median():.4f}  "
+                f"p95={valid.quantile(0.95):.4f}  "
+                f"(n={len(valid)})")
+
     report_lines = [
         "=" * 72,
         f"  Experiment Trace Online Prediction Report  |  Label: {label}",
         f"  target={target}   evaluation: predict(t-1 features) vs best(t)",
+        f"  Regret = MR(chosen_config) - MR(oracle_best)  [>= 0, lower=better]",
         "=" * 72,
         "",
         recommend_update_strategy(),
         "",
-        "--- Per-Trace Accuracy ---",
+        "--- Per-Trace Results ---",
         "",
     ]
 
+    def _mode(col, grp):
+        vc = grp[col].value_counts()
+        return vc.index[0] if len(vc) > 0 else None
+
     for trace_name, grp in pred_df.groupby("trace"):
         n = len(grp)
-        acc_k  = grp["hit_K"].mean()
-        acc_sc = grp["hit_sc"].mean()
-        acc_ut = grp["hit_ut"].mean()
-        acc_all = grp["hit_all"].mean()
-        # mode of predictions (overall recommendation)
-        def _mode(col):
-            vc = grp[col].value_counts()
-            return vc.index[0] if len(vc) > 0 else None
-        rec_k  = _mode("pred_K")
-        rec_sc = _mode("pred_sc")
-        rec_ut = _mode("pred_update_type")
+        rec_k  = _mode("pred_K",           grp)
+        rec_sc = _mode("pred_sc",          grp)
+        rec_ut = _mode("pred_update_type", grp)
         ut_lbl = UPDATE_TYPE_LABEL_EN.get(rec_ut, str(rec_ut))
-
         report_lines += [
             f"  Trace: {trace_name}  (n_windows={n})",
-            f"    K           accuracy (t-1 -> t): {acc_k:.1%}",
-            f"    sc          accuracy (t-1 -> t): {acc_sc:.1%}",
-            f"    update_type accuracy (t-1 -> t): {acc_ut:.1%}",
-            f"    all-correct accuracy (t-1 -> t): {acc_all:.1%}",
-            f"    Most-frequent prediction:  K={rec_k}, sc={rec_sc}, "
+            "",
+            "  Classification accuracy (predict t-1 -> best at t):",
+            f"    K           : {grp['hit_K'].mean():.1%}",
+            f"    sc          : {grp['hit_sc'].mean():.1%}",
+            f"    update_type : {grp['hit_ut'].mean():.1%}",
+            f"    all-correct : {grp['hit_all'].mean():.1%}",
+            "",
+            "  Regret (MR) — lower is better (0 = oracle optimal):",
+            _fmt_regret(grp["regret_mr"],     "  ML model  "),
+            _fmt_regret(grp["regret_mr_lag1"],"  Lag-1 BL  "),
+            _fmt_regret(grp["regret_mr_maj"], "  Majority  "),
+            "",
+            "  Regret (BMR):",
+            _fmt_regret(grp["regret_bmr"],     "  ML model  "),
+            _fmt_regret(grp["regret_bmr_lag1"],"  Lag-1 BL  "),
+            _fmt_regret(grp["regret_bmr_maj"], "  Majority  "),
+            "",
+            f"  Most-frequent prediction: K={rec_k}, sc={rec_sc}, "
             f"update_type={rec_ut} ({ut_lbl})",
             "",
-            f"    Parallel Shadow + Deferred Commit steps:",
-            f"      1. Shadow-run all update_types for {SHADOW_OBSERVATION_WINDOWS} windows",
-            f"      2. Commit type with min js_effective (ML recommends: {rec_ut})",
-            f"      3. Apply K={rec_k}, sc={rec_sc} -> start normal operation",
-            f"      4. Re-evaluate if js_inherent drift > {DRIFT_REEVAL_THRESHOLD:.2f}",
+            f"  Parallel Shadow + Deferred Commit steps:",
+            f"    1. Shadow all update_types for {SHADOW_OBSERVATION_WINDOWS} windows",
+            f"    2. Commit type with min js_effective (ML recommends: {rec_ut})",
+            f"    3. Apply K={rec_k}, sc={rec_sc} -> start normal operation",
+            f"    4. Re-evaluate if js_inherent drift > {DRIFT_REEVAL_THRESHOLD:.2f}",
             "",
         ]
 
-    # Overall accuracy
+    # Overall
     n_total = len(pred_df)
     report_lines += [
         "--- Overall ---",
         f"  total windows evaluated: {n_total}",
-        f"  K           accuracy: {pred_df['hit_K'].mean():.1%}",
-        f"  sc          accuracy: {pred_df['hit_sc'].mean():.1%}",
-        f"  update_type accuracy: {pred_df['hit_ut'].mean():.1%}",
-        f"  all-correct accuracy: {pred_df['hit_all'].mean():.1%}",
-        "=" * 72,
+        f"  all-correct  ML : {pred_df['hit_all'].mean():.1%}",
+        f"  all-correct Lag1: {pred_df['hit_all_lag1'].mean():.1%}",
+        f"  all-correct  Maj: {pred_df['hit_all_maj'].mean():.1%}",
+        "",
+        "  Mean Regret MR :",
+        _fmt_regret(pred_df["regret_mr"],      "  ML model  "),
+        _fmt_regret(pred_df["regret_mr_lag1"], "  Lag-1 BL  "),
+        _fmt_regret(pred_df["regret_mr_maj"],  "  Majority  "),
+        "",
+        "  Mean Regret BMR:",
+        _fmt_regret(pred_df["regret_bmr"],      "  ML model  "),
+        _fmt_regret(pred_df["regret_bmr_lag1"], "  Lag-1 BL  "),
+        _fmt_regret(pred_df["regret_bmr_maj"],  "  Majority  "),
+        "",
     ]
+
+    # ── Drift/margin stratification ─────────────────────────────────────────
+    drift_col  = "wt_js_vs_prev"
+    margin_col = "score_margin"
+
+    if drift_col in pred_df.columns and pred_df[drift_col].notna().sum() >= 8:
+        try:
+            pred_df["_drift_q"] = pd.qcut(
+                pred_df[drift_col], q=4,
+                labels=["Q1(low-drift)", "Q2", "Q3", "Q4(high-drift)"],
+                duplicates="drop",
+            )
+            report_lines += [
+                "--- Accuracy by Distribution Drift (wt_js_vs_prev quartile) ---",
+                "  (Low drift = stable; label noise risk highest here)",
+                "",
+            ]
+            for q_lbl, qgrp in pred_df.groupby("_drift_q", observed=True):
+                js_min = qgrp[drift_col].min()
+                js_max = qgrp[drift_col].max()
+                report_lines.append(
+                    f"  {str(q_lbl):<18}  js=[{js_min:.4f},{js_max:.4f}]"
+                    f"  hit_all={qgrp['hit_all'].mean():.1%}"
+                    f"  regret_mr={qgrp['regret_mr'].mean():.4f}"
+                    f"  n={len(qgrp)}"
+                )
+            pred_df.drop(columns=["_drift_q"], inplace=True)
+            report_lines.append("")
+        except Exception as e:
+            report_lines.append(f"  [drift stratification skipped: {e}]")
+            report_lines.append("")
+
+    if margin_col in pred_df.columns and pred_df[margin_col].notna().sum() >= 8:
+        try:
+            pred_df["_margin_q"] = pd.qcut(
+                pred_df[margin_col], q=4,
+                labels=["Q1(tight-margin)", "Q2", "Q3", "Q4(clear-margin)"],
+                duplicates="drop",
+            )
+            report_lines += [
+                "--- Accuracy by Score Margin (label reliability) ---",
+                "  (Tight margin = best/2nd-best conditions nearly equal)",
+                "",
+            ]
+            for q_lbl, qgrp in pred_df.groupby("_margin_q", observed=True):
+                m_min = qgrp[margin_col].min()
+                m_max = qgrp[margin_col].max()
+                report_lines.append(
+                    f"  {str(q_lbl):<22}  margin=[{m_min:.4f},{m_max:.4f}]"
+                    f"  hit_all={qgrp['hit_all'].mean():.1%}"
+                    f"  regret_mr={qgrp['regret_mr'].mean():.4f}"
+                    f"  n={len(qgrp)}"
+                )
+            pred_df.drop(columns=["_margin_q"], inplace=True)
+            report_lines.append("")
+        except Exception as e:
+            report_lines.append(f"  [margin stratification skipped: {e}]")
+            report_lines.append("")
+
+    report_lines.append("=" * 72)
 
     rpath = os.path.join(out_dir, f"{label}_experiment_predictions.txt")
     with open(rpath, "w", encoding="utf-8") as fh:
@@ -1356,24 +1536,41 @@ def predict_for_experiment_traces(
     pred_df.to_csv(cpath, index=False, encoding="utf-8-sig")
     print(f"  Saved: {cpath}")
 
-    # Accuracy summary plot
     _plot_experiment_accuracy(pred_df, out_dir, label)
+    _plot_regret(pred_df, out_dir, label)
 
     return pred_df
 
 
+
 def _plot_experiment_accuracy(pred_df, out_dir, label):
-    """Per-window hit rate plot for experiment trace evaluation."""
+    """
+    Per-window hit rate plot + low-drift failure analysis scatter.
+
+    Layout: n_tr rows x 2 columns
+      Left  col: rolling-20 hit rate over time (existing)
+      Right col: wt_js_vs_prev vs hit_all scatter, coloured by score_margin
+                 (diagnoses whether low-drift windows cause more failures)
+    """
     if pred_df.empty:
         return
-    traces = pred_df["trace"].unique()
-    n_tr = len(traces)
-    fig, axes = plt.subplots(n_tr, 1, figsize=(14, 3 * n_tr), squeeze=False)
 
-    for ax, trace_name in zip(axes[:, 0], traces):
+    has_drift  = "wt_js_vs_prev" in pred_df.columns
+    has_margin = "score_margin"   in pred_df.columns
+
+    traces = pred_df["trace"].unique()
+    n_tr   = len(traces)
+    ncols  = 2 if has_drift else 1
+    fig, axes = plt.subplots(n_tr, ncols,
+                             figsize=(14 * ncols // 2 + 7, 3.5 * n_tr),
+                             squeeze=False)
+
+    for row_i, trace_name in enumerate(traces):
         grp = pred_df[pred_df["trace"] == trace_name].sort_values("window")
         ws  = grp["window"].values
-        # rolling accuracy (window=20)
+
+        # ── Left: rolling hit rate ──────────────────────────────────────────
+        ax_l = axes[row_i, 0]
         for col, color, lbl in [
             ("hit_K",  "#1976D2", "K"),
             ("hit_sc", "#388E3C", "sc"),
@@ -1381,16 +1578,81 @@ def _plot_experiment_accuracy(pred_df, out_dir, label):
             ("hit_all","#9C27B0", "all"),
         ]:
             roll = pd.Series(grp[col].values).rolling(20, min_periods=1).mean().values
-            ax.plot(ws, roll, color=color, linewidth=1.2, label=lbl)
+            ax_l.plot(ws, roll, color=color, linewidth=1.2, label=lbl)
 
-        ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-        ax.set_ylim(0, 1.05)
-        ax.set_title(f"Trace: {trace_name}  |  rolling-20 hit rate (predict t-1 -> t)")
-        ax.set_xlabel("Window t")
-        ax.set_ylabel("Hit rate")
-        ax.legend(fontsize=8, ncol=4)
-        ax.grid(True, alpha=0.3)
+        ax_l.axhline(0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+        ax_l.set_ylim(0, 1.05)
+        ax_l.set_title(
+            f"Trace: {trace_name}  |  rolling-20 hit rate (predict t-1 -> t)",
+            fontsize=10,
+        )
+        ax_l.set_xlabel("Window t")
+        ax_l.set_ylabel("Hit rate")
+        ax_l.legend(fontsize=8, ncol=4)
+        ax_l.grid(True, alpha=0.3)
 
+        # ── Right: drift vs hit_all scatter (failure mode diagnosis) ────────
+        if not has_drift or ncols < 2:
+            continue
+        ax_r = axes[row_i, 1]
+
+        js_vals  = grp["wt_js_vs_prev"].values.astype(float)
+        hit_vals = grp["hit_all"].values.astype(float)
+
+        # Jitter hit_all (0/1) vertically for readability
+        jitter = np.random.default_rng(42).uniform(-0.03, 0.03, size=len(hit_vals))
+        y_plot = hit_vals + jitter
+
+        # Colour by score_margin if available
+        if has_margin:
+            c_vals = grp["score_margin"].values.astype(float)
+            valid  = ~np.isnan(c_vals)
+            sc = ax_r.scatter(
+                js_vals[valid], y_plot[valid],
+                c=c_vals[valid], cmap="RdYlGn",
+                vmin=np.nanpercentile(c_vals, 5),
+                vmax=np.nanpercentile(c_vals, 95),
+                alpha=0.45, s=12, edgecolors="none",
+            )
+            cbar = fig.colorbar(sc, ax=ax_r, pad=0.02)
+            cbar.set_label("score_margin\n(green=clear, red=tight)", fontsize=7)
+            # NaN margin points in grey
+            if (~valid).any():
+                ax_r.scatter(js_vals[~valid], y_plot[~valid],
+                             c="lightgray", alpha=0.3, s=8, edgecolors="none")
+        else:
+            ax_r.scatter(js_vals, y_plot, alpha=0.35, s=10, color="#555")
+
+        # Trend line: running mean of hit_all binned by js quantile
+        try:
+            bins = pd.qcut(js_vals, q=10, duplicates="drop")
+            bin_x = grp["wt_js_vs_prev"].groupby(bins).mean().values
+            bin_y = grp["hit_all"].groupby(bins).mean().values
+            order = np.argsort(bin_x)
+            ax_r.plot(bin_x[order], bin_y[order],
+                      color="#1976D2", linewidth=1.8, linestyle="-",
+                      label="binned mean hit_all", zorder=5)
+        except Exception:
+            pass
+
+        ax_r.axhline(0.5, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+        ax_r.set_ylim(-0.1, 1.15)
+        ax_r.set_xlabel("wt_js_vs_prev  (distribution drift)", fontsize=9)
+        ax_r.set_ylabel("hit_all  (0=miss, 1=correct)", fontsize=9)
+        ax_r.set_title(
+            f"Trace: {trace_name}  |  Failure mode: drift vs accuracy\n"
+            "(left=low-drift=stable; right=high-drift=volatile)",
+            fontsize=9,
+        )
+        ax_r.legend(fontsize=7)
+        ax_r.grid(True, alpha=0.25)
+
+    plt.suptitle(
+        f"Experiment Accuracy  |  {label}\n"
+        "(Right panels: low-drift failure diagnosis — "
+        "low js + red colour = noisy label region)",
+        fontsize=10, y=1.01,
+    )
     plt.tight_layout()
     fpath = os.path.join(out_dir, f"{label}_experiment_accuracy.png")
     plt.savefig(fpath, dpi=150, bbox_inches="tight")
@@ -1399,6 +1661,96 @@ def _plot_experiment_accuracy(pred_df, out_dir, label):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+def _plot_regret(pred_df, out_dir, label):
+    """
+    Regret comparison: ML model vs Lag-1 baseline vs Majority baseline.
+
+    Output: {label}_experiment_regret.png
+      Top row   : rolling-20 regret_mr over time per trace
+      Bottom row: box plot of regret_mr per method per trace
+    """
+    if pred_df.empty:
+        return
+
+    has_regret = all(c in pred_df.columns for c in
+                     ["regret_mr", "regret_mr_lag1", "regret_mr_maj"])
+    if not has_regret:
+        return
+
+    traces = pred_df["trace"].unique()
+    n_tr   = len(traces)
+
+    fig, axes = plt.subplots(2, n_tr,
+                             figsize=(max(7, 6 * n_tr), 9),
+                             squeeze=False)
+
+    for col_i, trace_name in enumerate(traces):
+        grp = pred_df[pred_df["trace"] == trace_name].sort_values("window")
+        ws  = grp["window"].values
+
+        ax_top = axes[0, col_i]
+        methods = [
+            ("regret_mr",      "#9C27B0", "ML model"),
+            ("regret_mr_lag1", "#F57C00", "Lag-1"),
+            ("regret_mr_maj",  "#9E9E9E", "Majority"),
+        ]
+        for col, color, lbl in methods:
+            if col not in grp.columns:
+                continue
+            vals = pd.to_numeric(grp[col], errors="coerce")
+            roll = vals.rolling(20, min_periods=1).mean().values
+            ax_top.plot(ws, roll, color=color, linewidth=1.3, label=lbl)
+
+        ax_top.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_top.set_title(f"Trace: {trace_name}\nRolling-20 Regret MR", fontsize=9)
+        ax_top.set_xlabel("Window t")
+        ax_top.set_ylabel("Regret MR (lower=better)")
+        ax_top.legend(fontsize=8)
+        ax_top.grid(True, alpha=0.3)
+
+        ax_bot = axes[1, col_i]
+        box_data   = []
+        box_labels = []
+        box_colors = []
+        for col, color, lbl in methods:
+            if col not in grp.columns:
+                continue
+            vals = pd.to_numeric(grp[col], errors="coerce").dropna().values
+            box_data.append(vals)
+            box_labels.append(lbl)
+            box_colors.append(color)
+
+        if box_data:
+            bp = ax_bot.boxplot(box_data, patch_artist=True,
+                                medianprops=dict(color="black", linewidth=1.5),
+                                flierprops=dict(marker=".", markersize=3, alpha=0.4))
+            for patch, color in zip(bp["boxes"], box_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.65)
+            ax_bot.set_xticklabels(box_labels, fontsize=9)
+
+        ax_bot.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_bot.set_title(f"Trace: {trace_name}\nRegret MR distribution", fontsize=9)
+        ax_bot.set_ylabel("Regret MR")
+        ax_bot.grid(True, alpha=0.3, axis="y")
+
+        for i, vals in enumerate(box_data, start=1):
+            med = float(np.nanmedian(vals))
+            ax_bot.text(i, med, f" {med:.4f}", fontsize=7,
+                        va="center", ha="left", color="black")
+
+    plt.suptitle(
+        f"Regret Analysis  |  {label}\n"
+        "(Regret = MR_chosen - MR_oracle_best;  green line = 0 = perfect)",
+        fontsize=10, y=1.01,
+    )
+    plt.tight_layout()
+    fpath = os.path.join(out_dir, f"{label}_experiment_regret.png")
+    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {fpath}")
+
+
 # Main pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1437,22 +1789,25 @@ def run_prediction(meta, label, out_dir,
     inds = np.where(np.isnan(X))
     X[inds] = np.take(col_means, inds[1])
 
+    # groups for temporally-correct CV (one group = one trace)
+    groups = aligned_df["trace"].values if aligned_df["trace"].nunique() >= 2 else None
+
     print(f"  [2/6] Predict {lbl_k} (target={target}, n={len(X)})...")
     y_k      = aligned_df[lbl_k].values.astype(int)
-    result_k = train_and_evaluate(X, y_k, fn_used, lbl_k, max_depth)
-    print(f"         accuracy = {result_k['accuracy']:.1%}")
+    result_k = train_and_evaluate(X, y_k, fn_used, lbl_k, max_depth, groups=groups)
+    print(f"         accuracy = {result_k['accuracy']:.1%}  cv={result_k['cv_strategy']}")
     print(result_k["report"])
 
     print(f"  [3/6] Predict {lbl_sc}...")
     y_sc      = aligned_df[lbl_sc].values.astype(int)
-    result_sc = train_and_evaluate(X, y_sc, fn_used, lbl_sc, max_depth)
-    print(f"         accuracy = {result_sc['accuracy']:.1%}")
+    result_sc = train_and_evaluate(X, y_sc, fn_used, lbl_sc, max_depth, groups=groups)
+    print(f"         accuracy = {result_sc['accuracy']:.1%}  cv={result_sc['cv_strategy']}")
     print(result_sc["report"])
 
     print(f"  [4/6] Predict {lbl_ut}...")
     y_ut      = aligned_df[lbl_ut].values.astype(int)
-    result_ut = train_and_evaluate(X, y_ut, fn_used, lbl_ut, max_depth)
-    print(f"         accuracy = {result_ut['accuracy']:.1%}")
+    result_ut = train_and_evaluate(X, y_ut, fn_used, lbl_ut, max_depth, groups=groups)
+    print(f"         accuracy = {result_ut['accuracy']:.1%}  cv={result_ut['cv_strategy']}")
     print(result_ut["report"])
 
     print(f"\n  [5/6] Error analysis...")
@@ -1509,7 +1864,7 @@ def main():
           python predict_optimal_params.py --dir ./results --out ./output
 
           # CLI override of trace lists
-          python predict_optimal_params.py --dir ./results \
+          python predict_optimal_params.py --dir ./results \\
               --teacher wiki2019 twitter --experiment cachelib_cdn01
 
           # BMR-only target
@@ -1519,7 +1874,7 @@ def main():
           python predict_optimal_params.py --dir ./results --target pareto
 
           # Weighted combined (MR=70%, BMR=30%)
-          python predict_optimal_params.py --dir ./results --target combined \
+          python predict_optimal_params.py --dir ./results --target combined \\
               --w-mr 0.7 --w-bmr 0.3
         """),
     )
