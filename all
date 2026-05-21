@@ -412,7 +412,7 @@ def plot_ma_convergence(agg: pd.DataFrame, out_dir: str, trace: str):
 # 図1（論文核心）: js_effective の手法間比較 ← 最も重要な図
 # ══════════════════════════════════════════════════════════════════════════════
 
-def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
+def plot_effective_mismatch(agg: pd.DataFrame, master: pd.DataFrame, out_dir: str, trace: str):
     """
     同じ js_inherent（トレース固有ドリフト）に対して、
     各手法の js_effective（実効ミスマッチ）がどれだけ小さいかを比較する。
@@ -531,68 +531,78 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
     ax.set_title("(c) JS_effective vs BMR\ncolor=update_type / shape=size_corr", fontsize=10)
     ax.grid(True, alpha=0.3)
 
-    # ── (d) JS_effective vs K（Kごとの実効ミスマッチ変化） ─────────────
+    # ── (d) JS_inherent vs JS_effective: grouped bar by update_type ──────
+    # JS_inherent is trace-specific drift (same for all types -- ground truth).
+    # JS_effective is per-method mismatch. Comparing them side-by-side shows
+    # how much each method amplifies or reduces the inherent drift.
+    # NOTE: JS_effective does NOT depend on K (K sets thresholds, not MA tracking),
+    # so a plot vs K would show flat lines. This grouped bar is the correct view.
     ax = axes[3]
-    k_vals = sorted(agg["k"].unique())
+    bar_width = 0.35
+    x_pos = np.arange(len(ut_list))
+    inh_vals = []
+    eff_vals = []
     for ut in ut_list:
-        for sc in sorted(agg["size_correction"].unique()):
-            sub = agg[(agg["update_type"]==ut) & (agg["size_correction"]==sc)].sort_values("k")
-            if sub.empty:
-                continue
-            mkr = SC_MARKER.get(sc, "o")
-            fst = SC_FILLSTYLE.get(sc, "full")
-            col = UPDATE_TYPE_COLOR.get(ut, "#333")
-            ax.plot(sub["k"], sub["mean_js_effective"],
-                    color=col, linestyle=UPDATE_TYPE_STYLE.get(ut, "--"),
-                    linewidth=1.4, marker=mkr, markersize=5,
-                    fillstyle=fst, markeredgewidth=1.1, alpha=0.85)
-    # 凡例
-    for ut in ut_list:
-        ax.plot([], [], color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                linestyle=UPDATE_TYPE_STYLE.get(ut,"--"),
-                label=UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"), linewidth=1.4)
-    for sc in [0, 1]:
-        ax.plot([], [], color="gray", marker=SC_MARKER[sc],
-                fillstyle=SC_FILLSTYLE[sc], markeredgewidth=1.1,
-                linestyle="none", label=SC_LABEL[sc], markersize=5)
-    ax.set_xlabel("Threshold Count K", fontsize=9)
-    ax.set_ylabel("Mean JS_effective (lower is better)", fontsize=9)
-    ax.set_title("(d) JS_effective vs K\nDoes more thresholds reduce mismatch?", fontsize=10)
-    ax.set_xticks(k_vals)
-    ax.legend(fontsize=7, ncol=1)
-    ax.grid(True, alpha=0.3)
+        sub = agg[agg["update_type"] == ut]
+        inh_vals.append(sub["mean_js_inherent"].mean() if not sub.empty else 0.0)
+        eff_vals.append(sub["mean_js_effective"].mean() if not sub.empty else 0.0)
+    # JS_inherent: same value for all types (gray reference bar)
+    bars_inh = ax.bar(x_pos - bar_width/2, inh_vals, bar_width,
+                      color="#BDBDBD", edgecolor="white", alpha=0.80,
+                      label="JS_inherent (trace drift, all types share same value)")
+    # JS_effective: per-type colored bar
+    bars_eff = ax.bar(x_pos + bar_width/2, eff_vals, bar_width,
+                      color=[UPDATE_TYPE_COLOR.get(ut, "#333") for ut in ut_list],
+                      edgecolor="white", alpha=0.85,
+                      label="JS_effective (method-specific mismatch)")
+    for bar, v in zip(list(bars_inh) + list(bars_eff), inh_vals + eff_vals):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.0005,
+                f"{v:.4f}", ha="center", va="bottom", fontsize=6.5)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}") for ut in ut_list],
+                       rotation=15, ha="right", fontsize=8)
+    ax.set_ylabel("Mean JS Divergence (lower is better)", fontsize=9)
+    ax.set_title("(d) JS_inherent vs JS_effective per update type\n"
+                 "gray=inherent drift (reference), colored=method mismatch", fontsize=10)
+    ax.legend(fontsize=7, loc="upper left")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.set_ylim(bottom=0)
 
-    # ── (e) JS_effective の分布 boxplot（update_type 別） ───────────────
+    # ── (e) Per-window JS_effective boxplot by update_type ───────────────
+    # Uses raw per-window values from master (not aggregated means).
+    # Each box has N_windows * N_conditions data points per update_type.
+    # This shows the actual distribution of mismatch across all time windows.
     ax = axes[4]
-    # update_type ごとに JS_effective の値を集める（全K・全sc）
     box_data   = []
     box_labels = []
     box_colors = []
     for ut in ut_list:
-        sub = agg[agg["update_type"] == ut]
-        if sub.empty:
+        vals = master.loc[master["update_type"] == ut, "js_effective"].dropna().values
+        if len(vals) == 0:
             continue
-        box_data.append(sub["mean_js_effective"].values)
+        box_data.append(vals)
         box_labels.append(UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"))
         box_colors.append(UPDATE_TYPE_COLOR.get(ut, "#333"))
 
-    bp = ax.boxplot(box_data, patch_artist=True, notch=False,
-                    medianprops=dict(color="white", linewidth=2))
-    for patch, col in zip(bp["boxes"], box_colors):
-        patch.set_facecolor(col)
-        patch.set_alpha(0.80)
-    for whisker in bp["whiskers"]:
-        whisker.set(color="#555", linewidth=1.2)
-    for cap in bp["caps"]:
-        cap.set(color="#555", linewidth=1.2)
-    for flier in bp["fliers"]:
-        flier.set(marker="o", color="#999", markersize=3, alpha=0.5)
-
-    ax.set_xticks(range(1, len(box_labels)+1))
-    ax.set_xticklabels(box_labels, rotation=15, ha="right", fontsize=8)
-    ax.set_ylabel("Mean JS_effective (lower is better)", fontsize=9)
+    if box_data:
+        bp = ax.boxplot(box_data, patch_artist=True, notch=False,
+                        medianprops=dict(color="white", linewidth=2),
+                        showfliers=True,
+                        flierprops=dict(marker=".", color="#999", markersize=2, alpha=0.3))
+        for patch, col in zip(bp["boxes"], box_colors):
+            patch.set_facecolor(col)
+            patch.set_alpha(0.80)
+        for whisker in bp["whiskers"]:
+            whisker.set(color="#555", linewidth=1.2)
+        for cap in bp["caps"]:
+            cap.set(color="#555", linewidth=1.2)
+        ax.set_xticks(range(1, len(box_labels)+1))
+        ax.set_xticklabels(box_labels, rotation=15, ha="right", fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+    ax.set_ylabel("JS_effective per time window (lower is better)", fontsize=9)
     ax.set_title("(e) JS_effective distribution by update type\n"
-                 "Box = IQR, line = median, dots = outliers", fontsize=10)
+                 "Per-window values (all K/sc). Box=IQR, line=median", fontsize=10)
     ax.grid(True, alpha=0.3, axis="y")
 
     plt.suptitle(f"[Core] Effective Mismatch Analysis | Trace: {trace}", fontsize=12)
@@ -985,7 +995,7 @@ def run_one_trace(meta_trace, trace: str, out_dir: str, w_mr: float = 0.5, w_bmr
 
     print("  [4/4] Generating graphs...")
     plot_ma_convergence(agg,     out_dir, trace)   # fig0
-    plot_effective_mismatch(agg, out_dir, trace)   # fig1
+    plot_effective_mismatch(agg, master, out_dir, trace)   # fig1
     plot_k_curves(agg,           out_dir, trace)   # fig2
     plot_size_correction(agg,    out_dir, trace)   # fig3
     plot_pareto(agg,             out_dir, trace)   # fig4: Pareto + combined ranking
