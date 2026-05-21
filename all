@@ -427,7 +427,7 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
 
     ut_list = sorted(agg["update_type"].unique())
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
 
     # ── (a) js_effective の棒グラフ（手法間比較） ────────────────────────
     ax = axes[0]
@@ -531,25 +531,69 @@ def plot_effective_mismatch(agg: pd.DataFrame, out_dir: str, trace: str):
     ax.set_title("(c) JS_effective vs BMR\ncolor=update_type / shape=size_corr", fontsize=10)
     ax.grid(True, alpha=0.3)
 
-    # ── (d) js_inherent vs js_effective（手法別） ───────────────────────
+    # ── (d) JS_effective vs K（Kごとの実効ミスマッチ変化） ─────────────
     ax = axes[3]
-    ax.plot([0, agg["mean_js_inherent"].max()],
-            [0, agg["mean_js_inherent"].max()],
-            color="gray", linestyle=":", linewidth=1, label="js_eff = js_inh (type0 baseline)")
+    k_vals = sorted(agg["k"].unique())
     for ut in ut_list:
-        sub = agg[agg["update_type"]==ut]
+        for sc in sorted(agg["size_correction"].unique()):
+            sub = agg[(agg["update_type"]==ut) & (agg["size_correction"]==sc)].sort_values("k")
+            if sub.empty:
+                continue
+            mkr = SC_MARKER.get(sc, "o")
+            fst = SC_FILLSTYLE.get(sc, "full")
+            col = UPDATE_TYPE_COLOR.get(ut, "#333")
+            ax.plot(sub["k"], sub["mean_js_effective"],
+                    color=col, linestyle=UPDATE_TYPE_STYLE.get(ut, "--"),
+                    linewidth=1.4, marker=mkr, markersize=5,
+                    fillstyle=fst, markeredgewidth=1.1, alpha=0.85)
+    # 凡例
+    for ut in ut_list:
+        ax.plot([], [], color=UPDATE_TYPE_COLOR.get(ut,"#333"),
+                linestyle=UPDATE_TYPE_STYLE.get(ut,"--"),
+                label=UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"), linewidth=1.4)
+    for sc in [0, 1]:
+        ax.plot([], [], color="gray", marker=SC_MARKER[sc],
+                fillstyle=SC_FILLSTYLE[sc], markeredgewidth=1.1,
+                linestyle="none", label=SC_LABEL[sc], markersize=5)
+    ax.set_xlabel("Threshold Count K", fontsize=9)
+    ax.set_ylabel("Mean JS_effective (lower is better)", fontsize=9)
+    ax.set_title("(d) JS_effective vs K\nDoes more thresholds reduce mismatch?", fontsize=10)
+    ax.set_xticks(k_vals)
+    ax.legend(fontsize=7, ncol=1)
+    ax.grid(True, alpha=0.3)
+
+    # ── (e) JS_effective の分布 boxplot（update_type 別） ───────────────
+    ax = axes[4]
+    # update_type ごとに JS_effective の値を集める（全K・全sc）
+    box_data   = []
+    box_labels = []
+    box_colors = []
+    for ut in ut_list:
+        sub = agg[agg["update_type"] == ut]
         if sub.empty:
             continue
-        ax.scatter(sub["mean_js_inherent"], sub["mean_js_effective"],
-                   color=UPDATE_TYPE_COLOR.get(ut,"#333"),
-                   label=UPDATE_TYPE_LABEL_EN.get(ut,f"type{ut}"),
-                   s=30, alpha=0.8)
+        box_data.append(sub["mean_js_effective"].values)
+        box_labels.append(UPDATE_TYPE_LABEL_EN.get(ut, f"type{ut}"))
+        box_colors.append(UPDATE_TYPE_COLOR.get(ut, "#333"))
 
-    ax.set_xlabel("JS_inherent (trace-specific drift)", fontsize=9)
-    ax.set_ylabel("JS_effective (effective mismatch)", fontsize=9)
-    ax.set_title("(d) Inherent drift vs Effective mismatch\nbelow diagonal = method absorbs drift", fontsize=10)
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
+    bp = ax.boxplot(box_data, patch_artist=True, notch=False,
+                    medianprops=dict(color="white", linewidth=2))
+    for patch, col in zip(bp["boxes"], box_colors):
+        patch.set_facecolor(col)
+        patch.set_alpha(0.80)
+    for whisker in bp["whiskers"]:
+        whisker.set(color="#555", linewidth=1.2)
+    for cap in bp["caps"]:
+        cap.set(color="#555", linewidth=1.2)
+    for flier in bp["fliers"]:
+        flier.set(marker="o", color="#999", markersize=3, alpha=0.5)
+
+    ax.set_xticks(range(1, len(box_labels)+1))
+    ax.set_xticklabels(box_labels, rotation=15, ha="right", fontsize=8)
+    ax.set_ylabel("Mean JS_effective (lower is better)", fontsize=9)
+    ax.set_title("(e) JS_effective distribution by update type\n"
+                 "Box = IQR, line = median, dots = outliers", fontsize=10)
+    ax.grid(True, alpha=0.3, axis="y")
 
     plt.suptitle(f"[Core] Effective Mismatch Analysis | Trace: {trace}", fontsize=12)
     plt.tight_layout()
