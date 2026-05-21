@@ -1,0 +1,1327 @@
+"""
+predict_optimal_params.py
+==========================
+最適な K (閾値数) と sc (サイズ補正) を分布統計量から予測し、
+予測が外れた場合の原因を分析する。
+
+── 使い方 ──────────────────────────────────────────────────────────────
+  python predict_optimal_params.py --dir ./results --out ./output
+  python predict_optimal_params.py --dir ./results --target combined --w-mr 0.6 --w-bmr 0.4
+  python predict_optimal_params.py --dir ./results --split-traces
+
+── 出力 ─────────────────────────────────────────────────────────────────
+  {label}_features.csv        : 条件ごとの特徴量テーブル
+  {label}_pred_k.png          : K予測: 特徴量重要度 + 混同行列
+  {label}_pred_sc.png         : sc予測: 特徴量重要度 + 混同行列
+  {label}_error_analysis.png  : 予測失敗条件の詳細分析
+  {label}_decision_rules.txt  : 判定ルール（人間可読）
+
+── 予測対象 ─────────────────────────────────────────────────────────────
+  optimal_K  : MR / BMR / combined を最小にする K （update_type・sc 固定でKを選ぶ）
+  optimal_sc : MR / BMR / combined を最小にする sc（update_type・K 固定でscを選ぶ）
+
+── 特徴量 ───────────────────────────────────────────────────────────────
+  分布形状: エントロピー・集中度・ピーク数・Gini係数
+  時間ドリフト: js_inherent の平均・標準偏差・最大値・線形トレンド
+  バイト負荷: バイト数重み付き集中度（sc予測のキー特徴量）
+
+── 予測失敗の原因分析 ───────────────────────────────────────────────────
+  予測成功条件 vs 失敗条件で特徴量を比較（レーダーチャート + 表）
+  失敗ケースで「なぜその特徴量が判断を誤らせたか」を逐条説明
+
+依存: pip install scikit-learn numpy pandas matplotlib scipy
+"""
+
+import argparse
+import os
+import re
+import textwrap
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch
+from scipy.stats import entropy as scipy_entropy, pearsonr, spearmanr
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import (
+    accuracy_score, confusion_matrix, classification_report,
+    ConfusionMatrixDisplay
+)
+from sklearn.model_selection import LeaveOneOut, cross_val_predict
+
+# ── analyze_all_conditions.py と共通のユーティリティ ──────────────────────────
+EPSILON = 1e-10
+UPDATE_TYPE_MAP = {9: -1, 0: 0, 1: 1, 2: 2}
+UPDATE_TYPE_LABEL_EN = {
+    -1: "type-1:Static",
+     0: "type0:Periodic",
+     1: "type1:WMA",
+     2: "type2:DynWMA",
+}
+FNAME_RE = re.compile(
+    r"(?P<trace>.+?)-SIZEDIVIDE-(?P<k>\d+)-(?P<c>\d+)-(?P<t>\d+)",
+    re.IGNORECASE,
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 教師/実験トレースの設定（ここにトレース名をハードコーディング）
+# ══════════════════════════════════════════════════════════════════════════════
+# 教師トレース: 決定木の学習に使用するトレース名
+# 空リストの場合は全トレースを教師データとして使用
+TEACHER_TRACES: list[str] = [
+    # 例: "wiki2019", "twitter",
+]
+
+# 実験トレース: 学習済みモデルでオンライン予測を行うトレース名
+# 空リストの場合は CLI --experiment で指定するか、全トレースを対象とする
+EXPERIMENT_TRACES: list[str] = [
+    # 例: "cachelib_cdn01",
+]
+
+# Parallel Shadow + Deferred Commit: 観測フェーズの窓数
+SHADOW_OBSERVATION_WINDOWS: int = 50   # Phase 1 で全 update_type を並列実行する窓数
+DRIFT_REEVAL_THRESHOLD: float  = 0.05  # この差分を超えたら再評価をトリガー (js_inherent)
+
+
+def parse_filename(path: str):
+    m = FNAME_RE.search(Path(path).stem)
+    if not m:
+        return None
+    t_raw = int(m.group("t"))
+    return {
+        "filepath":        path,
+        "trace":           m.group("trace"),
+        "k":               int(m.group("k")),
+        "size_correction": int(m.group("c")),
+        "update_type":     UPDATE_TYPE_MAP.get(t_raw, t_raw),
+    }
+
+
+def collect_csvs(dir_path: str) -> pd.DataFrame:
+    rows = []
+    for f in sorted(Path(dir_path).glob("*.csv")):
+        info = parse_filename(str(f))
+        if info:
+            rows.append(info)
+    if not rows:
+        raise ValueError(f"SIZEDIVIDE形式CSVが見つかりません: {dir_path}")
+    return pd.DataFrame(rows)
+
+
+def find_series_cols(df: pd.DataFrame, base: str) -> list:
+    normalized = {}
+    for c in df.columns:
+        m = re.fullmatch(re.escape(base) + r"_{1,2}(\d+)", c)
+        if m:
+            normalized[int(m.group(1))] = c
+    return [normalized[i] for i in sorted(normalized)]
+
+
+def to_prob(vals: np.ndarray) -> np.ndarray:
+    v = vals.astype(float) + EPSILON
+    return v / v.sum()
+
+
+def js_div(p: np.ndarray, q: np.ndarray) -> float:
+    m = 0.5 * (p + q)
+    return float(
+        0.5 * scipy_entropy(p, m) + 0.5 * scipy_entropy(q, m)
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 特徴量抽出
+# ══════════════════════════════════════════════════════════════════════════════
+
+def gini_coeff(prob: np.ndarray) -> float:
+    """Gini 係数（0=均等, 1=完全集中）"""
+    p = np.sort(prob.astype(float))
+    n = len(p)
+    if n == 0 or p.sum() == 0:
+        return 0.0
+    cumsum = np.cumsum(p)
+    return float(1 - 2 * cumsum.sum() / (n * p.sum()) + 1 / n)
+
+
+def count_peaks(prob: np.ndarray, threshold: float = 0.02) -> int:
+    """prob 内のローカル最大点（値が threshold 以上）の数を返す"""
+    peaks = 0
+    for i in range(1, len(prob) - 1):
+        if prob[i] > prob[i-1] and prob[i] > prob[i+1] and prob[i] >= threshold:
+            peaks += 1
+    return max(peaks, 1)
+
+
+def extract_features(filepath: str) -> dict | None:
+    """
+    1つのCSVから予測に使う特徴量を抽出する。
+    これらの特徴量はオンラインで観測可能な分布統計量のみで構成される。
+
+    Returns dict with keys:
+        entropy, norm_entropy, top1_concentration, top3_concentration,
+        gini_request, n_peaks, peak_bin,
+        mean_drift, std_drift, max_drift, drift_trend,
+        byte_concentration, byte_gini, byte_mean_size,
+        cv_dist (coefficient of variation across windows)
+    """
+    try:
+        df = pd.read_csv(filepath)
+        df.columns = df.columns.str.strip().str.lower()
+    except Exception as e:
+        print(f"  [読込エラー] {filepath}: {e}")
+        return None
+
+    now_cols  = find_series_cols(df, "view_counts_now")
+    make_cols = find_series_cols(df, "view_counts_make")
+
+    if not now_cols or not make_cols:
+        return None
+
+    now_arr  = df[now_cols].values.astype(float)   # shape: (T, B)
+    make_arr = df[make_cols].values.astype(float)
+
+    T, B = now_arr.shape
+    bin_indices = np.arange(B)
+
+    # ── 平均分布（全時間窓の平均） ────────────────────────────────────────
+    mean_dist      = now_arr.mean(axis=0)
+    mean_dist_prob = to_prob(mean_dist)
+
+    # Shannon エントロピー
+    ent = float(scipy_entropy(mean_dist_prob))
+    norm_ent = ent / np.log(B) if B > 1 else 0.0
+
+    # 集中度
+    sorted_p    = np.sort(mean_dist_prob)[::-1]
+    top1_conc   = float(sorted_p[0])
+    top3_conc   = float(sorted_p[:3].sum())
+
+    # Gini（リクエスト分布の不均一性）
+    gini_req = gini_coeff(mean_dist_prob)
+
+    # ピーク数・主ピーク位置
+    n_pk   = count_peaks(mean_dist_prob)
+    pk_bin = int(np.argmax(mean_dist_prob))
+
+    # ── 時間ドリフト統計 ──────────────────────────────────────────────────
+    js_vals = []
+    for i in range(T):
+        d_t    = to_prob(now_arr[i])
+        d_prev = to_prob(make_arr[i])
+        js_vals.append(js_div(d_prev, d_t))
+
+    js_vals   = np.array(js_vals)
+    mean_drift = float(js_vals.mean())
+    std_drift  = float(js_vals.std())
+    max_drift  = float(js_vals.max())
+
+    # ドリフトの線形トレンド（正=時間とともにドリフト増加）
+    if T > 2:
+        drift_trend = float(np.polyfit(np.arange(T), js_vals, 1)[0])
+    else:
+        drift_trend = 0.0
+
+    # ── バイト負荷特徴量（sc 予測のキー特徴量） ───────────────────────────
+    # バケット i のコンテンツサイズ代表値を 2^i とする（ヒストグラムの設計上）
+    byte_weights    = np.power(2.0, bin_indices.astype(float))
+    byte_dist       = mean_dist_prob * byte_weights
+    byte_total      = byte_dist.sum()
+    byte_dist_norm  = byte_dist / (byte_total + EPSILON)
+
+    # 大きいサイズ上位3バケットへのバイト集中度
+    byte_top3_conc  = float(np.sort(byte_dist_norm)[::-1][:3].sum())
+    byte_gini_val   = gini_coeff(byte_dist_norm)
+    byte_mean_size  = float(np.dot(bin_indices, byte_dist_norm))  # 加重平均バケット番号
+
+    # ── 分布の時間的ばらつき（各バケットのCV） ──────────────────────────
+    # 各バケットのリクエスト数が時間によってどれだけ変動するか
+    col_std  = now_arr.std(axis=0)
+    col_mean = now_arr.mean(axis=0) + EPSILON
+    cv_per_bin = col_std / col_mean
+    cv_dist    = float(cv_per_bin.mean())  # 平均変動係数
+
+    # ── 区間ミス率特徴量（CSVにinterval列がある場合のみ）────────────────────
+    # これらはオンライン実運用でリアルタイムに観測できる特徴量
+    mean_inter_mr     = np.nan
+    std_inter_mr      = np.nan
+    mean_delta_mr_lru = np.nan
+    byte_vol_cv       = np.nan
+
+    if "inter_miss_ratio" in df.columns:
+        imr = pd.to_numeric(df["inter_miss_ratio"], errors="coerce").dropna()
+        if len(imr) > 0:
+            mean_inter_mr = float(imr.mean())
+            std_inter_mr  = float(imr.std()) if len(imr) > 1 else 0.0
+
+    if "inter_miss_ratio" in df.columns and "inter_miss_ratio_lru" in df.columns:
+        imr     = pd.to_numeric(df["inter_miss_ratio"],     errors="coerce")
+        imr_lru = pd.to_numeric(df["inter_miss_ratio_lru"], errors="coerce")
+        delta   = (imr - imr_lru).dropna()
+        if len(delta) > 0:
+            mean_delta_mr_lru = float(delta.mean())
+
+    if "req_byte" in df.columns:
+        rb = pd.to_numeric(df["req_byte"], errors="coerce").dropna()
+        if len(rb) > 1:
+            byte_vol_cv = float(rb.std() / (rb.mean() + EPSILON))
+
+    return {
+        # 分布形状
+        "entropy":           ent,
+        "norm_entropy":      norm_ent,
+        "top1_concentration": top1_conc,
+        "top3_concentration": top3_conc,
+        "gini_request":      gini_req,
+        "n_peaks":           n_pk,
+        "peak_bin":          pk_bin,
+        # 時間ドリフト
+        "mean_drift":        mean_drift,
+        "std_drift":         std_drift,
+        "max_drift":         max_drift,
+        "drift_trend":       drift_trend,
+        # バイト負荷（sc予測）
+        "byte_concentration": byte_top3_conc,
+        "byte_gini":          byte_gini_val,
+        "byte_mean_size":     byte_mean_size,
+        # 時間変動
+        "cv_dist":            cv_dist,
+        # 区間ミス率（リアルタイム観測特徴量 / NaN if not available）
+        "mean_inter_mr":      mean_inter_mr,
+        "std_inter_mr":       std_inter_mr,
+        "mean_delta_mr_lru":  mean_delta_mr_lru,
+        "byte_vol_cv":        byte_vol_cv,
+    }
+
+
+FEATURE_NAMES = [
+    "entropy", "norm_entropy", "top1_concentration", "top3_concentration",
+    "gini_request", "n_peaks", "peak_bin",
+    "mean_drift", "std_drift", "max_drift", "drift_trend",
+    "byte_concentration", "byte_gini", "byte_mean_size",
+    "cv_dist",
+    # 区間ミス率（利用可能な場合のみ有効値; NaN の場合は列平均で補完）
+    "mean_inter_mr", "std_inter_mr", "mean_delta_mr_lru", "byte_vol_cv",
+]
+
+FEATURE_EXPLANATION = {
+    "entropy":            "Shannon entropy of mean request distribution (higher=more uniform)",
+    "norm_entropy":       "Normalized entropy [0,1] (1=fully uniform across size buckets)",
+    "top1_concentration": "Fraction of requests in the single most popular size bucket",
+    "top3_concentration": "Fraction of requests in the top-3 size buckets",
+    "gini_request":       "Gini coefficient of request distribution (0=equal, 1=concentrated)",
+    "n_peaks":            "Number of local maxima in the request distribution",
+    "peak_bin":           "Bin index of the most popular size bucket",
+    "mean_drift":         "Mean JS_inherent = average distribution drift per window",
+    "std_drift":          "Std dev of JS_inherent = how irregular the drift is",
+    "max_drift":          "Maximum JS_inherent observed (worst-case drift event)",
+    "drift_trend":        "Linear slope of JS_inherent over time (positive=increasing drift)",
+    "byte_concentration": "Fraction of BYTES carried by top-3 largest size buckets",
+    "byte_gini":          "Gini of byte-weighted distribution (high=bytes concentrated in large files)",
+    "byte_mean_size":     "Byte-weighted mean bucket index (higher=traffic dominated by large files)",
+    "cv_dist":            "Mean coefficient of variation of per-bucket request counts over time",
+    # 区間ミス率（interval列がある場合のみ）
+    "mean_inter_mr":      "Mean per-window interval miss ratio (real-time MR, not cumulative)",
+    "std_inter_mr":       "Std dev of per-window interval miss ratio (temporal variability of MR)",
+    "mean_delta_mr_lru":  "Mean (inter_MR - inter_MR_LRU) per window; negative = better than LRU",
+    "byte_vol_cv":        "CV of req_byte across windows (high=bursty byte traffic)",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 性能指標の読み込みと最適条件の決定
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_performance(filepath: str) -> tuple[float, float] | None:
+    """(mean_MR, mean_BMR) を返す"""
+    try:
+        df = pd.read_csv(filepath)
+        df.columns = df.columns.str.strip().str.lower()
+        mr  = df["miss_ratio"].mean()
+        bmr = df["miss_byte_ratio"].mean()
+        return float(mr), float(bmr)
+    except Exception as e:
+        print(f"  [性能読込エラー] {filepath}: {e}")
+        return None
+
+
+def combined_score_val(mr: float, bmr: float,
+                       mr_min: float, mr_max: float,
+                       bmr_min: float, bmr_max: float,
+                       w_mr: float = 0.5, w_bmr: float = 0.5) -> float:
+    mr_r  = mr_max  - mr_min  if mr_max  > mr_min  else 1.0
+    bmr_r = bmr_max - bmr_min if bmr_max > bmr_min else 1.0
+    return w_mr * (mr - mr_min) / mr_r + w_bmr * (bmr - bmr_min) / bmr_r
+
+
+def determine_targets(meta: pd.DataFrame,
+                      target: str = "combined",
+                      w_mr: float = 0.5, w_bmr: float = 0.5) -> pd.DataFrame:
+    """
+    各 CSVの性能を読み込み、以下の2つの予測ターゲットを追加する。
+
+    optimal_K:
+        同じ (trace, update_type, size_correction) 内で
+        最も性能が良い K の値
+
+    optimal_sc:
+        同じ (trace, update_type, k) 内で
+        最も性能が良い size_correction の値 (0 or 1)
+
+    target: "mr" | "bmr" | "combined"
+    """
+    perf_rows = []
+    for _, row in meta.iterrows():
+        result = load_performance(row["filepath"])
+        if result is None:
+            continue
+        mr, bmr = result
+        perf_rows.append({**row.to_dict(), "mean_MR": mr, "mean_BMR": bmr})
+
+    if not perf_rows:
+        raise ValueError("有効な性能データが取得できませんでした。")
+
+    df = pd.DataFrame(perf_rows)
+
+    # グローバル正規化（combined score 計算用）
+    mr_min, mr_max   = df["mean_MR"].min(),  df["mean_MR"].max()
+    bmr_min, bmr_max = df["mean_BMR"].min(), df["mean_BMR"].max()
+
+    if target == "mr":
+        df["_score"] = df["mean_MR"]      # 小さいほど良い
+    elif target == "bmr":
+        df["_score"] = df["mean_BMR"]
+    else:
+        df["_score"] = df.apply(
+            lambda r: combined_score_val(
+                r["mean_MR"], r["mean_BMR"],
+                mr_min, mr_max, bmr_min, bmr_max, w_mr, w_bmr
+            ), axis=1
+        )
+
+    # ── optimal_K: (trace, update_type, size_correction) ごとに最良K ───
+    grp_k = df.groupby(["trace", "update_type", "size_correction"])
+    opt_k = grp_k.apply(
+        lambda g: int(g.loc[g["_score"].idxmin(), "k"])
+    ).reset_index(name="optimal_K")
+    df = df.merge(opt_k, on=["trace", "update_type", "size_correction"])
+
+    # ── optimal_sc: (trace, update_type, k) ごとに最良sc ───────────────
+    grp_sc = df.groupby(["trace", "update_type", "k"])
+    opt_sc = grp_sc.apply(
+        lambda g: int(g.loc[g["_score"].idxmin(), "size_correction"])
+    ).reset_index(name="optimal_sc")
+    df = df.merge(opt_sc, on=["trace", "update_type", "k"])
+
+    # ── optimal_update_type: (trace, k, size_correction) ごとに最良update_type
+    grp_ut = df.groupby(["trace", "k", "size_correction"])
+    opt_ut = grp_ut.apply(
+        lambda g: int(g.loc[g["_score"].idxmin(), "update_type"])
+    ).reset_index(name="optimal_update_type")
+    df = df.merge(opt_ut, on=["trace", "k", "size_correction"])
+
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 予測モデル
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_feature_matrix(perf_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    perf_df の各行（=1つのCSV条件）に特徴量を付与して返す。
+    """
+    feat_rows = []
+    for _, row in perf_df.iterrows():
+        feat = extract_features(row["filepath"])
+        if feat is None:
+            continue
+        feat_rows.append({**row.to_dict(), **feat})
+    return pd.DataFrame(feat_rows)
+
+
+def train_and_evaluate(X: np.ndarray, y: np.ndarray,
+                       feature_names: list,
+                       target_name: str,
+                       max_depth: int = 4) -> dict:
+    """
+    決定木を LeaveOneOut 交差検証で評価する。
+    少数サンプルでも過学習の影響を確認できる。
+
+    Returns:
+        dict with keys: model, y_pred, accuracy, report, importances, rules_text
+    """
+    le = LabelEncoder()
+    y_enc = le.fit_transform(y)
+
+    clf = DecisionTreeClassifier(
+        max_depth=max_depth,
+        min_samples_leaf=2,
+        random_state=42,
+    )
+
+    if len(np.unique(y_enc)) < 2:
+        # クラスが1種類しかない場合は予測不要
+        return {
+            "model": None,
+            "y_pred": y,
+            "accuracy": 1.0,
+            "report": "(Only one class present — prediction trivial)",
+            "importances": pd.Series(
+                np.zeros(len(feature_names)), index=feature_names
+            ),
+            "rules_text": "(Only one class)",
+            "le": le,
+            "classes": le.classes_,
+        }
+
+    # Leave-One-Out cross-validation
+    if len(X) <= 10:
+        cv = LeaveOneOut()
+    else:
+        from sklearn.model_selection import StratifiedKFold
+        cv = StratifiedKFold(n_splits=min(5, len(X)), shuffle=True, random_state=42)
+
+    y_pred_enc = cross_val_predict(clf, X, y_enc, cv=cv)
+    y_pred     = le.inverse_transform(y_pred_enc)
+    acc        = accuracy_score(y_enc, y_pred_enc)
+    report     = classification_report(
+        y_enc, y_pred_enc,
+        target_names=[str(c) for c in le.classes_],
+        zero_division=0,
+    )
+
+    # 全データで再学習してルールを抽出（解釈用）
+    clf.fit(X, y_enc)
+    importances = pd.Series(clf.feature_importances_, index=feature_names)
+    rules_text  = export_text(clf, feature_names=feature_names, max_depth=max_depth)
+
+    return {
+        "model": clf,
+        "y_pred": y_pred,
+        "accuracy": acc,
+        "report": report,
+        "importances": importances,
+        "rules_text": rules_text,
+        "le": le,
+        "classes": le.classes_,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 誤差分析
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_errors(feat_df: pd.DataFrame,
+                   y_true: np.ndarray,
+                   y_pred: np.ndarray,
+                   feature_names: list,
+                   importances: pd.Series,
+                   target_name: str) -> list[dict]:
+    """
+    予測が外れた行を特定し、どの特徴量が誤判断の原因かを説明する。
+
+    Returns: list of dicts, one per misclassified sample
+    """
+    errors = []
+    top_feats = importances.nlargest(5).index.tolist()
+
+    for i, (true_val, pred_val) in enumerate(zip(y_true, y_pred)):
+        if true_val == pred_val:
+            continue
+
+        row = feat_df.iloc[i]
+
+        # 正解ラベルの条件と予測ラベルの条件の特徴量を比較
+        # 「どの特徴量が予測ラベルの典型値に近くて混乱させたか」を調べる
+        causes = []
+        for feat in top_feats:
+            if feat not in feat_df.columns:
+                continue
+            feat_val = row[feat]
+            # 正解ラベルグループの平均
+            mask_true = (np.array(y_true) == true_val)
+            mask_pred = (np.array(y_true) == pred_val)
+            mean_true = feat_df.loc[mask_true, feat].mean() if mask_true.sum() > 0 else np.nan
+            mean_pred = feat_df.loc[mask_pred, feat].mean() if mask_pred.sum() > 0 else np.nan
+
+            if np.isnan(mean_true) or np.isnan(mean_pred):
+                continue
+
+            # この特徴量が予測クラス側に近い場合 → 原因の一つ
+            dist_to_true = abs(feat_val - mean_true)
+            dist_to_pred = abs(feat_val - mean_pred)
+            if dist_to_pred < dist_to_true:
+                direction = ("higher" if feat_val > mean_true else "lower")
+                causes.append({
+                    "feature":    feat,
+                    "value":      float(feat_val),
+                    "mean_true":  float(mean_true),
+                    "mean_pred":  float(mean_pred),
+                    "direction":  direction,
+                    "explanation": (
+                        f"  '{feat}' = {feat_val:.4f}  "
+                        f"(true-class avg={mean_true:.4f}, "
+                        f"predicted-class avg={mean_pred:.4f})  "
+                        f"→ value is closer to predicted class"
+                    ),
+                })
+
+        errors.append({
+            "index":      i,
+            "true":       true_val,
+            "predicted":  pred_val,
+            "trace":      row.get("trace", "?"),
+            "k":          row.get("k", "?"),
+            "sc":         row.get("size_correction", "?"),
+            "update_type": row.get("update_type", "?"),
+            "mean_MR":    row.get("mean_MR", np.nan),
+            "mean_BMR":   row.get("mean_BMR", np.nan),
+            "causes":     causes,
+        })
+    return errors
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 可視化
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plot_prediction_result(feat_df: pd.DataFrame,
+                           y_true: np.ndarray,
+                           result: dict,
+                           target_name: str,
+                           out_dir: str,
+                           label: str):
+    """
+    (a) 特徴量重要度  (b) 混同行列  (c) 相関ヒートマップ  を描画する
+    """
+    y_pred   = result["y_pred"]
+    imp      = result["importances"]
+    classes  = result["classes"]
+    accuracy = result["accuracy"]
+
+    fig = plt.figure(figsize=(18, 6))
+    gs  = fig.add_gridspec(1, 3, wspace=0.35)
+
+    # ── (a) 特徴量重要度 ──────────────────────────────────────────────────
+    ax = fig.add_subplot(gs[0])
+    top_n  = min(12, len(imp))
+    top_imp = imp.nlargest(top_n)
+    colors  = ["#1976D2" if v >= 0.1 else "#90CAF9" for v in top_imp.values]
+    ax.barh(range(top_n), top_imp.values[::-1], color=colors[::-1],
+            edgecolor="white", alpha=0.88)
+    ax.set_yticks(range(top_n))
+    ax.set_yticklabels(top_imp.index[::-1], fontsize=8)
+    ax.set_xlabel("Feature importance", fontsize=9)
+    ax.set_title(f"(a) Feature importance\n(target: {target_name})", fontsize=10)
+    ax.axvline(0.1, color="red", linestyle="--", linewidth=0.8, alpha=0.6,
+               label="threshold 0.10")
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3, axis="x")
+
+    # ── (b) 混同行列 ──────────────────────────────────────────────────────
+    ax = fig.add_subplot(gs[1])
+    le   = result["le"]
+    y_te = le.transform(y_true)
+    y_pe = le.transform(y_pred)
+    cm   = confusion_matrix(y_te, y_pe)
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=[str(c) for c in classes],
+    )
+    disp.plot(ax=ax, colorbar=False, cmap="Blues")
+    ax.set_title(
+        f"(b) Confusion matrix  (LOO CV)\n"
+        f"Accuracy = {accuracy:.1%}  |  n={len(y_true)}",
+        fontsize=10,
+    )
+    ax.set_xlabel(f"Predicted {target_name}", fontsize=9)
+    ax.set_ylabel(f"True {target_name}", fontsize=9)
+    ax.tick_params(labelsize=8)
+
+    # ── (c) 上位特徴量 vs ターゲットの Spearman 相関 ─────────────────────
+    ax = fig.add_subplot(gs[2])
+    feat_cols = [c for c in FEATURE_NAMES if c in feat_df.columns]
+    y_num     = y_true.astype(float)
+    corr_vals = []
+    for fc in feat_cols:
+        vals = feat_df[fc].values.astype(float)
+        valid = ~(np.isnan(vals) | np.isnan(y_num))
+        if valid.sum() < 3:
+            corr_vals.append(0.0)
+            continue
+        r, _ = spearmanr(vals[valid], y_num[valid])
+        corr_vals.append(float(r) if not np.isnan(r) else 0.0)
+
+    corr_series = pd.Series(corr_vals, index=feat_cols).sort_values()
+    bar_colors  = ["#F57C00" if v > 0 else "#1976D2" for v in corr_series.values]
+    ax.barh(range(len(corr_series)), corr_series.values,
+            color=bar_colors, edgecolor="white", alpha=0.85)
+    ax.set_yticks(range(len(corr_series)))
+    ax.set_yticklabels(corr_series.index, fontsize=7)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlabel("Spearman correlation with target", fontsize=9)
+    ax.set_title(
+        f"(c) Feature-target Spearman correlation\n"
+        f"orange=positive(larger feature → larger {target_name})",
+        fontsize=10,
+    )
+    ax.grid(True, alpha=0.3, axis="x")
+
+    plt.suptitle(
+        f"Prediction of {target_name}  |  Label: {label}",
+        fontsize=12, fontweight="bold"
+    )
+    fname = f"{label}_pred_{target_name.replace(' ', '_')}.png"
+    fpath = os.path.join(out_dir, fname)
+    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {fpath}")
+
+
+def plot_error_analysis(feat_df: pd.DataFrame,
+                        errors_k: list,
+                        errors_sc: list,
+                        importances_k: pd.Series,
+                        importances_sc: pd.Series,
+                        out_dir: str,
+                        label: str):
+    """
+    予測失敗ケースを詳細に可視化する。
+    (a) K予測失敗ケースの特徴量プロファイル（レーダー風バー）
+    (b) sc予測失敗ケースの特徴量プロファイル
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    for ax, errors, importances, target_name in [
+        (axes[0], errors_k,  importances_k,  "optimal_K"),
+        (axes[1], errors_sc, importances_sc, "optimal_sc"),
+    ]:
+        top5 = importances.nlargest(5).index.tolist()
+
+        if not errors:
+            ax.text(0.5, 0.5, "No prediction errors!",
+                    ha="center", va="center", fontsize=14,
+                    color="green", transform=ax.transAxes)
+            ax.set_title(f"Error analysis: {target_name}\n(All correct)", fontsize=11)
+            ax.axis("off")
+            continue
+
+        # 失敗ケースと成功ケースで上位特徴量の平均を比較
+        error_indices   = [e["index"] for e in errors]
+        correct_indices = [i for i in range(len(feat_df)) if i not in error_indices]
+
+        n_feats = len(top5)
+        x = np.arange(n_feats)
+        w = 0.35
+
+        means_correct = []
+        means_error   = []
+        stds_correct  = []
+        stds_error    = []
+
+        for feat in top5:
+            if feat not in feat_df.columns:
+                means_correct.append(0); stds_correct.append(0)
+                means_error.append(0);   stds_error.append(0)
+                continue
+            vals_c = feat_df.iloc[correct_indices][feat].values.astype(float)
+            vals_e = feat_df.iloc[error_indices ][feat].values.astype(float)
+            means_correct.append(np.nanmean(vals_c))
+            stds_correct.append(np.nanstd(vals_c))
+            means_error.append(np.nanmean(vals_e))
+            stds_error.append(np.nanstd(vals_e))
+
+        ax.bar(x - w/2, means_correct, w, yerr=stds_correct,
+               label=f"Correct ({len(correct_indices)})",
+               color="#388E3C", alpha=0.80, edgecolor="white",
+               capsize=3, error_kw=dict(elinewidth=1))
+        ax.bar(x + w/2, means_error, w, yerr=stds_error,
+               label=f"Error ({len(errors)})",
+               color="#F44336", alpha=0.80, edgecolor="white",
+               capsize=3, error_kw=dict(elinewidth=1))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(top5, rotation=20, ha="right", fontsize=8)
+        ax.set_title(
+            f"Error analysis: {target_name}\n"
+            f"Top-5 important features  (mean ± std)",
+            fontsize=10,
+        )
+        ax.set_ylabel("Feature value (normalized per feature)", fontsize=9)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+
+        # エラーケースの詳細注釈
+        if len(errors) <= 6:
+            note_lines = [f"Misclassified cases ({len(errors)}):"]
+            for e in errors:
+                note_lines.append(
+                    f"  trace={e['trace']}, K={e['k']}, sc={e['sc']}, "
+                    f"type={e['update_type']}  "
+                    f"true={e['true']} pred={e['predicted']}"
+                )
+            note = "\n".join(note_lines)
+            ax.text(0.01, 0.99, note,
+                    transform=ax.transAxes,
+                    fontsize=6.5, va="top", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.3",
+                              fc="lightyellow", alpha=0.8, ec="#cccc88"))
+
+    plt.suptitle(f"Prediction Error Analysis  |  Label: {label}", fontsize=12)
+    plt.tight_layout()
+    fpath = os.path.join(out_dir, f"{label}_error_analysis.png")
+    plt.savefig(fpath, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {fpath}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# テキストレポート（人間可読なルール + 誤差説明）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_text_report(result_k: dict,
+                      result_sc: dict,
+                      errors_k: list,
+                      errors_sc: list,
+                      feat_df: pd.DataFrame,
+                      out_dir: str,
+                      label: str,
+                      target: str):
+    lines = []
+    sep = "=" * 72
+
+    lines.append(sep)
+    lines.append(f"  最適パラメータ予測レポート  |  Label: {label}")
+    lines.append(f"  最適化ターゲット: {target}")
+    lines.append(sep)
+
+    lines.append("")
+    lines.append("── 特徴量の説明 " + "─" * 56)
+    for feat, desc in FEATURE_EXPLANATION.items():
+        lines.append(f"  {feat:<25} : {desc}")
+
+    for target_name, result, errors in [
+        ("optimal_K",  result_k,  errors_k),
+        ("optimal_sc", result_sc, errors_sc),
+    ]:
+        lines.append("")
+        lines.append(f"{'─'*72}")
+        lines.append(f"  【予測ターゲット: {target_name}】")
+        lines.append(f"{'─'*72}")
+        lines.append(f"  Leave-One-Out 交差検証精度: {result['accuracy']:.1%}")
+        lines.append("")
+        lines.append("  分類レポート:")
+        for line in result["report"].splitlines():
+            lines.append("    " + line)
+
+        lines.append("")
+        lines.append("  特徴量重要度 (上位10):")
+        imp_sorted = result["importances"].nlargest(10)
+        for feat, imp_val in imp_sorted.items():
+            bar = "█" * int(imp_val * 40)
+            lines.append(f"    {feat:<25} {imp_val:.4f}  {bar}")
+            if feat in FEATURE_EXPLANATION:
+                lines.append(f"      └ {FEATURE_EXPLANATION[feat]}")
+
+        lines.append("")
+        lines.append("  決定木ルール（全データ学習）:")
+        lines.append("  (ルールのリーフノードが最終予測クラス)")
+        for rule_line in result["rules_text"].splitlines():
+            lines.append("    " + rule_line)
+
+        lines.append("")
+        if not errors:
+            lines.append("  ✅ 予測失敗ケースなし（全サンプル正解）")
+        else:
+            lines.append(f"  ❌ 予測失敗ケース: {len(errors)} 件")
+            lines.append("")
+            for i, e in enumerate(errors, 1):
+                lines.append(
+                    f"  [{i}] trace={e['trace']}, K={e['k']}, "
+                    f"sc={e['sc']}, update_type={e['update_type']}"
+                )
+                lines.append(
+                    f"      正解={e['true']}  予測={e['predicted']}  "
+                    f"MR={e['mean_MR']:.4f}  BMR={e['mean_BMR']:.4f}"
+                )
+                if e["causes"]:
+                    lines.append("      原因（なぜこの条件が誤分類されたか）:")
+                    for c in e["causes"]:
+                        lines.append(f"       {c['explanation']}")
+                        lines.append(
+                            f"        → この特徴量の値が正解クラス({e['true']})より"
+                            f"予測クラス({e['predicted']})の典型値に近かったため、"
+                            f"モデルが誤った方向に判断した。"
+                        )
+                else:
+                    lines.append(
+                        "      原因: 重要特徴量では区別できず。"
+                        "分布の複合的な要因（交互作用効果）が可能性として考えられる。"
+                    )
+                lines.append("")
+
+    lines.append("")
+    lines.append(sep)
+    lines.append("  予測精度が低い場合の一般的な原因")
+    lines.append(sep)
+    lines.append(textwrap.dedent("""
+  1. 学習サンプル数不足
+     ・ K=8通り × sc=2 × update_type=4 = 64条件あっても、
+       同一グループ内での比較なので実効サンプルは少ない。
+     ・ 対策: 複数トレースを統合し、トレース間でモデルを汎化する。
+
+  2. 最適Kのトレース依存性が高い
+     ・ 同じ分布形状でも、キャッシュ充填パターンによって
+       最適Kが変わることがある（サイズ分布のみでは予測不十分）。
+     ・ 対策: ウォームアップ後の安定期のみで評価する特徴量を追加。
+
+  3. sc の効果がKに依存する（交互作用）
+     ・ sc=1（バイト重み付き）の効果は、大ファイルが多い場合に顕現する。
+     ・ byte_concentration / byte_gini が 0.8 以上の場合に sc=1 が有効、
+       それ以下では sc=0 と差がない傾向がある。
+     ・ 対策: sc の予測に byte_concentration を閾値として使う決定ルールを優先。
+
+  4. update_typeによる交絡
+     ・ type-1（静的）は初期分布依存なので、特徴量が異なる意味を持つ。
+     ・ 対策: update_typeごとにモデルを分離して学習する。
+
+  5. ドリフトの非定常性
+     ・ drift_trend が大きいトレースでは、平均特徴量が代表性を失う。
+     ・ 対策: 後半の時間窓のみから特徴量を計算する別モードを追加する。
+    """))
+    lines.append(sep)
+
+    out_path = os.path.join(out_dir, f"{label}_decision_rules.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"  Saved: {out_path}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 実験トレース向けオンライン予測
+# ══════════════════════════════════════════════════════════════════════════════
+
+def recommend_update_strategy() -> str:
+    """
+    「並列シャドウ実行 + 遅延コミット」(Parallel Shadow + Deferred Commit) 戦略の説明文を返す。
+
+    設計根拠:
+    - WMAは履歴が必要なため「途中から有効化」が難しいが、
+      全 update_type を最初から並列に shadow 実行しておけばコストは軽い。
+    - 観測フェーズ終了時点で js_effective が最も小さい type をコミットする。
+    - 一度コミットした後は原則変更しない（ヒステリシス付き再評価で例外対応）。
+    """
+    return textwrap.dedent(f"""
+    ═══════════════════════════════════════════════════════════════
+     更新戦略: 並列シャドウ実行 + 遅延コミット
+     (Parallel Shadow Execution + Deferred Commit)
+    ═══════════════════════════════════════════════════════════════
+
+    Phase 1  [観測フェーズ: 最初の {SHADOW_OBSERVATION_WINDOWS} 窓]
+    ────────────────────────────────────────────────────────────────
+    - 4 種類の update_type (-1, 0, 1, 2) を並列にシャドウ実行する。
+      実際の閾値更新は行わず、各 type が適用された場合の
+      js_effective (=JS(view_counts_make, view_counts_now)) を記録。
+    - WMAは観測フェーズ中から履歴を蓄積するので、コミット後すぐ利用可能。
+    - ML予測モデル（本スクリプト）が推奨する K と sc もこの期間に確定する。
+
+    Phase 2  [決定フェーズ: 窓 {SHADOW_OBSERVATION_WINDOWS} 時点]
+    ────────────────────────────────────────────────────────────────
+    - 4 type のうち mean(js_effective) が最小だった type をコミット。
+    - K と sc は ML予測値を採用（教師トレースで学習済みモデルを使用）。
+    - 推奨値と ML予測値が一致した type を最優先でコミット。
+
+    Phase 3  [運用フェーズ: 窓 {SHADOW_OBSERVATION_WINDOWS}+ 以降]
+    ────────────────────────────────────────────────────────────────
+    - 一度コミットした設定は原則維持する。
+    - ドリフト監視: 各窓で js_inherent を計算し、
+        |js_inherent_current - js_inherent_initial| > {DRIFT_REEVAL_THRESHOLD}
+      が M 窓連続した場合のみ再評価をトリガー（M はハイパーパラメータ）。
+    - 再評価時は Phase 1 に戻り、再び {SHADOW_OBSERVATION_WINDOWS} 窓の
+      シャドウ観測を行ってからコミットし直す（二重コミット防止）。
+
+    利点
+    ────────────────────────────────────────────────────────────────
+    - WMA の履歴問題を「観測フェーズ中の事前暖気」で解決。
+    - 逐次更新より安定（ヒステリシスにより短期ノイズを無視できる）。
+    - 「決めたら変えない」方針でキャッシュの安定性を確保しつつ、
+      長期ドリフトへの適応も可能。
+
+    """).strip()
+
+
+
+
+def predict_for_experiment_traces(
+        experiment_filepaths: list[str],
+        result_k:   dict,
+        result_sc:  dict,
+        result_ut:  dict,
+        feature_names_used: list[str],
+        out_dir: str,
+        label: str,
+) -> "pd.DataFrame":
+    """
+    Experiment trace CSV files -> extract features -> predict K/sc/update_type.
+
+    Parameters
+    ----------
+    experiment_filepaths : list[str]
+    result_k, result_sc, result_ut : dict  (from train_and_evaluate)
+    feature_names_used : list[str]
+    out_dir, label : str
+
+    Returns
+    -------
+    pd.DataFrame  with pred_K, pred_sc, pred_update_type per file
+    """
+    rows = []
+    for fp in experiment_filepaths:
+        info = parse_filename(fp)
+        if info is None:
+            print(f"  [skip] Not SIZEDIVIDE format: {fp}")
+            continue
+
+        feat = extract_features(fp)
+        if feat is None:
+            print(f"  [skip] Feature extraction failed: {fp}")
+            continue
+
+        x_vec = np.array([feat.get(fn, np.nan) for fn in feature_names_used],
+                         dtype=float).reshape(1, -1)
+        nan_mask = np.isnan(x_vec)
+        if nan_mask.any():
+            x_vec[nan_mask] = 0.0
+
+        pred_k = info["k"];            conf_k = np.nan
+        pred_sc = info["size_correction"]; conf_sc = np.nan
+        pred_ut = info["update_type"]; conf_ut = np.nan
+
+        if result_k.get("model") is not None:
+            proba = result_k["model"].predict_proba(x_vec)[0]
+            idx   = int(np.argmax(proba))
+            pred_k = int(result_k["le"].inverse_transform([idx])[0])
+            conf_k = float(proba[idx])
+
+        if result_sc.get("model") is not None:
+            proba = result_sc["model"].predict_proba(x_vec)[0]
+            idx   = int(np.argmax(proba))
+            pred_sc = int(result_sc["le"].inverse_transform([idx])[0])
+            conf_sc = float(proba[idx])
+
+        if result_ut.get("model") is not None:
+            proba = result_ut["model"].predict_proba(x_vec)[0]
+            idx   = int(np.argmax(proba))
+            pred_ut = int(result_ut["le"].inverse_transform([idx])[0])
+            conf_ut = float(proba[idx])
+
+        rows.append({
+            "trace":            info["trace"],
+            "filepath":         fp,
+            "file_k":           info["k"],
+            "file_sc":          info["size_correction"],
+            "file_update_type": info["update_type"],
+            "pred_K":           pred_k,
+            "conf_K":           conf_k,
+            "pred_sc":          pred_sc,
+            "conf_sc":          conf_sc,
+            "pred_update_type": pred_ut,
+            "conf_update_type": conf_ut,
+            **{fn: feat.get(fn, np.nan) for fn in feature_names_used},
+        })
+
+    if not rows:
+        print("  [warning] No valid experiment traces.")
+        return pd.DataFrame()
+
+    pred_df = pd.DataFrame(rows)
+
+    # ---- text report ---------------------------------------------------
+    lines_out = []
+    sep = "=" * 72
+    lines_out.append(sep)
+    lines_out.append(f"  実験トレース オンライン予測レポート  |  Label: {label}")
+    lines_out.append(sep)
+    lines_out.append("")
+    lines_out.append(recommend_update_strategy())
+    lines_out.append("")
+    lines_out.append("── ML予測結果（実験トレース別） " + "─" * 38)
+    lines_out.append("")
+
+    for trace_name, grp in pred_df.groupby("trace"):
+        def _mode(s):
+            vc = s.value_counts()
+            return vc.index[0] if len(vc) > 0 else None
+
+        rec_k  = _mode(grp["pred_K"])
+        rec_sc = _mode(grp["pred_sc"])
+        rec_ut = _mode(grp["pred_update_type"])
+        ut_label = UPDATE_TYPE_LABEL_EN.get(rec_ut, str(rec_ut))
+
+        lines_out.append(f"  Trace: {trace_name}")
+        lines_out.append(f"    推奨 K           : {rec_k}  (avg conf={grp['conf_K'].mean():.2f})")
+        lines_out.append(f"    推奨 sc          : {rec_sc}  (avg conf={grp['conf_sc'].mean():.2f})")
+        lines_out.append(f"    推奨 update_type : {rec_ut} ({ut_label})")
+        lines_out.append(f"                       avg conf={grp['conf_update_type'].mean():.2f}")
+        lines_out.append(f"    対象ファイル数   : {len(grp)}")
+        lines_out.append("")
+        lines_out.append("    Parallel Shadow + Deferred Commit 運用手順:")
+        lines_out.append(f"      1. 最初の {SHADOW_OBSERVATION_WINDOWS} 窓で全 update_type を並列シャドウ実行")
+        lines_out.append(f"      2. js_effective が最小の type を採用（ML推奨: {rec_ut}）")
+        lines_out.append(f"      3. K={rec_k}, sc={rec_sc} を適用して通常運用を開始")
+        lines_out.append(f"      4. js_inherent 変動が >{DRIFT_REEVAL_THRESHOLD:.2f} で M 窓連続したら再評価")
+        lines_out.append("")
+
+    lines_out.append(sep)
+
+    report_path = os.path.join(out_dir, f"{label}_experiment_predictions.txt")
+    with open(report_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines_out))
+    print(f"  Saved: {report_path}")
+
+    csv_path = os.path.join(out_dir, f"{label}_experiment_predictions.csv")
+    pred_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print(f"  Saved: {csv_path}")
+
+    return pred_df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# メイン処理
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_prediction(meta: pd.DataFrame,
+                   label: str,
+                   out_dir: str,
+                   target: str = "combined",
+                   w_mr: float = 0.5,
+                   w_bmr: float = 0.5,
+                   max_depth: int = 4) -> dict:
+    """
+    教師データ (meta) を使って K・sc・update_type の予測モデルを学習・評価する。
+
+    Returns
+    -------
+    dict: result_k, result_sc, result_ut, feature_names_used, feat_df
+          (失敗時は空 dict)
+    """
+    print(f"\n  [1/6] 性能データを読み込んで最適条件を決定中...")
+    perf_df = determine_targets(meta, target=target, w_mr=w_mr, w_bmr=w_bmr)
+    if perf_df.empty:
+        print("  [スキップ] 有効データなし")
+        return {}
+
+    print(f"  [2/6] 特徴量を抽出中 ({len(perf_df)} 条件)...")
+    feat_df = build_feature_matrix(perf_df)
+    if feat_df.empty:
+        print("  [スキップ] 特徴量抽出失敗")
+        return {}
+
+    feat_path = os.path.join(out_dir, f"{label}_features.csv")
+    feat_df.to_csv(feat_path, index=False, encoding="utf-8-sig")
+    print(f"  Saved: {feat_path}")
+
+    X = feat_df[[f for f in FEATURE_NAMES if f in feat_df.columns]].values.astype(float)
+    feature_names_used = [f for f in FEATURE_NAMES if f in feat_df.columns]
+
+    col_means = np.nanmean(X, axis=0)
+    inds = np.where(np.isnan(X))
+    X[inds] = np.take(col_means, inds[1])
+
+    print(f"\n  [3/6] optimal_K を予測 (target={target})...")
+    y_k      = feat_df["optimal_K"].values.astype(int)
+    result_k = train_and_evaluate(X, y_k, feature_names_used, "optimal_K", max_depth)
+    print(f"         LOO accuracy = {result_k['accuracy']:.1%}")
+    print(result_k["report"])
+
+    print(f"  [3/6] optimal_sc を予測 (target={target})...")
+    y_sc      = feat_df["optimal_sc"].values.astype(int)
+    result_sc = train_and_evaluate(X, y_sc, feature_names_used, "optimal_sc", max_depth)
+    print(f"         LOO accuracy = {result_sc['accuracy']:.1%}")
+    print(result_sc["report"])
+
+    print(f"  [3/6] optimal_update_type を予測 (target={target})...")
+    y_ut      = feat_df["optimal_update_type"].values.astype(int)
+    result_ut = train_and_evaluate(X, y_ut, feature_names_used, "optimal_update_type", max_depth)
+    print(f"         LOO accuracy = {result_ut['accuracy']:.1%}")
+    print(result_ut["report"])
+
+    print(f"\n  [4/6] 誤差分析中...")
+    errors_k  = analyze_errors(feat_df, y_k,  result_k["y_pred"],
+                               feature_names_used, result_k["importances"],  "optimal_K")
+    errors_sc = analyze_errors(feat_df, y_sc, result_sc["y_pred"],
+                               feature_names_used, result_sc["importances"], "optimal_sc")
+    errors_ut = analyze_errors(feat_df, y_ut, result_ut["y_pred"],
+                               feature_names_used, result_ut["importances"], "optimal_update_type")
+    print(f"         K           予測失敗: {len(errors_k)}  / {len(y_k)} 件")
+    print(f"         sc          予測失敗: {len(errors_sc)} / {len(y_sc)} 件")
+    print(f"         update_type 予測失敗: {len(errors_ut)} / {len(y_ut)} 件")
+
+    print(f"\n  [5/6] グラフとレポートを出力中...")
+    plot_prediction_result(feat_df, y_k,  result_k,  "optimal_K",           out_dir, label)
+    plot_prediction_result(feat_df, y_sc, result_sc, "optimal_sc",           out_dir, label)
+    plot_prediction_result(feat_df, y_ut, result_ut, "optimal_update_type",  out_dir, label)
+    plot_error_analysis(feat_df, errors_k, errors_sc,
+                        result_k["importances"], result_sc["importances"],
+                        out_dir, label)
+    write_text_report(result_k, result_sc, errors_k, errors_sc,
+                      feat_df, out_dir, label, target)
+
+    print(f"\n  [6/6] update_type 予測ルールをテキスト出力...")
+    ut_report_path = os.path.join(out_dir, f"{label}_update_type_rules.txt")
+    with open(ut_report_path, "w", encoding="utf-8") as fh:
+        fh.write(f"optimal_update_type 予測ルール  |  LOO accuracy={result_ut['accuracy']:.1%}\n")
+        fh.write("=" * 60 + "\n")
+        fh.write(result_ut["rules_text"])
+        fh.write("\n\n" + recommend_update_strategy())
+    print(f"  Saved: {ut_report_path}")
+
+    print(f"\n  ── サマリー ({label}) ──")
+    print(f"     optimal_K           LOO accuracy: {result_k['accuracy']:.1%}")
+    print(f"     optimal_sc          LOO accuracy: {result_sc['accuracy']:.1%}")
+    print(f"     optimal_update_type LOO accuracy: {result_ut['accuracy']:.1%}")
+    print(f"     K           予測失敗: {len(errors_k)} 件")
+    print(f"     sc          予測失敗: {len(errors_sc)} 件")
+    print(f"     update_type 予測失敗: {len(errors_ut)} 件")
+    top_k_feat  = result_k["importances"].idxmax()
+    top_sc_feat = result_sc["importances"].idxmax()
+    top_ut_feat = result_ut["importances"].idxmax()
+    print(f"     K           予測の最重要特徴量: {top_k_feat}")
+    print(f"     sc          予測の最重要特徴量: {top_sc_feat}")
+    print(f"     update_type 予測の最重要特徴量: {top_ut_feat}")
+
+    return {
+        "result_k":           result_k,
+        "result_sc":          result_sc,
+        "result_ut":          result_ut,
+        "feature_names_used": feature_names_used,
+        "feat_df":            feat_df,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="最適K・sc・update_type 予測（教師/実験トレース分割対応）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+        使用例:
+          # 全トレースで学習（TEACHER_TRACES/EXPERIMENT_TRACES をコード内にハードコーディング）
+          python predict_optimal_params.py --dir ./results --out ./output
+
+          # CLI で教師/実験トレースを明示指定
+          python predict_optimal_params.py --dir ./results --out ./output \\
+              --teacher wiki2019 twitter --experiment cachelib_cdn01
+
+          # MR重視の combined score で学習
+          python predict_optimal_params.py --dir ./results --target combined --w-mr 0.7 --w-bmr 0.3
+
+          # トレースごとに個別に予測
+          python predict_optimal_params.py --dir ./results --split-traces
+        """),
+    )
+    parser.add_argument("--dir",       required=True, help="CSVディレクトリ")
+    parser.add_argument("--out",       default="./output", help="出力ディレクトリ")
+    parser.add_argument("--target",    default="combined",
+                        choices=["mr", "bmr", "combined"],
+                        help="最適化ターゲット (default: combined)")
+    parser.add_argument("--w-mr",      type=float, default=0.5)
+    parser.add_argument("--w-bmr",     type=float, default=0.5)
+    parser.add_argument("--trace",     default=None,
+                        help="特定トレースのみ処理（教師側のみに適用）")
+    parser.add_argument("--split-traces", action="store_true",
+                        help="トレースごとに個別に予測（教師フェーズ）")
+    parser.add_argument("--label",     default=None,
+                        help="出力ファイル名プレフィックス（省略時: ディレクトリ名）")
+    parser.add_argument("--max-depth", type=int, default=4,
+                        help="決定木の最大深さ (default 4)")
+    parser.add_argument("--teacher",   nargs="*", default=None, metavar="TRACE",
+                        help="教師トレース名（複数可）。指定するとコード内 TEACHER_TRACES を上書き")
+    parser.add_argument("--experiment", nargs="*", default=None, metavar="TRACE",
+                        help="実験トレース名（複数可）。指定するとコード内 EXPERIMENT_TRACES を上書き")
+    args = parser.parse_args()
+
+    os.makedirs(args.out, exist_ok=True)
+
+    total_w = args.w_mr + args.w_bmr
+    w_mr  = args.w_mr  / total_w
+    w_bmr = args.w_bmr / total_w
+
+    print("[1/3] CSVをスキャン中...")
+    meta = collect_csvs(args.dir)
+    all_traces = sorted(meta["trace"].unique())
+    print(f"  {len(meta)} 件, トレース={all_traces}")
+
+    teacher_list    = args.teacher    if args.teacher    is not None else TEACHER_TRACES
+    experiment_list = args.experiment if args.experiment is not None else EXPERIMENT_TRACES
+
+    has_split = bool(teacher_list) or bool(experiment_list)
+
+    if has_split:
+        if not teacher_list:
+            teacher_list = [t for t in all_traces if t not in experiment_list]
+        if not experiment_list:
+            experiment_list = [t for t in all_traces if t not in teacher_list]
+
+        overlap = set(teacher_list) & set(experiment_list)
+        if overlap:
+            print(f"  [警告] 教師と実験に重複トレースがあります: {overlap}")
+
+        print(f"\n[2/3] 教師フェーズ: {teacher_list}")
+        meta_teacher = meta[meta["trace"].isin(teacher_list)].copy()
+        if meta_teacher.empty:
+            raise ValueError(f"教師トレースが見つかりません: {teacher_list}")
+
+        label_teacher = args.label or f"{Path(args.dir).name}_teacher"
+        trained = run_prediction(
+            meta_teacher, label_teacher, args.out,
+            target=args.target, w_mr=w_mr, w_bmr=w_bmr,
+            max_depth=args.max_depth,
+        )
+
+        if not trained:
+            print("  [エラー] 教師フェーズで学習に失敗しました。")
+            return
+
+        print(f"\n[3/3] 実験フェーズ: {experiment_list}")
+        meta_exp = meta[meta["trace"].isin(experiment_list)].copy()
+        if meta_exp.empty:
+            print(f"  [警告] 実験トレースが見つかりません: {experiment_list}")
+        else:
+            label_exp = args.label or f"{Path(args.dir).name}_experiment"
+            predict_for_experiment_traces(
+                experiment_filepaths = meta_exp["filepath"].tolist(),
+                result_k             = trained["result_k"],
+                result_sc            = trained["result_sc"],
+                result_ut            = trained["result_ut"],
+                feature_names_used   = trained["feature_names_used"],
+                out_dir              = args.out,
+                label                = label_exp,
+            )
+    else:
+        print(f"\n[2/3] 通常モードで学習中（教師/実験分割なし）...")
+        if args.split_traces:
+            target_traces = all_traces
+            if args.trace:
+                target_traces = [args.trace]
+            for trace in target_traces:
+                meta_t = meta[meta["trace"] == trace].copy()
+                run_prediction(meta_t, trace, args.out,
+                               target=args.target, w_mr=w_mr, w_bmr=w_bmr,
+                               max_depth=args.max_depth)
+        else:
+            if args.trace:
+                meta = meta[meta["trace"] == args.trace].copy()
+            label = args.label or Path(args.dir).name
+            run_prediction(meta, label, args.out,
+                           target=args.target, w_mr=w_mr, w_bmr=w_bmr,
+                           max_depth=args.max_depth)
+
+    print(f"\nAll done. Output: {args.out}/")
+
+
+if __name__ == "__main__":
+    main()
