@@ -266,6 +266,67 @@ def load_one(filepath: str) -> tuple[pd.DataFrame, dict]:
     df["miss_rate"]      = df["miss_ratio"]        # MR: 小さいほど良い
     df["byte_miss_rate"] = df["miss_byte_ratio"]   # BMR: 小さいほど良い
 
+    # ── LRU / M1 ベースライン列 ──────────────────────────────────────────
+    # ※ n_req_LRU / n_miss_LRU 等の絶対カウントは不要（比率で比較）
+    _has_lru = "miss_ratio_lru" in df.columns
+    _has_m1  = "miss_ratio_m1"  in df.columns
+
+    if _has_lru:
+        df["miss_rate_LRU"]      = df["miss_ratio_lru"]
+        df["byte_miss_rate_LRU"] = (df["miss_byte_ratio_lru"]
+                                    if "miss_byte_ratio_lru" in df.columns
+                                    else np.nan)
+    else:
+        df["miss_rate_LRU"]      = np.nan
+        df["byte_miss_rate_LRU"] = np.nan
+
+    if _has_m1:
+        df["miss_rate_M1"]       = df["miss_ratio_m1"]
+        df["byte_miss_rate_M1"]  = (df["miss_byte_ratio_m1"]
+                                    if "miss_byte_ratio_m1" in df.columns
+                                    else np.nan)
+    else:
+        df["miss_rate_M1"]       = np.nan
+        df["byte_miss_rate_M1"]  = np.nan
+
+    # S3-FIFO 単体ベースライン
+    _has_s3 = "miss_ratio_s3fifo" in df.columns
+    if _has_s3:
+        df["miss_rate_S3FIFO"]      = df["miss_ratio_s3fifo"]
+        df["byte_miss_rate_S3FIFO"] = (df["miss_byte_ratio_s3fifo"]
+                                       if "miss_byte_ratio_s3fifo" in df.columns
+                                       else np.nan)
+    else:
+        df["miss_rate_S3FIFO"]      = np.nan
+        df["byte_miss_rate_S3FIFO"] = np.nan
+
+    # M2+S3-FIFO: サイズ管理レイヤー(M2) + S3-FIFO退避ポリシーの組み合わせ
+    # CSV に miss_ratio_m2s3fifo 列がある場合に読み込む
+    _has_m2s3 = "miss_ratio_m2s3fifo" in df.columns
+    if _has_m2s3:
+        df["miss_rate_M2S3FIFO"]      = df["miss_ratio_m2s3fifo"]
+        df["byte_miss_rate_M2S3FIFO"] = (df["miss_byte_ratio_m2s3fifo"]
+                                         if "miss_byte_ratio_m2s3fifo" in df.columns
+                                         else np.nan)
+    else:
+        df["miss_rate_M2S3FIFO"]      = np.nan
+        df["byte_miss_rate_M2S3FIFO"] = np.nan
+
+    # ── ウォームアップ除外 ────────────────────────────────────────────────
+    # miss_ratio ≈ miss_ratio_LRU の行はキャッシュがまだ埋まっていない期間。
+    # この期間はすべての手法が同一のミス率を示すため、比較分析から除外する。
+    n_warmup = 0
+    if _has_lru:
+        warmup_mask = np.isclose(
+            df["miss_rate"].values.astype(float),
+            df["miss_rate_LRU"].values.astype(float),
+            rtol=1e-4, atol=1e-7,
+        )
+        n_warmup = int(warmup_mask.sum())
+        if n_warmup > 0:
+            df = df[~warmup_mask].copy()
+    cond["n_warmup_excluded"] = n_warmup
+
     # ── JS ダイバージェンスを行ごとに計算 ────────────────────────────────
     now_arr  = df[now_cols].values.astype(float)
     make_arr = df[make_cols].values.astype(float)
@@ -340,8 +401,30 @@ def aggregate(master: pd.DataFrame) -> pd.DataFrame:
             "pearson_r_BMR_eff":    r_bmr,  # 正が仮説通り（JS↑→BMR↑）
             "pearson_p_BMR_eff":    p_bmr,
             "n_windows":            len(g),
+            # ── LRU / M1 ベースライン ────────────────────────────────────
+            "mean_MR_LRU":  g["miss_rate_LRU"].mean()      if "miss_rate_LRU"      in g.columns else np.nan,
+            "mean_BMR_LRU": g["byte_miss_rate_LRU"].mean() if "byte_miss_rate_LRU" in g.columns else np.nan,
+            "mean_MR_M1":       g["miss_rate_M1"].mean()        if "miss_rate_M1"        in g.columns else np.nan,
+            "mean_BMR_M1":      g["byte_miss_rate_M1"].mean()   if "byte_miss_rate_M1"   in g.columns else np.nan,
+            "mean_MR_S3FIFO":   g["miss_rate_S3FIFO"].mean()    if "miss_rate_S3FIFO"    in g.columns else np.nan,
+            "mean_BMR_S3FIFO":  g["byte_miss_rate_S3FIFO"].mean() if "byte_miss_rate_S3FIFO" in g.columns else np.nan,
+            "mean_MR_M2S3FIFO":  g["miss_rate_M2S3FIFO"].mean()  if "miss_rate_M2S3FIFO"  in g.columns else np.nan,
+            "mean_BMR_M2S3FIFO": g["byte_miss_rate_M2S3FIFO"].mean() if "byte_miss_rate_M2S3FIFO" in g.columns else np.nan,
         })
-    return pd.DataFrame(recs)
+    # ── 相対改善率を計算（正 = M2がベースラインより良い） ─────────────────
+    df = pd.DataFrame(recs)
+    for mr_base, bmr_base, sfx in [
+        ("mean_MR_LRU",    "mean_BMR_LRU",    "LRU"),
+        ("mean_MR_M1",     "mean_BMR_M1",     "M1"),
+        ("mean_MR_S3FIFO", "mean_BMR_S3FIFO", "S3FIFO"),
+    ]:
+        if mr_base in df.columns and not df[mr_base].isna().all():
+            df[f"impr_MR_{sfx}"]  = (df[mr_base]  - df["mean_MR"])  / df[mr_base].replace(0, np.nan)
+            df[f"impr_BMR_{sfx}"] = (df[bmr_base] - df["mean_BMR"]) / df[bmr_base].replace(0, np.nan)
+        else:
+            df[f"impr_MR_{sfx}"]  = np.nan
+            df[f"impr_BMR_{sfx}"] = np.nan
+    return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -406,6 +489,269 @@ def plot_ma_convergence(agg: pd.DataFrame, out_dir: str, trace: str):
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {path}")
+
+
+# ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+# 図5: LRU / S3-FIFO / M1 / M2+LRU / M2+S3-FIFO ベースライン比較
+# ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+def plot_baseline_comparison(agg: pd.DataFrame, out_dir: str, trace: str):
+    # 利用可能なベースライン列を確認
+    has_lru   = 'mean_MR_LRU'    in agg.columns and not agg['mean_MR_LRU'].isna().all()
+    has_m1    = 'mean_MR_M1'     in agg.columns and not agg['mean_MR_M1'].isna().all()
+    has_s3    = 'mean_MR_S3FIFO' in agg.columns and not agg['mean_MR_S3FIFO'].isna().all()
+    has_m2s3  = 'mean_MR_M2S3FIFO' in agg.columns and not agg['mean_MR_M2S3FIFO'].isna().all()
+    if not has_lru and not has_m1 and not has_s3:
+        print(f'  [fig5 skip] ベースライン列がありません: {trace}')
+        return
+
+    ut_list = sorted(agg['update_type'].unique())
+    fig, axes = plt.subplots(1, 5, figsize=(30, 5))
+
+    def best_m2(ut, metric):
+        sub = agg[agg['update_type'] == ut]
+        return sub[metric].min() if not sub.empty else np.nan
+
+    # 各ベースラインの設定 (名前, agg列, 色, ハッチ, 有効フラグ)
+    BL_MR = [
+        ('LRU',        'mean_MR_LRU',      '#BDBDBD', '//',    has_lru),
+        ('S3-FIFO',    'mean_MR_S3FIFO',   '#FFB74D', 'xx',   has_s3),
+        ('M1+LRU',     'mean_MR_M1',       '#90CAF9', '\\\\', has_m1),
+    ]
+    BL_BMR = [
+        ('LRU',        'mean_BMR_LRU',     '#BDBDBD', '//',    has_lru),
+        ('S3-FIFO',    'mean_BMR_S3FIFO',  '#FFB74D', 'xx',   has_s3),
+        ('M1+LRU',     'mean_BMR_M1',      '#90CAF9', '\\\\', has_m1),
+    ]
+
+    # ── (a) MR 比較 ──────────────────────────────────────────────
+    ax = axes[0]
+    x = np.arange(len(ut_list))
+    n_bl = sum(1 for *_, ok in BL_MR if ok) + 1 + (1 if has_m2s3 else 0)  # +M2+LRU +M2+S3
+    w_bar = min(0.18, 0.85 / max(n_bl, 1))
+    offsets = np.linspace(-(n_bl-1)/2, (n_bl-1)/2, n_bl) * w_bar
+    idx = 0
+    for bl_name, col, color, hatch, ok in BL_MR:
+        if not ok: continue
+        vals = [agg[agg['update_type']==ut][col].mean() for ut in ut_list]
+        ax.bar(x + offsets[idx], vals, w_bar, label=bl_name,
+               color=color, hatch=hatch, edgecolor='white', alpha=0.85)
+        idx += 1
+    # M2+LRU (本手法)
+    m2lru_vals = [best_m2(ut, 'mean_MR') for ut in ut_list]
+    ax.bar(x + offsets[idx], m2lru_vals, w_bar, label='M2+LRU',
+           color=[UPDATE_TYPE_COLOR.get(ut,'#333') for ut in ut_list],
+           edgecolor='white', alpha=0.90)
+    idx += 1
+    # M2+S3-FIFO（あれば）
+    if has_m2s3:
+        m2s3_vals = [best_m2(ut, 'mean_MR_M2S3FIFO') for ut in ut_list]
+        ax.bar(x + offsets[idx], m2s3_vals, w_bar, label='M2+S3-FIFO',
+               color=[UPDATE_TYPE_COLOR.get(ut,'#333') for ut in ut_list],
+               hatch='**', edgecolor='white', alpha=0.90)
+    ax.set_xticks(x)
+    ax.set_xticklabels([UPDATE_TYPE_LABEL_EN.get(u,f'type{u}') for u in ut_list],
+                       rotation=15, ha='right', fontsize=8)
+    ax.set_ylabel('Mean Miss Rate (lower is better)', fontsize=9)
+    ax.set_title('(a) MR comparison\nLRU / S3-FIFO / M1 / M2+LRU / M2+S3', fontsize=10)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # ── (b) BMR 比較 ─────────────────────────────────────────────
+    ax = axes[1]
+    has_lru_bmr  = 'mean_BMR_LRU'    in agg.columns and not agg['mean_BMR_LRU'].isna().all()
+    has_s3_bmr   = 'mean_BMR_S3FIFO' in agg.columns and not agg['mean_BMR_S3FIFO'].isna().all()
+    has_m1_bmr   = 'mean_BMR_M1'     in agg.columns and not agg['mean_BMR_M1'].isna().all()
+    has_m2s3_bmr = 'mean_BMR_M2S3FIFO' in agg.columns and not agg['mean_BMR_M2S3FIFO'].isna().all()
+    BL_BMR2 = [
+        ('LRU',     'mean_BMR_LRU',     '#BDBDBD', '//',    has_lru_bmr),
+        ('S3-FIFO', 'mean_BMR_S3FIFO',  '#FFB74D', 'xx',   has_s3_bmr),
+        ('M1+LRU',  'mean_BMR_M1',      '#90CAF9', '\\\\', has_m1_bmr),
+    ]
+    n_bl2 = sum(1 for *_,ok in BL_BMR2 if ok) + 1 + (1 if has_m2s3_bmr else 0)
+    w2 = min(0.18, 0.85 / max(n_bl2, 1))
+    off2 = np.linspace(-(n_bl2-1)/2, (n_bl2-1)/2, n_bl2) * w2
+    idx2 = 0
+    for bl_name, col, color, hatch, ok in BL_BMR2:
+        if not ok: continue
+        vals = [agg[agg['update_type']==ut][col].mean() for ut in ut_list]
+        ax.bar(x + off2[idx2], vals, w2, label=bl_name,
+               color=color, hatch=hatch, edgecolor='white', alpha=0.85)
+        idx2 += 1
+    m2lru_bmr = [best_m2(ut, 'mean_BMR') for ut in ut_list]
+    ax.bar(x + off2[idx2], m2lru_bmr, w2, label='M2+LRU',
+           color=[UPDATE_TYPE_COLOR.get(ut,'#333') for ut in ut_list],
+           edgecolor='white', alpha=0.90)
+    idx2 += 1
+    if has_m2s3_bmr:
+        m2s3_bmr = [best_m2(ut, 'mean_BMR_M2S3FIFO') for ut in ut_list]
+        ax.bar(x + off2[idx2], m2s3_bmr, w2, label='M2+S3-FIFO',
+               color=[UPDATE_TYPE_COLOR.get(ut,'#333') for ut in ut_list],
+               hatch='**', edgecolor='white', alpha=0.90)
+    ax.set_xticks(x)
+    ax.set_xticklabels([UPDATE_TYPE_LABEL_EN.get(u,f'type{u}') for u in ut_list],
+                       rotation=15, ha='right', fontsize=8)
+    ax.set_ylabel('Mean Byte Miss Rate (lower is better)', fontsize=9)
+    ax.set_title('(b) BMR comparison\nLRU / S3-FIFO / M1 / M2+LRU / M2+S3', fontsize=10)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # ── (c) LRU 基準の相対改善率 (%) ─────────────────────────────
+    # 全手法の改善率を一覧し、M2+S3-FIFO が最良になることを示す
+    ax = axes[2]
+    if has_lru:
+        lru_ref = agg['mean_MR_LRU'].mean()
+        methods_c = []
+        if has_s3:   methods_c.append(('S3-FIFO',    agg['mean_MR_S3FIFO'].mean(),  '#FFB74D'))
+        if has_m1:   methods_c.append(('M1+LRU',     agg['mean_MR_M1'].mean(),      '#90CAF9'))
+        methods_c.append(('M2+LRU', agg['mean_MR'].mean(), '#388E3C'))
+        if has_m2s3: methods_c.append(('M2+S3-FIFO', agg['mean_MR_M2S3FIFO'].mean(),'#F57C00'))
+        names_c  = [m[0] for m in methods_c]
+        imprs_c  = [(lru_ref - m[1]) / lru_ref * 100 for m in methods_c]
+        colors_c = [m[2] for m in methods_c]
+        bars_c = ax.bar(range(len(names_c)), imprs_c, color=colors_c,
+                        edgecolor='white', alpha=0.88)
+        for bar, v in zip(bars_c, imprs_c):
+            ax.text(bar.get_x() + bar.get_width()/2,
+                    bar.get_height() + (0.2 if v >= 0 else -0.5),
+                    f'{v:+.2f}%', ha='center', va='bottom', fontsize=8)
+        ax.axhline(0, color='black', linewidth=0.8, linestyle=':')
+        ax.set_xticks(range(len(names_c)))
+        ax.set_xticklabels(names_c, rotation=15, ha='right', fontsize=8)
+        ax.set_ylabel('MR improvement over LRU (%)', fontsize=9)
+        ax.set_title('(c) MR improvement vs LRU (%)\npositive = better than LRU', fontsize=10)
+        ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax.text(0.5, 0.5, 'No LRU baseline', ha='center', va='center',
+                transform=ax.transAxes, fontsize=12, color='gray')
+        ax.axis('off')
+
+    # ── (d) M2+LRU vs M2+S3-FIFO の改善率 vs K ─────────────────
+    ax = axes[3]
+    if has_m2s3 and has_lru:
+        k_vals = sorted(agg['k'].unique())
+        for ut in ut_list:
+            for sc in sorted(agg['size_correction'].unique()):
+                sub = agg[(agg['update_type']==ut)&(agg['size_correction']==sc)].sort_values('k')
+                if sub.empty: continue
+                lru_ref_sub = sub['mean_MR_LRU']
+                impr_m2lru = (lru_ref_sub - sub['mean_MR'])         / lru_ref_sub * 100
+                impr_m2s3  = (lru_ref_sub - sub['mean_MR_M2S3FIFO'])/ lru_ref_sub * 100
+                col = UPDATE_TYPE_COLOR.get(ut,'#333')
+                ls  = UPDATE_TYPE_STYLE.get(ut,'--')
+                mkr = SC_MARKER.get(sc,'o')
+                fst = SC_FILLSTYLE.get(sc,'full')
+                ax.plot(sub['k'], impr_m2lru, color=col, linestyle=ls,
+                        linewidth=1.4, marker=mkr, markersize=5,
+                        fillstyle=fst, markeredgewidth=1.1, alpha=0.65)
+                ax.plot(sub['k'], impr_m2s3, color=col, linestyle=ls,
+                        linewidth=2.0, marker=mkr, markersize=6,
+                        fillstyle='full', markeredgewidth=1.5, alpha=0.95)
+        # 凡例ダミー
+        ax.plot([], [], color='gray', linewidth=1.4, alpha=0.65, label='M2+LRU (thin)')
+        ax.plot([], [], color='gray', linewidth=2.0, label='M2+S3-FIFO (thick)')
+        for ut in ut_list:
+            ax.plot([], [], color=UPDATE_TYPE_COLOR.get(ut,'#333'),
+                    linestyle=UPDATE_TYPE_STYLE.get(ut,'--'),
+                    label=UPDATE_TYPE_LABEL_EN.get(ut,f'type{ut}'), linewidth=1.4)
+        ax.axhline(0, color='black', linewidth=0.8, linestyle=':')
+        ax.set_xlabel('Threshold Count K', fontsize=9)
+        ax.set_ylabel('MR improvement over LRU (%)', fontsize=9)
+        ax.set_title('(d) M2+LRU vs M2+S3-FIFO vs K\nthin=M2+LRU  thick=M2+S3-FIFO', fontsize=10)
+        ax.set_xticks(k_vals)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    elif has_lru and 'impr_MR_LRU' in agg.columns:
+        # M2+S3-FIFOデータなし → M2+LRU改善率のみ表示
+        k_vals = sorted(agg['k'].unique())
+        for ut in ut_list:
+            for sc in sorted(agg['size_correction'].unique()):
+                sub = agg[(agg['update_type']==ut)&(agg['size_correction']==sc)].sort_values('k')
+                if sub.empty or sub['impr_MR_LRU'].isna().all(): continue
+                ax.plot(sub['k'], sub['impr_MR_LRU']*100,
+                        color=UPDATE_TYPE_COLOR.get(ut,'#333'),
+                        linestyle=UPDATE_TYPE_STYLE.get(ut,'--'),
+                        linewidth=1.4, marker=SC_MARKER.get(sc,'o'), markersize=5,
+                        fillstyle=SC_FILLSTYLE.get(sc,'full'),
+                        markeredgewidth=1.1, alpha=0.85)
+        ax.axhline(0, color='black', linewidth=0.8, linestyle=':')
+        ax.set_xlabel('Threshold Count K', fontsize=9)
+        ax.set_ylabel('MR improvement over LRU (%)', fontsize=9)
+        ax.set_title('(d) M2+LRU improvement vs K\n(M2+S3-FIFO data not yet available)', fontsize=10)
+        ax.set_xticks(k_vals)
+        ax.grid(True, alpha=0.3)
+        for ut in ut_list:
+            ax.plot([], [], color=UPDATE_TYPE_COLOR.get(ut,'#333'),
+                    linestyle=UPDATE_TYPE_STYLE.get(ut,'--'),
+                    label=UPDATE_TYPE_LABEL_EN.get(ut,f'type{ut}'), linewidth=1.4)
+        ax.legend(fontsize=7)
+    else:
+        ax.text(0.5, 0.5, 'No LRU/S3-FIFO data', ha='center', va='center',
+                transform=ax.transAxes, color='gray')
+        ax.axis('off')
+
+    # ── (e) 5段階カスケード: LRU→S3-FIFO→M1+LRU→M2+LRU→M2+S3-FIFO ──
+    # 各 update_type の best K/sc を選び、段階的な改善をウォーターフォールで描く
+    # 縦軸: 絶対 MR 値（各バーの高さが実際のMR）
+    # 各段階の下矢印 delta がその手法の「追加改善量」を示す
+    ax = axes[4]
+    STAGES = [
+        ('LRU',       'mean_MR_LRU',      '#BDBDBD', has_lru),
+        ('S3-FIFO',   'mean_MR_S3FIFO',   '#FFB74D', has_s3),
+        ('M1+LRU',    'mean_MR_M1',        '#90CAF9', has_m1),
+        ('M2+LRU',    'mean_MR',           '#388E3C', True),
+        ('M2+S3-FIFO','mean_MR_M2S3FIFO',  '#F57C00', has_m2s3),
+    ]
+    active = [(n, col, c) for n, col, c, ok in STAGES if ok]
+    n_stages = len(active)
+
+    # 各 update_type について絶対MRを収集し、update_type別に折れ線で重ねる
+    for ut in ut_list:
+        sub = agg[agg['update_type'] == ut]
+        if sub.empty: continue
+        best_row = sub.loc[sub['mean_MR'].idxmin()]
+        stage_vals = []
+        for sn, scol, sc_color in active:
+            v = float(best_row[scol]) if scol in best_row.index and not np.isnan(best_row[scol]) else None
+            stage_vals.append(v)
+        # 欠損を除いてプロット
+        xs = [i for i,v in enumerate(stage_vals) if v is not None]
+        ys = [v for v in stage_vals if v is not None]
+        col = UPDATE_TYPE_COLOR.get(ut, '#333')
+        if xs:
+            ax.plot(xs, ys, color=col, marker='o', markersize=7,
+                    linewidth=1.8, linestyle=UPDATE_TYPE_STYLE.get(ut,'--'),
+                    label=UPDATE_TYPE_LABEL_EN.get(ut,f'type{ut}'), alpha=0.88)
+            # 各ステージのデルタをアノテーション
+            for i in range(1, len(xs)):
+                if xs[i] - xs[i-1] == 1:
+                    delta = ys[i] - ys[i-1]
+                    mid_y = (ys[i] + ys[i-1]) / 2
+                    ax.annotate(f'{delta:+.4f}',
+                                xy=(xs[i]-0.5, mid_y),
+                                fontsize=6, ha='center', va='center',
+                                color='red' if delta > 0 else 'green',
+                                bbox=dict(boxstyle='round,pad=0.1', fc='white', alpha=0.6, ec='none'))
+    ax.set_xticks(range(n_stages))
+    ax.set_xticklabels([n for n,*_ in active], rotation=15, ha='right', fontsize=8)
+    ax.set_ylabel('Mean Miss Rate (MR)', fontsize=9)
+    ax.set_title('(e) 5-stage improvement cascade (MR)\n'
+                 'LRU -> S3-FIFO -> M1+LRU -> M2+LRU -> M2+S3-FIFO\n'
+                 'delta: red=worse green=better', fontsize=9)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    plt.suptitle(
+        f'[Baseline] 5-stage comparison  |  Trace: {trace}\n'
+        'Warm-up excluded. M2+S3-FIFO shown if miss_ratio_m2s3fifo column present.',
+        fontsize=11,
+    )
+    plt.tight_layout()
+    fpath = os.path.join(out_dir, f'{trace}_fig5_baseline_comparison.png')
+    plt.savefig(fpath, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  Saved: {fpath}')
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -802,6 +1148,41 @@ def print_summary(agg: pd.DataFrame, trace: str):
               f"    K={int(br_bmr['k']):>2}  BMR={br_bmr['mean_BMR']:.4f}"
               f"  ({'on' if br_mr['size_correction'] else 'off'}/{'on' if br_bmr['size_correction'] else 'off'})")
 
+    # ── ベースライン比較 ─────────────────────────────────────────────────
+    has_lru_agg = "mean_MR_LRU" in agg.columns and not agg["mean_MR_LRU"].isna().all()
+    has_m1_agg  = "mean_MR_M1"  in agg.columns and not agg["mean_MR_M1"].isna().all()
+    if has_lru_agg or has_m1_agg:
+        print(f"\n  --- Baseline comparison (best M2 per update_type) ---")
+        hdr = f"  {'update_type':<20} {'MR_LRU':>8} {'MR_S3':>9} {'MR_M1':>8} {'MR_M2':>8} {'MR_M2+S3':>10}  {'imprLRU':>9} {'imprS3':>9} {'imprM1':>9} {'imprM2+S3':>12}"
+        print(hdr)
+        print(f"  {'-'*70}")
+        for ut in sorted(agg["update_type"].unique()):
+            sub  = agg[agg["update_type"] == ut]
+            best = sub.loc[sub["mean_MR"].idxmin()]
+            mr_lru = best["mean_MR_LRU"] if has_lru_agg else float("nan")
+            mr_m1  = best["mean_MR_M1"]  if has_m1_agg  else float("nan")
+            mr_m2  = best["mean_MR"]
+            impr_lru = (mr_lru - mr_m2) / mr_lru * 100 if not np.isnan(mr_lru) and mr_lru > 0 else float("nan")
+            impr_m1  = (mr_m1  - mr_m2) / mr_m1  * 100 if not np.isnan(mr_m1)  and mr_m1  > 0 else float("nan")
+            label = UPDATE_TYPE_LABEL.get(ut, f"type{ut}")
+            impr_lru_s = f"{impr_lru:+.2f}%" if not np.isnan(impr_lru) else "   N/A"
+            impr_m1_s  = f"{impr_m1:+.2f}%"  if not np.isnan(impr_m1)  else "   N/A"
+            has_s3_agg   = "mean_MR_S3FIFO"   in agg.columns and not agg["mean_MR_S3FIFO"].isna().all()
+            mr_s3        = best["mean_MR_S3FIFO"]   if has_s3_agg   else float("nan")
+            impr_s3      = (mr_s3 - mr_m2) / mr_s3 * 100 if not np.isnan(mr_s3) and mr_s3 > 0 else float("nan")
+            impr_s3_s    = f"{impr_s3:+.2f}%"  if not np.isnan(impr_s3)  else "   N/A"
+            has_m2s3_agg  = "mean_MR_M2S3FIFO" in agg.columns and not agg["mean_MR_M2S3FIFO"].isna().all()
+            mr_m2s3       = best["mean_MR_M2S3FIFO"] if has_m2s3_agg else float("nan")
+            impr_m2s3_lru = (mr_lru - mr_m2s3) / mr_lru * 100 if not (np.isnan(mr_m2s3) or np.isnan(mr_lru) or mr_lru == 0) else float("nan")
+            impr_m2s3_s   = f"{impr_m2s3_lru:+.2f}%" if not np.isnan(impr_m2s3_lru) else "   N/A"
+            print(f"  {label:<20} {mr_lru:>8.4f} {mr_s3:>9.4f} {mr_m1:>8.4f} {mr_m2:>8.4f} {mr_m2s3:>10.4f}"
+                  f"  {impr_lru_s:>9} {impr_s3_s:>9} {impr_m1_s:>9} {impr_m2s3_s:>12}")
+        print()
+        print(f"  imprLRU   = (LRU  - M2+LRU) / LRU      [positive = M2+LRU outperforms LRU]")
+        print(f"  imprS3    = (S3   - M2+LRU) / S3       [positive = M2+LRU outperforms S3-FIFO standalone]")
+        print(f"  imprM1    = (M1   - M2+LRU) / M1       [positive = M2+LRU outperforms M1+LRU]")
+        print(f"  imprM2+S3 = (LRU  - M2+S3-FIFO) / LRU [positive = M2+S3-FIFO outperforms LRU]")
+
     print(f"\n{'='*70}")
 
 
@@ -999,6 +1380,7 @@ def run_one_trace(meta_trace, trace: str, out_dir: str, w_mr: float = 0.5, w_bmr
     plot_k_curves(agg,           out_dir, trace)   # fig2
     plot_size_correction(agg,    out_dir, trace)   # fig3
     plot_pareto(agg,             out_dir, trace)   # fig4: Pareto + combined ranking
+    plot_baseline_comparison(agg, out_dir, trace) # fig5: LRU/M1 vs M2 baseline
 
     # Add combined score to agg CSV
     scored = combined_score(agg, w_mr=w_mr, w_bmr=w_bmr)
@@ -1014,6 +1396,7 @@ def run_one_trace(meta_trace, trace: str, out_dir: str, w_mr: float = 0.5, w_bmr
     print(f"     {trace}_fig2_optimal_k.png")
     print(f"     {trace}_fig3_size_correction.png")
     print(f"     {trace}_fig4_pareto_combined.png     <- Pareto + combined ranking")
+    print(f"     {trace}_fig5_baseline_comparison.png  <- LRU/M1/M2 comparison (if columns present)")
     print(f"     {trace}_agg.csv  (includes norm_MR, norm_BMR, combined_score)")
 
     return agg
