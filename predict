@@ -1221,40 +1221,68 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
             if wt_feat is None:
                 continue
 
+            # ── LRU baseline at this window (same for all conditions) ─────
+            lru_mr_t  = (float(pd.to_numeric(ref_df["miss_ratio_lru"].iloc[t],      errors="coerce"))
+                         if "miss_ratio_lru"      in ref_df.columns else np.nan)
+            lru_bmr_t = (float(pd.to_numeric(ref_df["miss_byte_ratio_lru"].iloc[t], errors="coerce"))
+                         if "miss_byte_ratio_lru" in ref_df.columns else np.nan)
+
             perf_t = {}
             for key, df in cond_dfs.items():
                 if t >= len(df):
                     continue
-                mr  = float(pd.to_numeric(df["miss_ratio"].iloc[t],      errors="coerce"))                       if "miss_ratio"      in df.columns else np.nan
-                bmr = float(pd.to_numeric(df["miss_byte_ratio"].iloc[t], errors="coerce"))                       if "miss_byte_ratio" in df.columns else np.nan
-                lru_mr_val = float(pd.to_numeric(ref_df["miss_ratio_lru"].iloc[t], errors="coerce")) \
-                             if "miss_ratio_lru" in ref_df.columns else np.nan
-                perf_t[key] = {"mr": mr, "bmr": bmr, "lru_mr": lru_mr_val}
+                mr  = (float(pd.to_numeric(df["miss_ratio"].iloc[t],      errors="coerce"))
+                       if "miss_ratio"      in df.columns else np.nan)
+                bmr = (float(pd.to_numeric(df["miss_byte_ratio"].iloc[t], errors="coerce"))
+                       if "miss_byte_ratio" in df.columns else np.nan)
+                perf_t[key] = {"mr": mr, "bmr": bmr,
+                               "lru_mr": lru_mr_t, "lru_bmr": lru_bmr_t}
             if not perf_t:
                 continue
 
-            # Store raw per-condition performance for regret calculation
+            # Store per-condition performance for regret calculation
             if return_perf:
                 perf_matrix[trace_name][t] = dict(perf_t)
 
+            # ── LRU-relative scoring ──────────────────────────────────────
+            # Normalise by the LRU baseline so score_margin and the combined
+            # weight are scale-invariant across traces with different overall
+            # MR/BMR levels (e.g. 80% vs 20%).  Within a single window,
+            # argmin(mr / lru_mr) == argmin(mr) so labels are unchanged;
+            # the benefit is that score_margin and k_sensitivity become
+            # LRU-relative fractions rather than absolute MR differences.
             scores = {}
             for key, v in perf_t.items():
                 if np.isnan(v["mr"]) or np.isnan(v["bmr"]):
                     continue
+                mr  = v["mr"]
+                bmr = v["bmr"]
                 if target == "mr":
-                    scores[key] = v["mr"]
+                    # divide by LRU_MR → ratio; argmin unchanged, margin = LRU-relative
+                    scores[key] = (mr / lru_mr_t
+                                   if not np.isnan(lru_mr_t) and lru_mr_t > EPSILON
+                                   else mr)
                 elif target == "bmr":
-                    scores[key] = v["bmr"]
-                else:
-                    scores[key] = (w_mr * (v["mr"] - mr_min) / mr_r
-                                   + w_bmr * (v["bmr"] - bmr_min) / bmr_r)
+                    scores[key] = (bmr / lru_bmr_t
+                                   if not np.isnan(lru_bmr_t) and lru_bmr_t > EPSILON
+                                   else bmr)
+                else:  # "combined" or "pareto"
+                    # LRU-relative combined: weight by own-baseline, not global range
+                    mr_norm  = (mr  / lru_mr_t
+                                if not np.isnan(lru_mr_t)  and lru_mr_t  > EPSILON
+                                else (mr  - mr_min)  / mr_r)
+                    bmr_norm = (bmr / lru_bmr_t
+                                if not np.isnan(lru_bmr_t) and lru_bmr_t > EPSILON
+                                else (bmr - bmr_min) / bmr_r)
+                    scores[key] = w_mr * mr_norm + w_bmr * bmr_norm
             if not scores:
                 continue
 
             best_key          = min(scores, key=scores.get)
             opt_k, opt_sc, opt_ut = best_key
 
-            # score_margin: 1位と2位の差（小さいほどラベルノイズが大きい）
+            # score_margin: now LRU-relative (scores are LRU-normalised)
+            # Q1(tight) ~ 0.001 means 2nd-best is 0.1% of LRU worse than best
             sorted_scores = sorted(scores.values())
             score_margin  = float(sorted_scores[1] - sorted_scores[0]) \
                             if len(sorted_scores) >= 2 else np.nan
@@ -1267,13 +1295,8 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
                 par_best = best_key
             par_k, par_sc, par_ut = par_best
 
-            # lru_mr at this window (from any condition's perf_t)
-            lru_mr_t = next(
-                (v["lru_mr"] for v in perf_t.values() if not np.isnan(v.get("lru_mr", np.nan))),
-                np.nan,
-            )
-
-            # K-sensitivity: how much does the best MR vary across different K values?
+            # K-sensitivity: LRU-relative (best-MR spread across K values)
+            # Dividing by LRU_MR makes this scale-invariant across traces.
             best_mr_per_k = {}
             for (kv, scv, utv), v in perf_t.items():
                 mr_v = v.get("mr", np.nan)
@@ -1282,16 +1305,24 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
                 if kv not in best_mr_per_k or mr_v < best_mr_per_k[kv]:
                     best_mr_per_k[kv] = mr_v
             if len(best_mr_per_k) >= 2:
-                k_sensitivity = float(max(best_mr_per_k.values()) - min(best_mr_per_k.values()))
+                k_sens_abs = float(max(best_mr_per_k.values()) - min(best_mr_per_k.values()))
+                k_sensitivity = (k_sens_abs / lru_mr_t
+                                 if not np.isnan(lru_mr_t) and lru_mr_t > EPSILON
+                                 else k_sens_abs)
             else:
                 k_sensitivity = np.nan
 
-            # M1 improvement: relative MR improvement of best config over LRU baseline
-            best_mr_t = perf_t[best_key]["mr"] if best_key in perf_t else np.nan
-            if not np.isnan(lru_mr_t) and not np.isnan(best_mr_t) and lru_mr_t > EPSILON:
-                m1_improvement = float((lru_mr_t - best_mr_t) / lru_mr_t)
-            else:
-                m1_improvement = np.nan
+            # M1 MR improvement: (LRU_MR - best_MR) / LRU_MR
+            best_mr_val = perf_t[best_key]["mr"] if best_key in perf_t else np.nan
+            m1_improvement = (float((lru_mr_t - best_mr_val) / lru_mr_t)
+                              if not np.isnan(lru_mr_t) and not np.isnan(best_mr_val) and lru_mr_t > EPSILON
+                              else np.nan)
+
+            # M1 BMR improvement: (LRU_BMR - best_BMR) / LRU_BMR
+            best_bmr_val = perf_t[best_key]["bmr"] if best_key in perf_t else np.nan
+            m1_bmr_improvement = (float((lru_bmr_t - best_bmr_val) / lru_bmr_t)
+                                  if not np.isnan(lru_bmr_t) and not np.isnan(best_bmr_val) and lru_bmr_t > EPSILON
+                                  else np.nan)
 
             all_rows.append({
                 "trace":               trace_name,
@@ -1304,8 +1335,10 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
                 "pareto_update_type":  par_ut,
                 "score_margin":        score_margin,
                 "lru_mr_t":            lru_mr_t,
+                "lru_bmr_t":           lru_bmr_t,
                 "k_sensitivity":       k_sensitivity,
                 "m1_improvement":      m1_improvement,
+                "m1_bmr_improvement":  m1_bmr_improvement,
                 **wt_feat,
             })
 
@@ -1478,6 +1511,33 @@ def predict_for_experiment_traces(
                 pct_rank_bmr          = np.nan
                 bmr_gap_to_best       = np.nan
 
+            # Pareto composite rank: rank by equal-weight normalized (MR+BMR)
+            mr_vals_all  = {k: v.get("mr",  np.nan) for k, v in perf_at_t.items()}
+            bmr_vals_all = {k: v.get("bmr", np.nan) for k, v in perf_at_t.items()}
+            valid_both = [k for k in mr_vals_all
+                          if not np.isnan(mr_vals_all[k]) and not np.isnan(bmr_vals_all.get(k, np.nan))]
+            if len(valid_both) > 1:
+                mrs_arr  = np.array([mr_vals_all[k]  for k in valid_both])
+                bmrs_arr = np.array([bmr_vals_all[k] for k in valid_both])
+                mr_rng  = float(mrs_arr.max()  - mrs_arr.min())  + EPSILON
+                bmr_rng = float(bmrs_arr.max() - bmrs_arr.min()) + EPSILON
+                composite_scores = {k: (mr_vals_all[k]  - mrs_arr.min())  / mr_rng
+                                       + (bmr_vals_all[k] - bmrs_arr.min()) / bmr_rng
+                                    for k in valid_both}
+                sorted_pareto = sorted(composite_scores, key=lambda k: composite_scores[k])
+                n_cond_pareto = len(valid_both)
+                if pred_key and pred_key in composite_scores:
+                    rank_pareto     = int(sorted_pareto.index(pred_key)) + 1
+                    pct_rank_pareto = float(rank_pareto) / n_cond_pareto
+                    pareto_gap      = float(composite_scores[pred_key]
+                                            - composite_scores[sorted_pareto[0]])
+                else:
+                    rank_pareto = np.nan; pct_rank_pareto = np.nan; pareto_gap = np.nan
+            elif len(valid_both) == 1:
+                rank_pareto = 1; pct_rank_pareto = 1.0; pareto_gap = 0.0
+            else:
+                rank_pareto = np.nan; pct_rank_pareto = np.nan; pareto_gap = np.nan
+
             # Lag-1 baseline regret
             lag_k   = int(grp.loc[t - 1, lbl_k])
             lag_sc  = int(grp.loc[t - 1, lbl_sc])
@@ -1532,6 +1592,10 @@ def predict_for_experiment_traces(
                 "rank_of_predicted_bmr": rank_of_predicted_bmr,
                 "pct_rank_bmr":          pct_rank_bmr,
                 "bmr_gap_to_best":       bmr_gap_to_best,
+                # Pareto composite ranking
+                "rank_of_predicted_pareto": rank_pareto,
+                "pct_rank_pareto":           pct_rank_pareto,
+                "pareto_composite_gap":      pareto_gap,
                 # lag-1 baseline
                 "lag1_K":            lag_k,
                 "lag1_sc":           lag_sc,
@@ -1880,72 +1944,123 @@ def _plot_regret(pred_df, out_dir, label):
                      ["regret_mr", "regret_mr_lag1", "regret_mr_maj"])
     if not has_regret:
         return
+    has_regret_bmr = all(c in pred_df.columns for c in
+                         ["regret_bmr", "regret_bmr_lag1", "regret_bmr_maj"])
+    n_rows_regret = 4 if has_regret_bmr else 2
 
     traces = pred_df["trace"].unique()
     n_tr   = len(traces)
 
-    fig, axes = plt.subplots(2, n_tr,
-                             figsize=(max(7, 6 * n_tr), 9),
+    fig, axes = plt.subplots(n_rows_regret, n_tr,
+                             figsize=(max(7, 6 * n_tr), 4.5 * n_rows_regret),
                              squeeze=False)
 
     for col_i, trace_name in enumerate(traces):
         grp = pred_df[pred_df["trace"] == trace_name].sort_values("window")
         ws  = grp["window"].values
 
-        ax_top = axes[0, col_i]
-        methods = [
+        # ── Rows 0/1: mr ──────────────────────────────────
+        methods_mr = [
             ("regret_mr",      "#9C27B0", "ML model"),
             ("regret_mr_lag1", "#F57C00", "Lag-1"),
             ("regret_mr_maj",  "#9E9E9E", "Majority"),
         ]
-        for col, color, lbl in methods:
+        ax_r0 = axes[0, col_i]
+        for col, color, lbl in methods_mr:
             if col not in grp.columns:
                 continue
             vals = pd.to_numeric(grp[col], errors="coerce")
             roll = vals.rolling(20, min_periods=1).mean().values
-            ax_top.plot(ws, roll, color=color, linewidth=1.3, label=lbl)
+            ax_r0.plot(ws, roll, color=color, linewidth=1.3, label=lbl)
+        ax_r0.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_r0.set_title(f"Trace: {trace_name}\nRolling-20 Regret MR", fontsize=9)
+        ax_r0.set_xlabel("Window t")
+        ax_r0.set_ylabel("Rolling-20 Regret MR (lower=better)")
+        ax_r0.legend(fontsize=8)
+        ax_r0.grid(True, alpha=0.3)
 
-        ax_top.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
-        ax_top.set_title(f"Trace: {trace_name}\nRolling-20 Regret MR", fontsize=9)
-        ax_top.set_xlabel("Window t")
-        ax_top.set_ylabel("Regret MR (lower=better)")
-        ax_top.legend(fontsize=8)
-        ax_top.grid(True, alpha=0.3)
-
-        ax_bot = axes[1, col_i]
-        box_data   = []
-        box_labels = []
-        box_colors = []
-        for col, color, lbl in methods:
+        ax_r1 = axes[1, col_i]
+        box_data_mr   = []
+        box_labels_mr = []
+        box_colors_mr = []
+        for col, color, lbl in methods_mr:
             if col not in grp.columns:
                 continue
             vals = pd.to_numeric(grp[col], errors="coerce").dropna().values
-            box_data.append(vals)
-            box_labels.append(lbl)
-            box_colors.append(color)
-
-        if box_data:
-            bp = ax_bot.boxplot(box_data, patch_artist=True,
+            box_data_mr.append(vals)
+            box_labels_mr.append(lbl)
+            box_colors_mr.append(color)
+        if box_data_mr:
+            bp_mr = ax_r1.boxplot(box_data_mr, patch_artist=True,
                                 medianprops=dict(color="black", linewidth=1.5),
                                 flierprops=dict(marker=".", markersize=3, alpha=0.4))
-            for patch, color in zip(bp["boxes"], box_colors):
+            for patch, color in zip(bp_mr["boxes"], box_colors_mr):
                 patch.set_facecolor(color)
                 patch.set_alpha(0.65)
-            ax_bot.set_xticklabels(box_labels, fontsize=9)
-
-        ax_bot.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
-        ax_bot.set_title(f"Trace: {trace_name}\nRegret MR distribution", fontsize=9)
-        ax_bot.set_ylabel("Regret MR")
-        ax_bot.grid(True, alpha=0.3, axis="y")
-
-        for i, vals in enumerate(box_data, start=1):
+            ax_r1.set_xticklabels(box_labels_mr, fontsize=9)
+        ax_r1.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_r1.set_title(f"Trace: {trace_name}\nRegret MR distribution", fontsize=9)
+        ax_r1.set_ylabel("Regret MR")
+        ax_r1.grid(True, alpha=0.3, axis="y")
+        for i, vals in enumerate(box_data_mr, start=1):
             med = float(np.nanmedian(vals))
-            ax_bot.text(i, med, f" {med:.4f}", fontsize=7,
-                        va="center", ha="left", color="black")
+            ax_r1.text(i, med, f" {med:.4f}", fontsize=7,
+                       va="center", ha="left", color="black")
+
+        if not has_regret_bmr:
+            continue
+
+        # ── Rows 2/3: bmr ──────────────────────────────────
+        methods_bmr = [
+            ("regret_bmr",      "#0288D1", "ML model"),
+            ("regret_bmr_lag1", "#F57C00", "Lag-1"),
+            ("regret_bmr_maj",  "#9E9E9E", "Majority"),
+        ]
+        ax_r0 = axes[2, col_i]
+        for col, color, lbl in methods_bmr:
+            if col not in grp.columns:
+                continue
+            vals = pd.to_numeric(grp[col], errors="coerce")
+            roll = vals.rolling(20, min_periods=1).mean().values
+            ax_r0.plot(ws, roll, color=color, linewidth=1.3, label=lbl)
+        ax_r0.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_r0.set_title(f"Trace: {trace_name}\nRolling-20 Regret BMR", fontsize=9)
+        ax_r0.set_xlabel("Window t")
+        ax_r0.set_ylabel("Rolling-20 Regret BMR (lower=better)")
+        ax_r0.legend(fontsize=8)
+        ax_r0.grid(True, alpha=0.3)
+
+        ax_r1 = axes[3, col_i]
+        box_data_bmr   = []
+        box_labels_bmr = []
+        box_colors_bmr = []
+        for col, color, lbl in methods_bmr:
+            if col not in grp.columns:
+                continue
+            vals = pd.to_numeric(grp[col], errors="coerce").dropna().values
+            box_data_bmr.append(vals)
+            box_labels_bmr.append(lbl)
+            box_colors_bmr.append(color)
+        if box_data_bmr:
+            bp_bmr = ax_r1.boxplot(box_data_bmr, patch_artist=True,
+                                medianprops=dict(color="black", linewidth=1.5),
+                                flierprops=dict(marker=".", markersize=3, alpha=0.4))
+            for patch, color in zip(bp_bmr["boxes"], box_colors_bmr):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.65)
+            ax_r1.set_xticklabels(box_labels_bmr, fontsize=9)
+        ax_r1.axhline(0.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_r1.set_title(f"Trace: {trace_name}\nRegret BMR distribution", fontsize=9)
+        ax_r1.set_ylabel("Regret BMR")
+        ax_r1.grid(True, alpha=0.3, axis="y")
+        for i, vals in enumerate(box_data_bmr, start=1):
+            med = float(np.nanmedian(vals))
+            ax_r1.text(i, med, f" {med:.4f}", fontsize=7,
+                       va="center", ha="left", color="black")
 
     plt.suptitle(
         f"Regret Analysis  |  {label}\n"
-        "(Regret = MR_chosen - MR_oracle_best;  green line = 0 = perfect)",
+        "(Regret = chosen - oracle_best;  green line = 0 = perfect)",
         fontsize=10, y=1.01,
     )
     plt.tight_layout()
@@ -1975,8 +2090,11 @@ def _plot_rank_analysis(pred_df, out_dir, label):
     traces = pred_df["trace"].unique()
     n_tr   = len(traces)
 
-    has_bmr_rank = "rank_of_predicted_bmr" in pred_df.columns
-    n_rows = 5 if has_bmr_rank else 3
+    has_bmr_rank    = "rank_of_predicted_bmr"    in pred_df.columns
+    has_pareto_rank = "rank_of_predicted_pareto" in pred_df.columns
+    n_rows = (7 if (has_bmr_rank and has_pareto_rank)
+              else (6 if has_pareto_rank
+              else (5 if has_bmr_rank else 3)))
 
     fig, axes = plt.subplots(n_rows, n_tr,
                              figsize=(max(7, 6 * n_tr), 3.5 * n_rows),
@@ -2040,6 +2158,31 @@ def _plot_rank_analysis(pred_df, out_dir, label):
         ax2.grid(True, alpha=0.3, axis="y")
 
         if not has_bmr_rank:
+            # No BMR rows — check for Pareto at rows 3+4
+            if not has_pareto_rank:
+                continue
+            rank_par_vals = pd.to_numeric(grp["rank_of_predicted_pareto"], errors="coerce")
+            gap_par_vals  = pd.to_numeric(grp["pareto_composite_gap"],     errors="coerce")
+            ax3b = axes[3, col_i]
+            roll_rank_par = rank_par_vals.rolling(20, min_periods=1).mean().values
+            ax3b.plot(ws, roll_rank_par, color="#2E7D32", linewidth=1.5, label="ML rank Pareto (roll-20)")
+            ax3b.axhline(1.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7, label="Oracle (rank 1)")
+            ax3b.axhline(n_cond / 2.0, color="gray", linestyle=":", linewidth=0.8, alpha=0.7)
+            ax3b.set_xlabel("Window t"); ax3b.set_ylabel("Rank (1=best)")
+            ax3b.set_ylim(bottom=0); ax3b.legend(fontsize=8); ax3b.grid(True, alpha=0.3)
+            med_rp = float(rank_par_vals.dropna().median()) if rank_par_vals.notna().any() else float("nan")
+            pct_rp = float((rank_par_vals == 1).sum() / rank_par_vals.notna().sum()) if rank_par_vals.notna().sum() > 0 else float("nan")
+            ax3b.set_title(f"{trace_name}  |  Pareto rank: median={med_rp:.1f}  rank-1={pct_rp:.1%}", fontsize=8)
+            ax4b = axes[4, col_i]
+            gap_par_clean = gap_par_vals.dropna().values
+            if len(gap_par_clean) > 0:
+                ax4b.hist(gap_par_clean, bins=40, color="#2E7D32", alpha=0.75, edgecolor="white")
+                med_gp = float(np.median(gap_par_clean))
+                ax4b.axvline(med_gp, color="red", linestyle="--", linewidth=1.2, label=f"median={med_gp:.4f}")
+                ax4b.legend(fontsize=8)
+            ax4b.set_title("Pareto Composite Gap", fontsize=9)
+            ax4b.set_xlabel("Composite(predicted) - Composite(best)")
+            ax4b.set_ylabel("Count"); ax4b.grid(True, alpha=0.3, axis="y")
             continue
 
         # ── Row 3: rolling mean rank (BMR) ───────────────────────────────────
@@ -2081,6 +2224,48 @@ def _plot_rank_analysis(pred_df, out_dir, label):
         ax4.set_ylabel("Count")
         ax4.grid(True, alpha=0.3, axis="y")
 
+        if not has_pareto_rank:
+            continue
+
+        # ── Row 5: rolling mean rank (Pareto composite) ──────────────────────
+        rank_par_vals = pd.to_numeric(grp["rank_of_predicted_pareto"], errors="coerce")
+        gap_par_vals  = pd.to_numeric(grp["pareto_composite_gap"],     errors="coerce")
+
+        ax5 = axes[5, col_i]
+        roll_rank_par = rank_par_vals.rolling(20, min_periods=1).mean().values
+        ax5.plot(ws, roll_rank_par, color="#2E7D32", linewidth=1.5, label="ML rank Pareto (roll-20)")
+        ax5.axhline(1.0, color="green", linestyle="--", linewidth=0.8, alpha=0.7, label="Oracle (rank 1)")
+        ax5.axhline(n_cond / 2.0, color="gray", linestyle=":", linewidth=0.8, alpha=0.7, label="Random baseline")
+        ax5.set_xlabel("Window t")
+        ax5.set_ylabel("Rank (1=best)")
+        ax5.set_ylim(bottom=0)
+        ax5.legend(fontsize=8)
+        ax5.grid(True, alpha=0.3)
+        med_rank_par   = float(rank_par_vals.dropna().median()) if rank_par_vals.notna().any() else float("nan")
+        pct_rank_par_1 = float((rank_par_vals == 1).sum() / rank_par_vals.notna().sum()) if rank_par_vals.notna().sum() > 0 else float("nan")
+        ax5.set_title(
+            f"{trace_name}  |  Pareto rank: median={med_rank_par:.1f}  "
+            f"rank-1={pct_rank_par_1:.1%}  (n_cond={n_cond})",
+            fontsize=8,
+        )
+
+        # ── Row 6: pareto_composite_gap histogram ─────────────────────────────
+        ax6 = axes[6, col_i]
+        gap_par_clean = gap_par_vals.dropna().values
+        if len(gap_par_clean) > 0:
+            ax6.hist(gap_par_clean, bins=40, color="#2E7D32", alpha=0.75, edgecolor="white")
+            med_gap_par = float(np.median(gap_par_clean))
+            p95_gap_par = float(np.percentile(gap_par_clean, 95))
+            ax6.axvline(med_gap_par, color="red", linestyle="--", linewidth=1.2,
+                        label=f"median={med_gap_par:.4f}")
+            ax6.axvline(p95_gap_par, color="gray", linestyle=":", linewidth=1.0,
+                        label=f"p95={p95_gap_par:.4f}")
+            ax6.legend(fontsize=8)
+        ax6.set_title("Pareto Composite Gap to Oracle Best", fontsize=9)
+        ax6.set_xlabel("Composite(predicted) - Composite(best)  [norm_MR + norm_BMR]")
+        ax6.set_ylabel("Count")
+        ax6.grid(True, alpha=0.3, axis="y")
+
     # ── Summary stats in suptitle ────────────────────────────────────────────
     all_rank = pd.to_numeric(pred_df["rank_of_predicted"], errors="coerce").dropna()
     all_gap  = pd.to_numeric(pred_df["mr_gap_to_best"],    errors="coerce").dropna()
@@ -2095,13 +2280,21 @@ def _plot_rank_analysis(pred_df, out_dir, label):
         med_gap_bmr_all = float(all_gap_bmr.median()) if len(all_gap_bmr) > 0 else float("nan")
         bmr_suffix = (f"  |  BMR: median_rank={all_rank_bmr.median():.1f}  "
                       f"rank-1={rank1_bmr_pct:.1%}  median_BMR_gap={med_gap_bmr_all:.4f}")
+    pareto_suffix = ""
+    if has_pareto_rank:
+        all_rank_par  = pd.to_numeric(pred_df["rank_of_predicted_pareto"], errors="coerce").dropna()
+        all_gap_par   = pd.to_numeric(pred_df["pareto_composite_gap"],     errors="coerce").dropna()
+        rank1_par_pct = float((all_rank_par == 1).sum() / len(all_rank_par)) if len(all_rank_par) > 0 else float("nan")
+        med_gap_par_all = float(all_gap_par.median()) if len(all_gap_par) > 0 else float("nan")
+        pareto_suffix = (f"  |  Pareto: median_rank={all_rank_par.median():.1f}  "
+                         f"rank-1={rank1_par_pct:.1%}  median_gap={med_gap_par_all:.4f}")
 
     plt.suptitle(
         f"Rank Analysis  |  {label}\n"
         f"MR: median_rank={all_rank.median():.1f}  "
         f"rank-1={rank1_pct:.1%}  "
         f"median_MR_gap={med_gap_all:.4f}"
-        + bmr_suffix,
+        + bmr_suffix + pareto_suffix,
         fontsize=10, y=1.01,
     )
     plt.tight_layout()
@@ -2306,6 +2499,31 @@ def main():
                 w_mr               = trained["w_mr"],
                 w_bmr              = trained["w_bmr"],
             )
+
+            # ── Auto Pareto pass (runs when target != "pareto") ─────────────
+            if trained["target"] != "pareto":
+                print(f"\n[Auto-Pareto] Re-running teacher phase with target=pareto...")
+                label_teacher_p = (args.label or f"{Path(args.dir).name}_teacher") + "_pareto"
+                trained_p = run_prediction(
+                    meta_teacher, label_teacher_p, args.out,
+                    target="pareto", w_mr=0.5, w_bmr=0.5,
+                    max_depth=args.max_depth,
+                )
+                if trained_p:
+                    print(f"[Auto-Pareto] Running experiment phase with pareto models...")
+                    label_exp_p = (args.label or f"{Path(args.dir).name}_experiment") + "_pareto"
+                    predict_for_experiment_traces(
+                        experiment_meta    = meta_exp,
+                        result_k           = trained_p["result_k"],
+                        result_sc          = trained_p["result_sc"],
+                        result_ut          = trained_p["result_ut"],
+                        feature_names_used = trained_p["feature_names_used"],
+                        out_dir            = args.out,
+                        label              = label_exp_p,
+                        target             = "pareto",
+                        w_mr               = 0.5,
+                        w_bmr              = 0.5,
+                    )
     else:
         print("\n[2/3] Standard mode (no teacher/experiment split)...")
         if args.split_traces:
