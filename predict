@@ -663,7 +663,7 @@ def plot_prediction_result(feat_df: pd.DataFrame,
 
     # ── (c) 上位特徴量 vs ターゲットの Spearman 相関 ─────────────────────
     ax = fig.add_subplot(gs[2])
-    feat_cols = [c for c in FEATURE_NAMES if c in feat_df.columns]
+    feat_cols = [c for c in WINDOW_FEATURE_NAMES if c in feat_df.columns]
     y_num     = y_true.astype(float)
     corr_vals = []
     for fc in feat_cols:
