@@ -472,6 +472,7 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray,
     clf = DecisionTreeClassifier(
         max_depth=max_depth,
         min_samples_leaf=2,
+        class_weight="balanced",   # correct for class imbalance (e.g. K=2 vs K=6)
         random_state=42,
     )
 
@@ -1221,11 +1222,26 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
             if wt_feat is None:
                 continue
 
-            # ── LRU baseline at this window (same for all conditions) ─────
+            # ── LRU baseline: current and previous window ─────────────────
             lru_mr_t  = (float(pd.to_numeric(ref_df["miss_ratio_lru"].iloc[t],      errors="coerce"))
                          if "miss_ratio_lru"      in ref_df.columns else np.nan)
             lru_bmr_t = (float(pd.to_numeric(ref_df["miss_byte_ratio_lru"].iloc[t], errors="coerce"))
                          if "miss_byte_ratio_lru" in ref_df.columns else np.nan)
+            lru_mr_t1  = (float(pd.to_numeric(ref_df["miss_ratio_lru"].iloc[t - 1],      errors="coerce"))
+                          if t > 0 and "miss_ratio_lru"      in ref_df.columns else np.nan)
+            lru_bmr_t1 = (float(pd.to_numeric(ref_df["miss_byte_ratio_lru"].iloc[t - 1], errors="coerce"))
+                          if t > 0 and "miss_byte_ratio_lru" in ref_df.columns else np.nan)
+
+            # Inter-window LRU ratios (how much did LRU itself change?)
+            inter_lru_mr  = (lru_mr_t  / (lru_mr_t1  + EPSILON)
+                             if not np.isnan(lru_mr_t1)  and lru_mr_t1  > EPSILON else np.nan)
+            inter_lru_bmr = (lru_bmr_t / (lru_bmr_t1 + EPSILON)
+                             if not np.isnan(lru_bmr_t1) and lru_bmr_t1 > EPSILON else np.nan)
+
+            # Volume ratio between windows (from workload features already computed)
+            # n_req_t / n_req_{t-1} removes volume-driven MR changes from the score
+            vol_ratio      = float(wt_feat.get("wt_inter_n_req",    np.nan))
+            vol_ratio_byte = float(wt_feat.get("wt_inter_req_byte", np.nan))
 
             perf_t = {}
             for key, df in cond_dfs.items():
@@ -1235,7 +1251,12 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
                        if "miss_ratio"      in df.columns else np.nan)
                 bmr = (float(pd.to_numeric(df["miss_byte_ratio"].iloc[t], errors="coerce"))
                        if "miss_byte_ratio" in df.columns else np.nan)
+                mr_prev  = (float(pd.to_numeric(df["miss_ratio"].iloc[t - 1],      errors="coerce"))
+                            if t > 0 and "miss_ratio"      in df.columns else np.nan)
+                bmr_prev = (float(pd.to_numeric(df["miss_byte_ratio"].iloc[t - 1], errors="coerce"))
+                            if t > 0 and "miss_byte_ratio" in df.columns else np.nan)
                 perf_t[key] = {"mr": mr, "bmr": bmr,
+                               "mr_prev": mr_prev, "bmr_prev": bmr_prev,
                                "lru_mr": lru_mr_t, "lru_bmr": lru_bmr_t}
             if not perf_t:
                 continue
@@ -1244,37 +1265,43 @@ def build_aligned_feature_matrix(trace_meta, target="combined", w_mr=0.5, w_bmr=
             if return_perf:
                 perf_matrix[trace_name][t] = dict(perf_t)
 
-            # ── LRU-relative scoring ──────────────────────────────────────
-            # Normalise by the LRU baseline so score_margin and the combined
-            # weight are scale-invariant across traces with different overall
-            # MR/BMR levels (e.g. 80% vs 20%).  Within a single window,
-            # argmin(mr / lru_mr) == argmin(mr) so labels are unchanged;
-            # the benefit is that score_margin and k_sensitivity become
-            # LRU-relative fractions rather than absolute MR differences.
+            # ── Inter-window relative scoring (LRU + volume normalised) ───
+            # Score formula (3-level fallback chain):
+            #  1. inter-window:  (mr_t/mr_{t-1} - lru_ratio) / lru_ratio / vol_ratio
+            #     → measures how much this config's MR changed vs LRU's MR change,
+            #       normalised by the request volume ratio to remove volume effects.
+            #  2. LRU-absolute:  mr_t / lru_mr_t        (when t=0 or data missing)
+            #  3. global-range:  (mr_t - mr_min) / mr_r  (final fallback)
+            #
+            # argmin(score) = config with the best performance trajectory relative
+            # to the LRU baseline, independent of workload volume shifts.
+
+            def _rel_score_1d(val, val1, i_lru, vol, lru_abs, g_min, g_r):
+                if (not np.isnan(val1)  and val1  > EPSILON and
+                        not np.isnan(i_lru) and i_lru > EPSILON and
+                        not np.isnan(vol)   and vol   > EPSILON):
+                    return ((val / (val1 + EPSILON) - i_lru) / (i_lru + EPSILON)) / vol
+                if not np.isnan(lru_abs) and lru_abs > EPSILON:
+                    return val / lru_abs
+                return (val - g_min) / g_r
+
             scores = {}
             for key, v in perf_t.items():
-                if np.isnan(v["mr"]) or np.isnan(v["bmr"]):
+                mr   = v["mr"];   bmr   = v["bmr"]
+                mr1  = v.get("mr_prev",  np.nan)
+                bmr1 = v.get("bmr_prev", np.nan)
+                if np.isnan(mr) or np.isnan(bmr):
                     continue
-                mr  = v["mr"]
-                bmr = v["bmr"]
+                s_mr  = _rel_score_1d(mr,  mr1,  inter_lru_mr,  vol_ratio,
+                                      lru_mr_t,  mr_min,  mr_r)
+                s_bmr = _rel_score_1d(bmr, bmr1, inter_lru_bmr, vol_ratio_byte,
+                                      lru_bmr_t, bmr_min, bmr_r)
                 if target == "mr":
-                    # divide by LRU_MR → ratio; argmin unchanged, margin = LRU-relative
-                    scores[key] = (mr / lru_mr_t
-                                   if not np.isnan(lru_mr_t) and lru_mr_t > EPSILON
-                                   else mr)
+                    scores[key] = s_mr
                 elif target == "bmr":
-                    scores[key] = (bmr / lru_bmr_t
-                                   if not np.isnan(lru_bmr_t) and lru_bmr_t > EPSILON
-                                   else bmr)
+                    scores[key] = s_bmr
                 else:  # "combined" or "pareto"
-                    # LRU-relative combined: weight by own-baseline, not global range
-                    mr_norm  = (mr  / lru_mr_t
-                                if not np.isnan(lru_mr_t)  and lru_mr_t  > EPSILON
-                                else (mr  - mr_min)  / mr_r)
-                    bmr_norm = (bmr / lru_bmr_t
-                                if not np.isnan(lru_bmr_t) and lru_bmr_t > EPSILON
-                                else (bmr - bmr_min) / bmr_r)
-                    scores[key] = w_mr * mr_norm + w_bmr * bmr_norm
+                    scores[key] = w_mr * s_mr + w_bmr * s_bmr
             if not scores:
                 continue
 
