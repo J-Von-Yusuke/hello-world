@@ -22,10 +22,13 @@ OracleGeneral の next_access_vtime を使った再利用距離分析
   【検証4】Reuse Distance と サイズの相関
     → 負の相関 → 大オブジェクトほど再利用が少ない = 仮説2（人気度スキュー）の根拠
 
+【binning】
+  1KiB〜8GiB を 2 の指数乗で 25 bin（cache_common.POW2_THRESHOLDS）。
+  --thresholds オプションで上書き可能。
+
 【使い方】
   python reuse_distance_analysis.py \
       --trace ./traces/cdn_trace.oracleGeneral \
-      --thresholds 256 4096 65536 1048576 \
       --out ./output/reuse_dist
 
   # 複数トレース一括
@@ -43,7 +46,6 @@ OracleGeneral の next_access_vtime を使った再利用距離分析
 
 import argparse
 import os
-import struct
 import sys
 from pathlib import Path
 
@@ -52,76 +54,13 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.stats import spearmanr, kruskal, mannwhitneyu
-from scipy.special import kl_div as scipy_kl_div
+from scipy.stats import spearmanr, kruskal
 
-# ─────────────────────────────────────────────
-# 定数
-# ─────────────────────────────────────────────
-DEFAULT_THRESHOLDS = [256, 4_096, 65_536, 1_048_576]
-OG_FORMAT      = "=IQIq"
-OG_RECORD_SIZE = struct.calcsize(OG_FORMAT)
-
-
-# ─────────────────────────────────────────────
-# ユーティリティ
-# ─────────────────────────────────────────────
-
-def get_size_class(size: int, thresholds: list) -> int:
-    for i, t in enumerate(thresholds):
-        if size < t:
-            return i
-    return len(thresholds)
-
-
-def build_class_labels(thresholds: list) -> dict:
-    units = [(1 << 30, "GB"), (1 << 20, "MB"), (1 << 10, "KB"), (1, "B")]
-
-    def fmt(b):
-        for div, unit in units:
-            if b >= div and b % div == 0:
-                return f"{b // div}{unit}"
-        return f"{b}B"
-
-    boundaries = [0] + thresholds + [None]
-    labels = {}
-    for i in range(len(boundaries) - 1):
-        lo, hi = boundaries[i], boundaries[i + 1]
-        if lo == 0 and hi is not None:
-            labels[i] = f"<{fmt(hi)}"
-        elif hi is None:
-            labels[i] = f"≥{fmt(lo)}"
-        else:
-            labels[i] = f"{fmt(lo)}-{fmt(hi)}"
-    return labels
-
-
-# ─────────────────────────────────────────────
-# OracleGeneral 読み込み
-# ─────────────────────────────────────────────
-
-def load_oracle_general(path: str, max_requests: int = None) -> pd.DataFrame:
-    records = []
-    with open(path, "rb") as f:
-        raw = f.read()
-
-    n = len(raw) // OG_RECORD_SIZE
-    if max_requests:
-        n = min(n, max_requests)
-
-    for i in range(n):
-        off = i * OG_RECORD_SIZE
-        ts, obj_id, obj_size, next_vtime = struct.unpack_from(OG_FORMAT, raw, off)
-        if obj_size > 0:
-            records.append((i, ts, obj_id, obj_size, next_vtime))
-
-    df = pd.DataFrame(records,
-                      columns=["vtime", "timestamp", "obj_id", "obj_size", "next_access_vtime"])
-    df["obj_id"] = df["obj_id"].astype(str)
-    print(f"  読み込み: {len(df):,} リクエスト  "
-          f"ユニーク={df['obj_id'].nunique():,}  "
-          f"OHW率={( df['next_access_vtime'] == -1 ).mean():.3%}")
-    return df
+from cache_common import (
+    POW2_THRESHOLDS, N_BINS,
+    get_size_class, get_size_class_vectorized,
+    build_class_labels, load_trace,
+)
 
 
 # ─────────────────────────────────────────────
@@ -146,7 +85,7 @@ def compute_reuse_distances(df: pd.DataFrame) -> pd.DataFrame:
 # 検証1: クラス内/クラス間分散比 (η²)
 # ─────────────────────────────────────────────
 
-def compute_eta_squared(df: pd.DataFrame, thresholds: list) -> dict:
+def compute_eta_squared(df: pd.DataFrame, thresholds: list = None) -> dict:
     """
     η²（イータ二乗）= クラス間 SS / 全体 SS
     η² が大きい → サイズクラスが reuse distance をよく説明する
@@ -156,10 +95,13 @@ def compute_eta_squared(df: pd.DataFrame, thresholds: list) -> dict:
 
     有限 reuse distance のみで計算（OHW は除外）。
     """
+    if thresholds is None:
+        thresholds = POW2_THRESHOLDS
     finite = df[np.isfinite(df["reuse_dist"])].copy()
-    finite["size_class"] = finite["obj_size"].apply(
-        lambda s: get_size_class(s, thresholds)
-    )
+    if "size_class" not in finite.columns:
+        finite["size_class"] = get_size_class_vectorized(
+            finite["obj_size"].values, thresholds
+        )
 
     if len(finite) == 0:
         return {"eta_squared": np.nan, "n_finite": 0}
@@ -197,13 +139,16 @@ def compute_eta_squared(df: pd.DataFrame, thresholds: list) -> dict:
 # 検証2 & 3: サイズクラス別 RD 統計と OHW 率
 # ─────────────────────────────────────────────
 
-def compute_class_rd_stats(df: pd.DataFrame, thresholds: list) -> pd.DataFrame:
+def compute_class_rd_stats(df: pd.DataFrame, thresholds: list = None) -> pd.DataFrame:
     """
     サイズクラス別に reuse distance の統計を計算する。
     OHW 率（one-hit-wonder = next_access_vtime == -1）も含む。
     """
+    if thresholds is None:
+        thresholds = POW2_THRESHOLDS
     df = df.copy()
-    df["size_class"] = df["obj_size"].apply(lambda s: get_size_class(s, thresholds))
+    if "size_class" not in df.columns:
+        df["size_class"] = get_size_class_vectorized(df["obj_size"].values, thresholds)
     class_labels = build_class_labels(thresholds)
 
     rows = []
@@ -278,7 +223,7 @@ def compute_size_rd_correlation(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────
 
 def compute_distribution_overlap(
-    df: pd.DataFrame, thresholds: list, n_bins: int = 100
+    df: pd.DataFrame, thresholds: list = None, n_bins: int = 100
 ) -> pd.DataFrame:
     """
     サイズクラス間の reuse distance 分布の重なりを計算する。
@@ -290,8 +235,11 @@ def compute_distribution_overlap(
     BC が高い → クラス間の分布形状が似ている
               → サイズ分割の根拠が「reuse time の均質性」では説明できない
     """
+    if thresholds is None:
+        thresholds = POW2_THRESHOLDS
     df = df.copy()
-    df["size_class"] = df["obj_size"].apply(lambda s: get_size_class(s, thresholds))
+    if "size_class" not in df.columns:
+        df["size_class"] = get_size_class_vectorized(df["obj_size"].values, thresholds)
     class_labels = build_class_labels(thresholds)
 
     finite = df[np.isfinite(df["reuse_dist"])]
@@ -337,9 +285,9 @@ def compute_distribution_overlap(
 
 def plot_rd_distributions(
     df: pd.DataFrame,
-    thresholds: list,
-    trace_name: str,
     out_path: str,
+    thresholds: list = None,
+    trace_name: str = "",
     n_sample: int = 100_000,
 ):
     """
@@ -587,29 +535,28 @@ def write_hypothesis_report(
 
 def run_single_trace(
     trace_path: str,
-    thresholds: list,
-    out_dir: str,
+    thresholds: list = None,
+    out_dir: str = "./output/reuse_dist",
     max_requests: int = None,
 ) -> dict:
+    if thresholds is None:
+        thresholds = POW2_THRESHOLDS
+
     trace_name = Path(trace_path).stem
     os.makedirs(out_dir, exist_ok=True)
     print(f"\n{'='*60}")
     print(f"Reuse Distance 分析: {trace_name}")
     print(f"{'='*60}")
 
-    # 読み込み
-    suffix = Path(trace_path).suffix.lower()
-    if suffix in {".oraclegeneral", ".bin", ".lcs"} or (
-        Path(trace_path).stat().st_size % OG_RECORD_SIZE == 0
-    ):
-        df = load_oracle_general(trace_path, max_requests)
-    else:
-        # フォールバック
-        from eviction_matrix_sim import load_trace
-        df = load_trace(trace_path, max_requests=max_requests)
-        if "next_access_vtime" not in df.columns:
-            print("  [エラー] next_access_vtime がありません。OracleGeneral形式を使用してください。")
-            return {}
+    # 読み込み（cache_common.load_trace が形式を自動判定）
+    df = load_trace(trace_path, max_requests)
+    if "next_access_vtime" not in df.columns or (df["next_access_vtime"] == -2).all():
+        print("  [エラー] next_access_vtime がありません。OracleGeneral形式を使用してください。")
+        return {}
+
+    # size_class が未付与の場合は付与
+    if "size_class" not in df.columns:
+        df["size_class"] = get_size_class_vectorized(df["obj_size"].values, thresholds)
 
     # reuse distance 計算
     df = compute_reuse_distances(df)
@@ -631,7 +578,6 @@ def run_single_trace(
     if overlap_df is not None and len(overlap_df) > 0:
         overlap_path = os.path.join(out_dir, f"{trace_name}_rd_overlap.csv")
         overlap_df.to_csv(overlap_path, index=False, encoding="utf-8-sig")
-        print(overlap_df.to_string(index=False))
 
     print("\n[検証4] サイズ vs Reuse Distance 相関...")
     corr_result = compute_size_rd_correlation(df)
@@ -641,8 +587,9 @@ def run_single_trace(
     # 可視化
     print("\nグラフ生成...")
     plot_rd_distributions(
-        df, thresholds, trace_name,
-        os.path.join(out_dir, f"{trace_name}_rd_distribution.png")
+        df,
+        os.path.join(out_dir, f"{trace_name}_rd_distribution.png"),
+        thresholds, trace_name,
     )
 
     # 仮説検定レポート
@@ -651,12 +598,11 @@ def run_single_trace(
         os.path.join(out_dir, f"{trace_name}_hypothesis_test.txt")
     )
 
-    # η² の分散分解もCSVに
     variance_row = {"trace": trace_name, **eta_result, **corr_result}
-    variance_df = pd.DataFrame([variance_row])
-    var_path = os.path.join(out_dir, f"{trace_name}_rd_variance.csv")
-    variance_df.to_csv(var_path, index=False, encoding="utf-8-sig")
-
+    pd.DataFrame([variance_row]).to_csv(
+        os.path.join(out_dir, f"{trace_name}_rd_variance.csv"),
+        index=False, encoding="utf-8-sig"
+    )
     return {**eta_result, **corr_result, "trace": trace_name}
 
 
@@ -670,8 +616,8 @@ def main():
 
     parser.add_argument(
         "--thresholds", type=int, nargs="+",
-        default=DEFAULT_THRESHOLDS,
-        help="サイズクラス境界（バイト）"
+        default=None,
+        help="サイズクラス境界（バイト）。省略時は 1KiB〜8GiB の 2 の指数乗"
     )
     parser.add_argument(
         "--out", type=str, default="./output/reuse_dist",
