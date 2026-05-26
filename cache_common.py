@@ -27,6 +27,107 @@ cache_common.py
 import numpy as np
 import pandas as pd
 
+
+# ─────────────────────────────────────────────
+# matplotlib 日本語フォントセットアップ
+# ─────────────────────────────────────────────
+
+def setup_matplotlib_font() -> bool:
+    """
+    日本語フォントを matplotlib に設定し、PDF/EPS 出力時のフォント埋め込みを有効化する。
+
+    設定優先順:
+      1. japanize-matplotlib がインストール済みなら自動設定（最推奨）
+             pip install japanize-matplotlib
+      2. フォントマネージャに登録済みのシステムフォントを名前で探索
+             Windows : Meiryo / BIZ UDGothic / Yu Gothic / MS Gothic
+             macOS   : Hiragino Sans / Apple SD Gothic Neo
+             Linux   : Noto Sans CJK JP / IPAexGothic / IPAGothic
+      3. フォントファイルを直接探索してフォントマネージャに登録
+
+    フォント埋め込み設定（PNG では不要だが PDF/EPS 出力に備えて常に設定）:
+      pdf.fonttype = 42  → TrueType フォントを PDF に埋め込む
+      ps.fonttype  = 42  → PostScript でも同様
+
+    戻り値:
+      True  : 日本語フォントの設定に成功
+      False : 日本語フォントが見つからなかった（文字化けの可能性あり）
+    """
+    import matplotlib
+    import matplotlib.font_manager as fm
+    import os
+    import platform
+
+    # PDF / EPS 出力へのフォント埋め込みは成否によらず常に設定
+    matplotlib.rcParams["pdf.fonttype"] = 42
+    matplotlib.rcParams["ps.fonttype"]  = 42
+
+    # ── 方法1: japanize-matplotlib ────────────────────────────────
+    try:
+        import japanize_matplotlib  # noqa: F401  # pip install japanize-matplotlib
+        return True
+    except ImportError:
+        pass
+
+    # ── 方法2: フォントマネージャに登録済みのシステムフォントを探索 ──
+    system = platform.system()
+    if system == "Windows":
+        candidates = ["Meiryo", "BIZ UDGothic", "Yu Gothic", "MS Gothic", "MS PGothic"]
+    elif system == "Darwin":
+        candidates = ["Hiragino Sans", "Hiragino Kaku Gothic Pro", "Apple SD Gothic Neo", "Osaka"]
+    else:
+        candidates = ["Noto Sans CJK JP", "IPAexGothic", "IPAGothic",
+                      "TakaoGothic", "VL Gothic", "Noto Sans JP"]
+
+    available = {f.name for f in fm.fontManager.ttflist}
+    for font_name in candidates:
+        if font_name in available:
+            matplotlib.rcParams["font.family"] = font_name
+            return True
+
+    # ── 方法3: フォントファイルを直接探索して登録 ──────────────────
+    if system == "Windows":
+        font_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+        font_files = [
+            "meiryo.ttc", "meiryob.ttc",
+            "BIZUDGothic-Regular.ttf",
+            "YuGothR.ttc", "YuGothM.ttc", "YuGothB.ttc",
+            "yugothic.ttc",
+            "msgothic.ttc",
+        ]
+    elif system == "Darwin":
+        font_dir = "/System/Library/Fonts"
+        font_files = [
+            "ヒラギノ角ゴシック W3.ttc",
+            "Hiragino Sans GB.ttc",
+        ]
+    else:
+        font_dir = "/usr/share/fonts"
+        font_files = [
+            "opentype/ipafont-gothic/ipag.ttf",
+            "truetype/fonts-japanese-gothic.ttf",
+            "opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+
+    for fname in font_files:
+        fpath = os.path.join(font_dir, fname)
+        if os.path.isfile(fpath):
+            try:
+                fm.fontManager.addfont(fpath)
+                prop = fm.FontProperties(fname=fpath)
+                matplotlib.rcParams["font.family"] = prop.get_name()
+                return True
+            except Exception:
+                continue
+
+    print(
+        "  [font] 日本語フォントが見つかりませんでした。\n"
+        "         グラフの日本語が文字化けする場合は以下を実行してください:\n"
+        "           pip install japanize-matplotlib"
+    )
+    return False
+
+
 # ─────────────────────────────────────────────
 # デフォルト閾値: 1KiB〜8GiB を 2 の指数乗で
 # ─────────────────────────────────────────────
@@ -365,7 +466,7 @@ def load_trace(path: str, max_requests: int = None) -> pd.DataFrame:
 
     # CSV フォールバック
     print(f"  形式: CSV ({p.name})")
-    sep = "\t" if suffix == ".tsv" else ","
+    sep = "\t" if p.suffix.lower() == ".tsv" else ","
     with open(path, encoding="utf-8", errors="replace") as f:
         first = f.readline().strip().split(sep)
     has_header = not all(_try_float(v) for v in first[:3])
