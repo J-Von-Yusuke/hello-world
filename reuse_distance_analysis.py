@@ -60,7 +60,9 @@ from cache_common import (
     POW2_THRESHOLDS, N_BINS,
     get_size_class, get_size_class_vectorized,
     build_class_labels, load_trace,
+    setup_matplotlib_font,
 )
+setup_matplotlib_font()
 
 
 # ─────────────────────────────────────────────
@@ -283,6 +285,62 @@ def compute_distribution_overlap(
 # 可視化
 # ─────────────────────────────────────────────
 
+def _load_japanese_font() -> None:
+    """
+    日本語フォントを matplotlib に設定する（plot_rd_distributions 専用）。
+
+    探索順:
+      1. プロジェクト内 fonts/*.ttf / fonts/*.otf
+      2. fc-list :lang=ja  （Linux/Ubuntu でインストール済みフォント）
+      3. フォントが見つからない場合は警告のみ（文字化けするが処理は続行）
+
+    フォントを用意する方法:
+      python download_font.py          … fonts/ にダウンロード
+      sudo apt install fonts-noto-cjk  … Ubuntu システムフォント
+    """
+    import subprocess
+    import matplotlib.font_manager as _fm
+    from pathlib import Path
+
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"]  = 42
+
+    def _try(fpath: str) -> bool:
+        try:
+            _fm.fontManager.addfont(fpath)
+            prop = _fm.FontProperties(fname=fpath)
+            plt.rcParams["font.family"] = prop.get_name()
+            return True
+        except Exception:
+            return False
+
+    # 1. プロジェクト同梱フォント（fonts/ ディレクトリ）
+    _fonts_dir = Path(__file__).parent / "fonts"
+    if _fonts_dir.is_dir():
+        for fp in sorted(_fonts_dir.glob("*.ttf")) + sorted(_fonts_dir.glob("*.otf")):
+            if fp.stat().st_size > 200_000 and _try(str(fp)):
+                return
+
+    # 2. fc-list :lang=ja でシステムフォントを取得（Ubuntu など）
+    try:
+        res = subprocess.run(
+            ["fc-list", ":lang=ja", "--format=%{file}\n"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in res.stdout.splitlines():
+            fpath = line.strip()
+            if fpath and _try(fpath):
+                return
+    except Exception:
+        pass
+
+    print(
+        "  [font] 日本語フォントが見つかりません。グラフの日本語が文字化けします。\n"
+        "         解決方法: python download_font.py  または"
+        "  sudo apt install fonts-noto-cjk"
+    )
+
+
 def plot_rd_distributions(
     df: pd.DataFrame,
     out_path: str,
@@ -298,6 +356,7 @@ def plot_rd_distributions(
       (C) OHW 率のクラス別棒グラフ
       (D) サイズ vs RD の散布図（サンプリング）
     """
+    _load_japanese_font()
     df = df.copy()
     df["size_class"] = df["obj_size"].apply(lambda s: get_size_class(s, thresholds))
     class_labels = build_class_labels(thresholds)
