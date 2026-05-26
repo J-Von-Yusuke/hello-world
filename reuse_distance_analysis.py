@@ -636,6 +636,8 @@ def main():
         trace_dir = Path(args.trace_dir)
         trace_files = sorted(
             list(trace_dir.glob("*.oracleGeneral")) +
+            list(trace_dir.glob("*.oracleGeneral.zst")) +
+            list(trace_dir.glob("*.oracleGeneral.bin.zst")) +
             list(trace_dir.glob("*.bin")) +
             list(trace_dir.glob("*.lcs")) +
             list(trace_dir.glob("*.csv"))
