@@ -19,10 +19,13 @@ mrc_per_sizeclass.py
     - LRU / FIFO / S3-FIFO / ARC などの比較（ベースライン実験）
     - 複数キャッシュサイズでのヒット率の高速バッチ計算
 
+【binning】
+  1KiB〜8GiB を 2 の指数乗で 25 bin（cache_common.POW2_THRESHOLDS）。
+  --thresholds オプションで上書き可能。
+
 【使い方】
   python mrc_per_sizeclass.py \
       --trace ./traces/cdn.oracleGeneral \
-      --thresholds 256 4096 65536 1048576 \
       --out ./output/mrc_analysis
 
   # 複数トレース一括
@@ -48,50 +51,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-DEFAULT_THRESHOLDS = [256, 4_096, 65_536, 1_048_576]
-
-
-# ─────────────────────────────────────────────
-# ユーティリティ
-# ─────────────────────────────────────────────
-
-def get_size_class(size: int, thresholds: list) -> int:
-    for i, t in enumerate(thresholds):
-        if size < t:
-            return i
-    return len(thresholds)
-
-
-def build_class_labels(thresholds: list) -> dict:
-    units = [(1 << 30, "GB"), (1 << 20, "MB"), (1 << 10, "KB"), (1, "B")]
-
-    def fmt(b):
-        for div, unit in units:
-            if b >= div and b % div == 0:
-                return f"{b // div}{unit}"
-        return f"{b}B"
-
-    boundaries = [0] + thresholds + [None]
-    labels = {}
-    for i in range(len(boundaries) - 1):
-        lo, hi = boundaries[i], boundaries[i + 1]
-        if lo == 0 and hi is not None:
-            labels[i] = f"<{fmt(hi)}"
-        elif hi is None:
-            labels[i] = f"≥{fmt(lo)}"
-        else:
-            labels[i] = f"{fmt(lo)}-{fmt(hi)}"
-    return labels
-
-
-# ─────────────────────────────────────────────
-# トレース読み込み
-# ─────────────────────────────────────────────
-
-def load_trace(path: str, max_requests: int = None) -> pd.DataFrame:
-    """eviction_matrix_sim.py の load_trace を再利用（形式自動判定）"""
-    from eviction_matrix_sim import load_trace as _load
-    return _load(path, max_requests=max_requests)
+from cache_common import (
+    POW2_THRESHOLDS, N_BINS,
+    get_size_class_vectorized,
+    build_class_labels,
+    load_trace,
+)
 
 
 # ─────────────────────────────────────────────
@@ -106,23 +71,23 @@ def compute_mrc_from_reuse_dist(
     next_access_vtime から MRC を直接計算する。
 
     手順:
-      1. reuse_dist = next_access_vtime - vtime  (仮想時刻差)
+      1. reuse_dist = next_access_vtime - vtime  (グローバル仮想時刻差)
       2. next_access_vtime == -1 → reuse_dist = ∞ (再アクセスなし)
       3. MRC(C) = P(reuse_dist > C) をキャッシュサイズ C の関数として計算
 
     キャッシュサイズの単位:
-      - 仮想時刻（アクセス番号）ベース: 直接 reuse_dist を使う
       - バイトベース: reuse_dist × 平均オブジェクトサイズ で近似
 
-    両方を返す（バイトベースをデフォルト使用）。
+    注意: df["vtime"] はグローバルな仮想時刻（load_trace が付与）を使う。
+          per-class フィルタ後も vtime を上書きしないこと。
     """
     if "next_access_vtime" not in df.columns or df["next_access_vtime"].isna().all():
         return None
 
-    n = len(df)
-    vtime = np.arange(n, dtype=np.int64)
+    # グローバル vtime を使う（クラスフィルタ後も上書きしない）
+    vtime  = df["vtime"].values.astype(np.int64)
     next_vt = df["next_access_vtime"].values.astype(np.int64)
-    sizes = df["obj_size"].values.astype(np.int64)
+    sizes  = df["obj_size"].values.astype(np.int64)
 
     # reuse distance（仮想時刻単位）
     rd_vtime = next_vt - vtime
@@ -140,15 +105,20 @@ def compute_mrc_from_reuse_dist(
 
     cs_min = float(np.percentile(finite_rd, 1))
     cs_max = float(np.percentile(finite_rd, 99))
+    if cs_min <= 0 or cs_max <= cs_min:
+        return None
     cache_sizes = np.geomspace(max(cs_min, 1), cs_max, n_points)
 
     # miss_ratio(C) = P(reuse_dist > C)
-    #              = (∞ の割合) + P(finite_rd > C)
-    inf_frac = float(np.mean(~np.isfinite(rd_bytes)))
+    #              = (∞ の割合) + P(finite_rd > C) × (有限の割合)
+    n_total = len(rd_bytes)
+    n_inf   = int(np.sum(~np.isfinite(rd_bytes)))
+    inf_frac = n_inf / n_total if n_total > 0 else 0.0
+    finite_frac = 1.0 - inf_frac
 
     rows = []
     for cs in cache_sizes:
-        miss_ratio = inf_frac + float(np.mean(finite_rd > cs)) * (1 - inf_frac)
+        miss_ratio = inf_frac + float(np.mean(finite_rd > cs)) * finite_frac
         rows.append({"cache_size_bytes": cs, "miss_ratio": miss_ratio})
 
     return pd.DataFrame(rows)
@@ -172,14 +142,14 @@ def find_knee_point(mrc_df: pd.DataFrame) -> float:
     y_n = (y - y.min()) / (y.max() - y.min() + 1e-12)
 
     start, end = np.array([x_n[0], y_n[0]]), np.array([x_n[-1], y_n[-1]])
-    line = end - start
+    line     = end - start
     line_len = np.linalg.norm(line) + 1e-12
 
     dists = []
     for xi, yi in zip(x_n, y_n):
-        pt = np.array([xi, yi])
+        pt       = np.array([xi, yi])
         proj_len = np.dot(pt - start, line) / line_len
-        proj_pt = start + proj_len * line / line_len
+        proj_pt  = start + proj_len * line / line_len
         dists.append(np.linalg.norm(pt - proj_pt))
 
     return float(x[int(np.argmax(dists))])
@@ -196,12 +166,11 @@ def analyze_optimal_allocation(
     capacity_fracs: list,
 ) -> pd.DataFrame:
     """
-    総キャッシュ容量 C に対して3種類の割り当てを比較する:
+    総キャッシュ容量 C に対して2種類の割り当てを比較する:
       1. 均等割り当て: C / n_classes ずつ
-      2. バイト占有率比例: 各クラスのバイト数に比例
-      3. 膝点比例: 各クラスの MRC 膝点に比例（理論最適に近い）
+      2. 膝点比例: 各クラスの MRC 膝点に比例（理論最適に近い）
     """
-    n_classes = len(class_mrcs)
+    n_classes  = len(class_mrcs)
     knee_bytes = {ci: find_knee_point(mrc) for ci, mrc in class_mrcs.items()}
     total_knee = sum(knee_bytes.values()) + 1e-10
 
@@ -218,16 +187,13 @@ def analyze_optimal_allocation(
     for frac in capacity_fracs:
         total_cap = int(wss_bytes * frac)
 
-        alloc_equal = {ci: total_cap // n_classes for ci in class_mrcs}
+        alloc_equal = {ci: total_cap // n_classes          for ci in class_mrcs}
         alloc_knee  = {ci: int(total_cap * knee_bytes[ci] / total_knee)
                        for ci in class_mrcs}
 
         for alloc_name, alloc in [("equal", alloc_equal), ("knee_based", alloc_knee)]:
-            total_hit_bytes = 0
-            total_bytes = 0
             for ci, mrc_df in class_mrcs.items():
                 mr = interp_miss_ratio(mrc_df, alloc[ci])
-                # バイトミス率の近似: MRC はリクエスト数ベースなので近似値
                 rows.append({
                     "cache_size_frac":  frac,
                     "total_cap_bytes":  total_cap,
@@ -265,7 +231,7 @@ def plot_mrc_per_class(
     # (A) 絶対キャッシュサイズ（バイト）
     ax = axes[0]
     for i, (ci, mrc_df) in enumerate(sorted(class_mrcs.items())):
-        lbl = class_labels.get(ci, str(ci))
+        lbl  = class_labels.get(ci, str(ci))
         knee = find_knee_point(mrc_df)
         ax.plot(mrc_df["cache_size_bytes"] / 1e6, mrc_df["miss_ratio"],
                 color=colors[i], linewidth=1.8, label=lbl)
@@ -274,13 +240,13 @@ def plot_mrc_per_class(
     ax.set_xlabel("キャッシュサイズ（MB）")
     ax.set_ylabel("ミス率")
     ax.set_title("(A) MRC（絶対サイズ）\n破線=膝点")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7, ncol=max(1, n_classes // 8))
     ax.grid(True, alpha=0.3)
 
     # (B) クラス WSS で正規化（膝点の位置の違いが見やすい）
     ax = axes[1]
     for i, (ci, mrc_df) in enumerate(sorted(class_mrcs.items())):
-        lbl = class_labels.get(ci, str(ci))
+        lbl       = class_labels.get(ci, str(ci))
         class_wss = float(mrc_df["cache_size_bytes"].max())
         if class_wss > 0:
             x_norm = mrc_df["cache_size_bytes"] / class_wss
@@ -290,18 +256,18 @@ def plot_mrc_per_class(
     ax.set_ylabel("ミス率")
     ax.set_title("(B) MRC（クラス WSS 正規化）\n"
                  "膝点が右に寄るクラス→多くのキャッシュが必要")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7, ncol=max(1, n_classes // 8))
     ax.grid(True, alpha=0.3)
 
     # (C) 膝点比較棒グラフ
     ax = axes[2]
-    classes = sorted(class_mrcs.keys())
+    classes   = sorted(class_mrcs.keys())
     knee_vals = [find_knee_point(class_mrcs[ci]) / 1e6 for ci in classes]
-    lbls = [class_labels.get(ci, str(ci)) for ci in classes]
+    lbls      = [class_labels.get(ci, str(ci)) for ci in classes]
     bars = ax.bar(range(len(classes)), knee_vals,
-                  color=[colors[i] for i in range(len(classes))], alpha=0.8)
+                  color=[colors[i % 10] for i in range(len(classes))], alpha=0.8)
     ax.set_xticks(range(len(classes)))
-    ax.set_xticklabels(lbls, rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(lbls, rotation=45, ha="right", fontsize=7)
     ax.set_ylabel("膝点（MB）")
     ax.set_title("(C) クラス別 MRC 膝点\n"
                  "膝点が大きく異なる → 統合キャッシュでは\n"
@@ -309,7 +275,7 @@ def plot_mrc_per_class(
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, knee_vals):
         ax.text(bar.get_x() + bar.get_width() / 2, val,
-                f"{val:.1f}MB", ha="center", va="bottom", fontsize=8)
+                f"{val:.1f}M", ha="center", va="bottom", fontsize=7)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -343,26 +309,25 @@ def plot_allocation_comparison(
 
     # 右: クラス別割り当てバイト数の比較（代表的なキャッシュサイズで）
     ax = axes[1]
-    rep_frac = alloc_df["cache_size_frac"].median()
-    rep = alloc_df[
-        alloc_df["cache_size_frac"] == alloc_df["cache_size_frac"].unique()[
-            len(alloc_df["cache_size_frac"].unique()) // 2
-        ]
-    ]
+    mid_idx = len(alloc_df["cache_size_frac"].unique()) // 2
+    mid_frac = alloc_df["cache_size_frac"].unique()[mid_idx]
+    rep     = alloc_df[alloc_df["cache_size_frac"] == mid_frac]
     classes = sorted(rep["size_class"].unique())
-    x = np.arange(len(classes))
-    width = 0.35
+    x       = np.arange(len(classes))
+    width   = 0.35
     for k, atype in enumerate(["equal", "knee_based"]):
-        sub = rep[rep["allocation_type"] == atype].sort_values("size_class")
+        sub  = rep[rep["allocation_type"] == atype].sort_values("size_class")
         vals = sub["allocated_bytes"].values / 1e6
         ax.bar(x + k * width, vals, width,
                color=colors[atype], alpha=0.8, label=labels[atype])
-    class_labels_list = [rep[rep["size_class"] == ci]["size_class_label"].values[0]
-                         for ci in classes]
+    class_labels_list = [
+        rep[rep["size_class"] == ci]["size_class_label"].values[0]
+        for ci in classes
+    ]
     ax.set_xticks(x + width / 2)
-    ax.set_xticklabels(class_labels_list, rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(class_labels_list, rotation=45, ha="right", fontsize=7)
     ax.set_ylabel("割り当てバイト数（MB）")
-    ax.set_title(f"クラス別割り当て比較\n（総容量 {rep_frac:.0%} × WSS）")
+    ax.set_title(f"クラス別割り当て比較\n（総容量 {mid_frac:.0%} × WSS）")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3, axis="y")
 
@@ -378,12 +343,14 @@ def plot_allocation_comparison(
 
 def run_mrc_analysis(
     trace_path: str,
-    thresholds: list,
-    out_dir: str,
+    thresholds: list = None,
+    out_dir: str = "./output/mrc_analysis",
     capacity_fracs: list = None,
     max_requests: int = None,
     n_mrc_points: int = 200,
 ):
+    if thresholds is None:
+        thresholds = POW2_THRESHOLDS
     if capacity_fracs is None:
         capacity_fracs = [0.05, 0.1, 0.2, 0.3, 0.5]
 
@@ -393,19 +360,19 @@ def run_mrc_analysis(
     print(f"MRC 分析: {trace_name}")
     print(f"{'='*60}")
 
+    # load_trace が vtime / size_class を自動付与する
     df = load_trace(trace_path, max_requests)
 
-    if "next_access_vtime" not in df.columns or df["next_access_vtime"].isna().all():
+    if "next_access_vtime" not in df.columns or (df["next_access_vtime"] == -2).all():
         print("  [エラー] next_access_vtime がありません。OracleGeneral 形式を使用してください。")
         return None, None
 
-    # vtime 列を追加（行番号 = アクセスの仮想時刻）
-    df = df.reset_index(drop=True)
-    df["vtime"] = df.index.astype(np.int64)
+    # size_class が未付与の場合は付与（CSV フォールバック対応）
+    if "size_class" not in df.columns:
+        from cache_common import get_size_class_vectorized
+        df["size_class"] = get_size_class_vectorized(df["obj_size"].values, thresholds)
 
-    # サイズクラス分割
     class_labels = build_class_labels(thresholds)
-    df["size_class"] = df["obj_size"].apply(lambda s: get_size_class(s, thresholds))
 
     # WSS（ユニークオブジェクトの総バイト数）
     wss_bytes = int(df.groupby("obj_id")["obj_size"].first().sum())
@@ -414,12 +381,12 @@ def run_mrc_analysis(
     # ── クラス別 MRC 生成 ──
     print("\nMRC 生成（next_access_vtime ベース）...")
     class_mrcs = {}
-    knee_rows = []
+    knee_rows  = []
 
     for ci in sorted(df["size_class"].unique()):
-        sub = df[df["size_class"] == ci].reset_index(drop=True)
-        sub["vtime"] = sub.index.astype(np.int64)  # クラス内での仮想時刻
-        lbl = class_labels.get(ci, str(ci))
+        # per-class フィルタ: vtime はグローバル値のままにする
+        sub  = df[df["size_class"] == ci]
+        lbl  = class_labels.get(ci, str(ci))
         class_wss = int(sub.groupby("obj_id")["obj_size"].first().sum())
         print(f"  {lbl}: {len(sub):,} リクエスト  WSS={class_wss/1e6:.1f} MB")
 
@@ -429,8 +396,8 @@ def run_mrc_analysis(
             continue
 
         class_mrcs[ci] = mrc_df
-        knee = find_knee_point(mrc_df)
-        knee_pct = knee / class_wss * 100 if class_wss > 0 else 0
+        knee     = find_knee_point(mrc_df)
+        knee_pct = knee / class_wss * 100 if class_wss > 0 else 0.0
 
         mrc_path = os.path.join(out_dir, f"{trace_name}_mrc_class{ci}.csv")
         mrc_df.to_csv(mrc_path, index=False, encoding="utf-8-sig")
@@ -450,7 +417,7 @@ def run_mrc_analysis(
         return None, None
 
     # サマリー保存
-    knee_df = pd.DataFrame(knee_rows)
+    knee_df  = pd.DataFrame(knee_rows)
     knee_path = os.path.join(out_dir, f"{trace_name}_knee_summary.csv")
     knee_df.to_csv(knee_path, index=False, encoding="utf-8-sig")
 
@@ -462,7 +429,7 @@ def run_mrc_analysis(
 
     # ── 最適割り当て分析 ──
     print("\n最適割り当て分析...")
-    alloc_df = analyze_optimal_allocation(
+    alloc_df  = analyze_optimal_allocation(
         class_mrcs, class_labels, wss_bytes, capacity_fracs
     )
     alloc_path = os.path.join(out_dir, f"{trace_name}_allocation_opt.csv")
@@ -474,9 +441,13 @@ def run_mrc_analysis(
     )
 
     # ── 膝点の分散チェック（仮説3の根拠） ──
-    knees = knee_df["knee_pct_of_wss"].values
-    print(f"\n  膝点の変動係数 CV = {knees.std() / knees.mean():.3f}")
-    print(f"  （CV が大きい → クラス間でワーキングセット需要が不均一 → 仮説3の根拠）")
+    if len(knee_rows) >= 2:
+        knees = knee_df["knee_pct_of_wss"].values
+        mean_k = knees.mean()
+        if mean_k > 0:
+            cv = knees.std() / mean_k
+            print(f"\n  膝点の変動係数 CV = {cv:.3f}")
+            print(f"  （CV が大きい → クラス間でワーキングセット需要が不均一 → 仮説3の根拠）")
 
     return class_mrcs, alloc_df
 
@@ -486,16 +457,21 @@ def main():
         description="サイズクラス別 MRC 生成（next_access_vtime ベース）"
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--trace",     type=str)
-    group.add_argument("--trace-dir", type=str)
+    group.add_argument("--trace",     type=str, help="単一トレースファイル")
+    group.add_argument("--trace-dir", type=str, help="トレースディレクトリ")
 
-    parser.add_argument("--thresholds", type=int, nargs="+",
-                        default=DEFAULT_THRESHOLDS)
+    parser.add_argument(
+        "--thresholds", type=int, nargs="+",
+        default=None,
+        help="サイズクラス境界（バイト）。省略時は 1KiB〜8GiB の 2 の指数乗（25 bin）"
+    )
     parser.add_argument("--out", type=str, default="./output/mrc_analysis")
-    parser.add_argument("--capacity-fracs", type=float, nargs="+",
-                        default=[0.05, 0.1, 0.2, 0.3, 0.5])
+    parser.add_argument(
+        "--capacity-fracs", type=float, nargs="+",
+        default=[0.05, 0.1, 0.2, 0.3, 0.5]
+    )
     parser.add_argument("--n-mrc-points", type=int, default=200)
-    parser.add_argument("--max-requests", type=int, default=None)
+    parser.add_argument("--max-requests",  type=int, default=None)
 
     args = parser.parse_args()
 
@@ -505,7 +481,7 @@ def main():
         td = Path(args.trace_dir)
         trace_files = sorted(
             list(td.glob("*.oracleGeneral")) + list(td.glob("*.bin")) +
-            list(td.glob("*.lcs")) + list(td.glob("*.csv"))
+            list(td.glob("*.lcs"))           + list(td.glob("*.csv"))
         )
         if not trace_files:
             print(f"エラー: {td} にトレースが見つかりません")
@@ -513,8 +489,12 @@ def main():
 
     for tf in trace_files:
         run_mrc_analysis(
-            str(tf), args.thresholds, args.out,
-            args.capacity_fracs, args.max_requests, args.n_mrc_points
+            str(tf),
+            thresholds=args.thresholds,
+            out_dir=args.out,
+            capacity_fracs=args.capacity_fracs,
+            max_requests=args.max_requests,
+            n_mrc_points=args.n_mrc_points,
         )
 
 
