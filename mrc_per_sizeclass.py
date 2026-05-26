@@ -480,8 +480,12 @@ def main():
     else:
         td = Path(args.trace_dir)
         trace_files = sorted(
-            list(td.glob("*.oracleGeneral")) + list(td.glob("*.bin")) +
-            list(td.glob("*.lcs"))           + list(td.glob("*.csv"))
+            list(td.glob("*.oracleGeneral")) +
+            list(td.glob("*.oracleGeneral.zst")) +
+            list(td.glob("*.oracleGeneral.bin.zst")) +
+            list(td.glob("*.bin")) +
+            list(td.glob("*.lcs")) +
+            list(td.glob("*.csv"))
         )
         if not trace_files:
             print(f"エラー: {td} にトレースが見つかりません")
