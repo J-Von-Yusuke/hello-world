@@ -245,6 +245,33 @@ OG_FORMAT      = "=IQIq"
 OG_RECORD_SIZE = _struct.calcsize(OG_FORMAT)  # 24 bytes
 
 
+def _open_trace_binary(path: str) -> bytes:
+    """
+    バイナリトレースファイルを読み込む。
+    拡張子が .zst の場合は zstandard で透過的に展開してから返す。
+
+    対応拡張子パターン:
+      .oracleGeneral           非圧縮
+      .oracleGeneral.zst       zstd 圧縮
+      .oracleGeneral.bin.zst   zstd 圧縮（bin 付き）
+    """
+    from pathlib import Path
+    if Path(path).suffix.lower() == ".zst":
+        try:
+            import zstandard as zstd
+        except ImportError:
+            raise ImportError(
+                "zstd 圧縮ファイルの読み込みには zstandard ライブラリが必要です:\n"
+                "  pip install zstandard"
+            )
+        dctx = zstd.ZstdDecompressor()
+        with open(path, "rb") as f:
+            with dctx.stream_reader(f) as reader:
+                return reader.read()
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def load_oracle_general(path: str,
                          max_requests: int = None) -> pd.DataFrame:
     """
@@ -253,9 +280,10 @@ def load_oracle_general(path: str,
              uint32_t obj_size; int64_t next_access_vtime; }
 
     next_access_vtime == -1: このアクセス以降に再アクセスなし
+
+    .zst 圧縮ファイルも透過的に読み込める（_open_trace_binary 経由）。
     """
-    with open(path, "rb") as f:
-        raw = f.read()
+    raw = _open_trace_binary(path)
 
     n = len(raw) // OG_RECORD_SIZE
     if max_requests:
@@ -301,19 +329,38 @@ def load_oracle_general(path: str,
 def load_trace(path: str, max_requests: int = None) -> pd.DataFrame:
     """
     ファイル形式を自動判定して読み込む。
-    OracleGeneral (.oracleGeneral / .bin) と CSV に対応。
+    OracleGeneral バイナリ・zstd 圧縮バイナリ・CSV に対応。
+
+    対応拡張子:
+      .oracleGeneral                  非圧縮バイナリ
+      .oracleGeneral.zst              zstd 圧縮バイナリ
+      .oracleGeneral.bin.zst          zstd 圧縮バイナリ（bin 付き）
+      .bin / .lcs                     非圧縮バイナリ
+      .csv / .tsv / .txt              CSV/TSV テキスト
     """
     from pathlib import Path
     p = Path(path)
-    suffix = p.suffix.lower()
+    name_lower = p.name.lower()
+
+    # .zst サフィックスの検出（複合拡張子 .oracleGeneral.bin.zst などに対応）
+    is_zst = name_lower.endswith(".zst")
+
+    # .zst を除いた内側の拡張子を取得
+    inner_suffix = Path(name_lower[:-4]).suffix if is_zst else p.suffix.lower()
 
     is_binary = (
-        suffix in {".oraclegeneral", ".bin", ".lcs"}
-        or (p.stat().st_size % OG_RECORD_SIZE == 0 and suffix not in {".csv", ".tsv", ".txt"})
+        is_zst                                           # *.zst は必ずバイナリ扱い
+        or inner_suffix in {".oraclegeneral", ".bin", ".lcs"}
+        or (
+            not is_zst
+            and p.suffix.lower() not in {".csv", ".tsv", ".txt"}
+            and p.stat().st_size % OG_RECORD_SIZE == 0
+        )
     )
 
     if is_binary:
-        print(f"  形式: OracleGeneral バイナリ ({p.name})")
+        label = f"OracleGeneral バイナリ{'(zstd圧縮)' if is_zst else ''}"
+        print(f"  形式: {label} ({p.name})")
         return load_oracle_general(path, max_requests)
 
     # CSV フォールバック
