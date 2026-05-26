@@ -3,306 +3,122 @@ eviction_matrix_sim.py
 ======================
 クロスサイズ退避行列（Cross-Size Eviction Matrix）の測定
 
-【目的】
-  統合キャッシュと分割キャッシュをシミュレートし、
-  「どのサイズクラスのオブジェクトが、どのサイズクラスのオブジェクトを退避させているか」
-  を定量化する。
+【ポリシー】
+  LRU / FIFO / S3-FIFO / ARC の 4 ポリシーを同一トレースで実行し、
+  各ポリシーでどのサイズクラスが何を退避させるかを記録する。
 
-  これにより M2（コンテンツサイズ帯別分割）が効く真のメカニズムを特定する:
-    - 仮説1: 大→小の退避干渉が主因 (Asymmetric Eviction Pressure)
-    - 仮説2: サイズ-人気度の負の相関が主因 (Size-Popularity Skew)
-    - 仮説3: サイズクラス間のワーキングセット比率差が主因
+  ポリシー間で退避行列パターン（特に非対称性スコア）が一致すれば、
+  クロスサイズ退避干渉はポリシー非依存のトレース本来の特性であり、
+  EuroSys 論文の主張（M2 の効果はポリシーに依らない）を強化できる。
 
-【入力トレース形式】
-  OracleGeneral バイナリ形式 (CacheMon 標準):
-    struct { uint32_t timestamp; uint64_t obj_id;
-             uint32_t obj_size;  int64_t next_access_vtime; }
-  拡張子 .oracleGeneral / .bin / .lcs を自動認識。
-  CSV も引き続きサポート（拡張子 .csv / .tsv）。
+【ポリシーの概要】
+  LRU     : Least Recently Used（OrderedDict ベース）
+  FIFO    : First-In First-Out（deque ベース）
+  S3-FIFO : Simple, Scalable FIFO (Zhang et al., SOSP 2023)
+              小キュー S (10%) + メインキュー M (90%) + ゴースト G
+              freq bit で 1 回だけセカンドチャンスを与える
+  ARC     : Adaptive Replacement Cache (Megiddo & Modha, FAST 2003)
+              T1/T2 (実キャッシュ) + B1/B2 (ゴースト) で p を適応調整
+
+【binning 設計】
+  1KiB〜8GiB を 2 の指数乗で 24 本の閾値に区切る（25 bin）。
+  詳細は cache_common.py を参照。
+  後処理で aggregate_matrix(n_merge=2) を呼ぶと 2/4 倍幅 bin に集約できる。
 
 【使い方】
-  python eviction_matrix_sim.py \
-      --trace path/to/trace.oracleGeneral \
-      --cache-sizes 0.01 0.05 0.1 0.2 \
-      --thresholds 1024 65536 1048576 \
-      --out ./output/eviction_analysis
-
-  # 複数トレースをまとめて処理
-  python eviction_matrix_sim.py \
-      --trace-dir ./traces \
-      --cache-sizes 0.05 0.1 \
-      --out ./output/eviction_analysis
+  python eviction_matrix_sim.py --trace ./traces/cdn.oracleGeneral --out ./out
+  python eviction_matrix_sim.py --trace-dir ./traces --cache-sizes 0.01 0.05 0.1 \\
+      --policies lru fifo s3fifo arc --out ./out
 
 【出力】
-  {out_dir}/{trace_name}_eviction_matrix_cs{cache_size_pct}.csv
-  {out_dir}/{trace_name}_size_popularity.csv
-  {out_dir}/{trace_name}_mechanism_summary.csv
-  {out_dir}/{trace_name}_plots.png
+  {out}/{trace}_{policy}_eviction_matrix_cs{pct}pct.csv    細粒度 (25×25)
+  {out}/{trace}_{policy}_eviction_matrix_cs{pct}pct_x2.csv 2×集約 (13×13)
+  {out}/{trace}_{policy}_eviction_matrix_cs{pct}pct_x4.csv 4×集約 (7×7)
+  {out}/{trace}_lru_eviction_heatmap_cs{pct}pct.png        LRU 詳細図
+  {out}/{trace}_policy_comparison_cs{pct}pct.png           4ポリシー比較図
+  {out}/{trace}_size_popularity.csv
+  {out}/{trace}_mechanism_summary.csv
+  {out}/ALL_TRACES_mechanism_summary.csv
 """
 
 import argparse
 import os
-import struct
 import sys
-from collections import OrderedDict, defaultdict
 from pathlib import Path
+from collections import OrderedDict, deque
 
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.stats import spearmanr
 
-# ─────────────────────────────────────────────
-# OracleGeneral バイナリ形式の定数
-# struct { uint32_t ts; uint64_t obj_id; uint32_t obj_size; int64_t next_vtime; }
-# ─────────────────────────────────────────────
-OG_FORMAT      = "=IQIq"   # little-endian: uint32, uint64, uint32, int64
-OG_RECORD_SIZE = struct.calcsize(OG_FORMAT)   # = 24 bytes
-OG_EXTENSIONS  = {".oraclegeneral", ".oracleGeneralBin", ".bin", ".lcs"}
-
-# ─────────────────────────────────────────────
-# デフォルトサイズクラス境界 (バイト)
-# ─────────────────────────────────────────────
-DEFAULT_THRESHOLDS = [256, 4_096, 65_536, 1_048_576]  # 256B, 4KB, 64KB, 1MB
-SIZE_CLASS_LABELS_FMT = {
-    0: "<256B",
-    1: "256B-4KB",
-    2: "4KB-64KB",
-    3: "64KB-1MB",
-    4: ">1MB",
-}
-
-# ─────────────────────────────────────────────
-# サイズクラス判定
-# ─────────────────────────────────────────────
-
-def get_size_class(size: int, thresholds: list) -> int:
-    for i, t in enumerate(thresholds):
-        if size < t:
-            return i
-    return len(thresholds)
+from cache_common import (
+    POW2_THRESHOLDS, N_BINS,
+    get_size_class, get_size_class_vectorized,
+    build_class_labels, aggregate_matrix, plot_eviction_heatmap,
+    load_trace,
+)
 
 
-def build_class_labels(thresholds: list) -> dict:
-    labels = {}
-    units = [(1 << 30, "GB"), (1 << 20, "MB"), (1 << 10, "KB"), (1, "B")]
+# ═════════════════════════════════════════════
+# 共通ベースクラス
+# ═════════════════════════════════════════════
 
-    def fmt(b):
-        for div, unit in units:
-            if b >= div and b % div == 0:
-                return f"{b // div}{unit}"
-        return f"{b}B"
-
-    boundaries = [0] + thresholds + [None]
-    for i in range(len(boundaries) - 1):
-        lo = boundaries[i]
-        hi = boundaries[i + 1]
-        if lo == 0 and hi is not None:
-            labels[i] = f"<{fmt(hi)}"
-        elif hi is None:
-            labels[i] = f"≥{fmt(lo)}"
-        else:
-            labels[i] = f"{fmt(lo)}-{fmt(hi)}"
-    return labels
-
-
-# ─────────────────────────────────────────────
-# トレース読み込み（OracleGeneral / CSV 自動判定）
-# ─────────────────────────────────────────────
-
-def _is_oracle_general(path: Path) -> bool:
-    """拡張子とマジックバイトでOracleGeneral形式を判定する"""
-    if path.suffix.lower() in {s.lower() for s in OG_EXTENSIONS}:
-        return True
-    # 拡張子が不明な場合: ファイルサイズが 24 の倍数かどうかで推定
-    try:
-        size = path.stat().st_size
-        if size > 0 and size % OG_RECORD_SIZE == 0:
-            return True
-    except OSError:
-        pass
-    return False
-
-
-def load_trace_oracle_general(path: str, max_requests: int = None) -> pd.DataFrame:
+class _BaseCache:
     """
-    OracleGeneral バイナリ形式を読み込む。
-    struct { uint32_t ts; uint64_t obj_id; uint32_t obj_size; int64_t next_vtime; }
+    全ポリシー共通の統計カウンタ・退避行列インターフェース。
 
-    next_access_vtime:
-      -1 = このアクセス以降にアクセスなし（one-hit wonder）
-      >= 0 = 次にアクセスされる仮想時刻（スタック距離の近似）
-    """
-    records = []
-    with open(path, "rb") as f:
-        raw = f.read()
-
-    n_records = len(raw) // OG_RECORD_SIZE
-    if max_requests is not None:
-        n_records = min(n_records, max_requests)
-
-    for i in range(n_records):
-        offset = i * OG_RECORD_SIZE
-        ts, obj_id, obj_size, next_vtime = struct.unpack_from(OG_FORMAT, raw, offset)
-        if obj_size > 0:
-            records.append((ts, obj_id, obj_size, next_vtime))
-
-    df = pd.DataFrame(records,
-                      columns=["timestamp", "obj_id", "obj_size", "next_access_vtime"])
-    df["obj_id"] = df["obj_id"].astype(str)
-    return df
-
-
-def load_trace_csv(path: str,
-                   time_col: int = 0,
-                   id_col: int = 1,
-                   size_col: int = 2,
-                   max_requests: int = None) -> pd.DataFrame:
-    """CSV / TSV トレースを読み込む（ヘッダー自動判定）"""
-    path = Path(path)
-    sep = "\t" if path.suffix.lower() == ".tsv" else ","
-
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        first_fields = f.readline().strip().split(sep)
-    has_header = not all(_is_numeric(v) for v in first_fields[:3])
-
-    try:
-        df = pd.read_csv(
-            path, sep=sep,
-            header=0 if has_header else None,
-            usecols=[time_col, id_col, size_col],
-            nrows=max_requests,
-            dtype={time_col: "int64", id_col: "str", size_col: "int64"},
-            on_bad_lines="skip", low_memory=True,
-        )
-    except Exception:
-        df = pd.read_csv(
-            path, sep=sep,
-            header=0 if has_header else None,
-            usecols=[time_col, id_col, size_col],
-            nrows=max_requests,
-            on_bad_lines="skip", low_memory=True,
-        )
-
-    df.columns = ["timestamp", "obj_id", "obj_size"]
-    df["next_access_vtime"] = np.nan   # CSV には再利用距離情報なし
-    df = df.dropna(subset=["obj_size"])
-    df["obj_size"] = pd.to_numeric(df["obj_size"], errors="coerce").fillna(0).astype(int)
-    df = df[df["obj_size"] > 0]
-    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce").fillna(0).astype(int)
-    return df
-
-
-def load_trace(path: str,
-               time_col: int = 0,
-               id_col: int = 1,
-               size_col: int = 2,
-               max_requests: int = None) -> pd.DataFrame:
-    """
-    ファイル形式を自動判定してトレースを読み込む。
-    OracleGeneral (バイナリ) と CSV / TSV に対応。
-    """
-    p = Path(path)
-    if _is_oracle_general(p):
-        print(f"  形式: OracleGeneral バイナリ")
-        df = load_trace_oracle_general(path, max_requests)
-    else:
-        print(f"  形式: CSV/TSV テキスト")
-        df = load_trace_csv(path, time_col, id_col, size_col, max_requests)
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    has_vtime = "next_access_vtime" in df.columns and df["next_access_vtime"].notna().any()
-
-    print(f"  読み込み完了: {len(df):,} リクエスト  "
-          f"ユニーク={df['obj_id'].nunique():,}  "
-          f"サイズ=[{df['obj_size'].min()}, {df['obj_size'].max()}]B  "
-          f"next_vtime={'あり' if has_vtime else 'なし'}")
-    return df
-
-
-def _is_numeric(s: str) -> bool:
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
-
-
-# ─────────────────────────────────────────────
-# バイト単位 LRU キャッシュ（退避行列記録付き）
-# ─────────────────────────────────────────────
-
-class ByteAwareLRU:
-    """
-    バイト容量制限の LRU キャッシュ。
-    各退避イベントで (退避されたオブジェクトのサイズクラス, 挿入オブジェクトのサイズクラス)
-    を記録する。
+    退避行列の定義:
+      eviction_matrix[ev_sc][ins_sc] += 1
+        ev_sc  : 退避されたオブジェクトのサイズクラス
+        ins_sc : その退避を引き起こした（挿入中の）オブジェクトのサイズクラス
     """
 
-    def __init__(self, capacity_bytes: int, thresholds: list):
-        self.capacity = capacity_bytes
-        self.thresholds = thresholds
-        self.n_classes = len(thresholds) + 1
-        self.used_bytes = 0
+    POLICY = "base"
 
-        # OrderedDict: obj_id -> (size, size_class)
-        self._cache: OrderedDict = OrderedDict()
+    def __init__(self, capacity_bytes: int, n_classes: int = N_BINS):
+        self.capacity   = capacity_bytes
+        self.n_classes  = n_classes
+        self.used_bytes = 0        # サブクラスが任意に使用
 
-        # 統計カウンタ
-        self.hits = 0
-        self.misses = 0
-        self.hit_bytes = 0
+        self.hits       = 0
+        self.misses     = 0
+        self.hit_bytes  = 0
         self.miss_bytes = 0
 
-        # クロスサイズ退避行列: eviction_matrix[evicted_class][inserting_class]
-        self.eviction_matrix = np.zeros((self.n_classes, self.n_classes), dtype=np.int64)
+        self.eviction_matrix  = np.zeros((n_classes, n_classes), dtype=np.int64)
+        self.class_hits       = np.zeros(n_classes, dtype=np.int64)
+        self.class_misses     = np.zeros(n_classes, dtype=np.int64)
+        self.class_bytes_hit  = np.zeros(n_classes, dtype=np.int64)
+        self.class_bytes_miss = np.zeros(n_classes, dtype=np.int64)
 
-        # サイズクラス別 hit / miss
-        self.class_hits   = np.zeros(self.n_classes, dtype=np.int64)
-        self.class_misses = np.zeros(self.n_classes, dtype=np.int64)
-        self.class_bytes_hit   = np.zeros(self.n_classes, dtype=np.int64)
-        self.class_bytes_miss  = np.zeros(self.n_classes, dtype=np.int64)
+    # ── 内部ヘルパー ──────────────────────────
 
-    def access(self, obj_id: str, size: int):
-        sc = get_size_class(size, self.thresholds)
+    def _on_hit(self, size: int, sc: int):
+        self.hits      += 1
+        self.hit_bytes += size
+        self.class_hits[sc]      += 1
+        self.class_bytes_hit[sc] += size
 
-        if obj_id in self._cache:
-            # キャッシュヒット
-            self._cache.move_to_end(obj_id)
-            self.hits += 1
-            self.hit_bytes += size
-            self.class_hits[sc] += 1
-            self.class_bytes_hit[sc] += size
-            return True
+    def _on_miss(self, size: int, sc: int):
+        self.misses      += 1
+        self.miss_bytes  += size
+        self.class_misses[sc]      += 1
+        self.class_bytes_miss[sc]  += size
 
-        # キャッシュミス: 容量を確保しながら挿入
-        self.misses += 1
-        self.miss_bytes += size
-        self.class_misses[sc] += 1
-        self.class_bytes_miss[sc] += size
+    def _on_evict(self, ev_sc: int, ins_sc: int):
+        self.eviction_matrix[ev_sc][ins_sc] += 1
 
-        # 容量超過分を退避
-        while self.used_bytes + size > self.capacity and self._cache:
-            evicted_id, (evicted_size, evicted_sc) = self._cache.popitem(last=False)
-            self.used_bytes -= evicted_size
-            self.eviction_matrix[evicted_sc][sc] += 1
-
-        # 挿入（容量が足りない場合は挿入しない）
-        if size <= self.capacity:
-            self._cache[obj_id] = (size, sc)
-            self.used_bytes += size
-
-        return False
+    # ── 外部向け集計メソッド ──────────────────
 
     def hit_rate(self) -> float:
         total = self.hits + self.misses
-        return self.hits / total if total > 0 else 0.0
+        return self.hits / total if total else 0.0
 
     def byte_miss_rate(self) -> float:
         total = self.hit_bytes + self.miss_bytes
-        return self.miss_bytes / total if total > 0 else 0.0
+        return self.miss_bytes / total if total else 0.0
 
     def class_hit_rates(self) -> np.ndarray:
         total = self.class_hits + self.class_misses
@@ -310,507 +126,839 @@ class ByteAwareLRU:
         return self.class_hits / total
 
     def normalized_eviction_matrix(self) -> np.ndarray:
-        """各列（挿入クラス）の合計で正規化: 挿入1回あたりの退避先分布"""
+        """列（挿入クラス）の合計で正規化"""
         col_sums = self.eviction_matrix.sum(axis=0, keepdims=True)
         col_sums = np.where(col_sums == 0, 1, col_sums)
         return self.eviction_matrix / col_sums
 
+    def asymmetry_score(self, mid_class: int = None) -> float:
+        """
+        「大クラスが小クラスを退避させる」割合。
+        mid_class 以上のクラスが mid_class 未満を退避させるケースの比率。
+        値が高い → 退避干渉の非対称性が強い（仮説1の根拠）。
+        """
+        if mid_class is None:
+            mid_class = self.n_classes // 2
+        em  = self.eviction_matrix
+        lge = em[:mid_class, mid_class:].sum()
+        tot = em.sum()
+        return float(lge / tot) if tot > 0 else 0.0
+
+
+# ═════════════════════════════════════════════
+# LRU
+# ═════════════════════════════════════════════
+
+class ByteAwareLRU(_BaseCache):
+    """
+    Least Recently Used キャッシュ。
+    OrderedDict を使い O(1) でアクセス・退避を行う。
+    """
+    POLICY = "lru"
+
+    def __init__(self, capacity_bytes: int, n_classes: int = N_BINS):
+        super().__init__(capacity_bytes, n_classes)
+        self._cache = OrderedDict()   # obj_id -> (size, sc)
+
+    def access(self, obj_id: str, size: int, sc: int) -> bool:
+        if obj_id in self._cache:
+            self._cache.move_to_end(obj_id)
+            self._on_hit(size, sc)
+            return True
+
+        self._on_miss(size, sc)
+
+        while self.used_bytes + size > self.capacity and self._cache:
+            _, (ev_size, ev_sc) = self._cache.popitem(last=False)
+            self.used_bytes -= ev_size
+            self._on_evict(ev_sc, sc)
+
+        if size <= self.capacity:
+            self._cache[obj_id] = (size, sc)
+            self.used_bytes += size
+        return False
+
+
+# ═════════════════════════════════════════════
+# FIFO
+# ═════════════════════════════════════════════
+
+class ByteAwareFIFO(_BaseCache):
+    """
+    First-In First-Out キャッシュ。
+    ヒット時にも順序を変えない。deque + lookup dict で O(1)。
+    """
+    POLICY = "fifo"
+
+    def __init__(self, capacity_bytes: int, n_classes: int = N_BINS):
+        super().__init__(capacity_bytes, n_classes)
+        self._queue  = deque()   # (obj_id, size, sc)  挿入順
+        self._lookup = {}        # obj_id -> (size, sc)
+
+    def access(self, obj_id: str, size: int, sc: int) -> bool:
+        if obj_id in self._lookup:
+            self._on_hit(size, sc)
+            return True
+
+        self._on_miss(size, sc)
+
+        while self.used_bytes + size > self.capacity and self._queue:
+            ev_id, ev_size, ev_sc = self._queue.popleft()
+            if ev_id in self._lookup:
+                del self._lookup[ev_id]
+                self.used_bytes -= ev_size
+                self._on_evict(ev_sc, sc)
+
+        if size <= self.capacity:
+            self._queue.append((obj_id, size, sc))
+            self._lookup[obj_id] = (size, sc)
+            self.used_bytes += size
+        return False
+
+
+# ═════════════════════════════════════════════
+# S3-FIFO
+# ═════════════════════════════════════════════
+
+class ByteAwareS3FIFO(_BaseCache):
+    """
+    S3-FIFO: Simple, Scalable FIFO Queues for Cache Eviction
+    (Yazhuo Zhang et al., SOSP 2023)
+
+    アルゴリズム:
+      1. 全オブジェクトは最初に S（小キュー、容量の SMALL_FRAC）に入る
+      2. ヒット時: freq bit を 1 にする（上限 1）
+      3. S からの退避:
+           freq=1 → M（メインキュー）に昇格し freq=0 に
+           freq=0 → 退避して G（ゴースト）に追加
+      4. M からの退避:
+           freq=1 → M の末尾に戻す（セカンドチャンス）、freq=0 に
+           freq=0 → 退避
+      5. 新オブジェクトが G にあれば M に直接挿入（S をバイパス）
+
+    実装上の注意:
+      - deque への遅延削除（lazy deletion）を用いて O(1) amortized を実現
+      - ゴーストは MAX_GHOST 件に制限してメモリを抑制
+    """
+    POLICY     = "s3fifo"
+    SMALL_FRAC = 0.1
+    MAX_GHOST  = 200_000
+
+    def __init__(self, capacity_bytes: int, n_classes: int = N_BINS):
+        super().__init__(capacity_bytes, n_classes)
+
+        self._cap_s = max(int(capacity_bytes * self.SMALL_FRAC), 1)
+        self._cap_m = max(capacity_bytes - self._cap_s, 1)
+
+        # キューには obj_id のみ格納。遅延削除で古いエントリをスキップ。
+        self._q_S = deque()
+        self._q_M = deque()
+
+        # キャッシュ内オブジェクト情報: obj_id -> [size, sc, freq, tag]
+        #   tag: "S" または "M"（遅延削除時のキュー帰属判定に使用）
+        self._data: dict = {}
+
+        # ゴースト（S から退避された obj_id）: OrderedDict で挿入順管理
+        self._ghost: OrderedDict = OrderedDict()
+
+        self._used_S = 0
+        self._used_M = 0
+
+    def access(self, obj_id: str, size: int, sc: int) -> bool:
+        # ── ヒット ──
+        if obj_id in self._data:
+            self._data[obj_id][2] = min(self._data[obj_id][2] + 1, 1)
+            self._on_hit(size, sc)
+            return True
+
+        # ── ミス ──
+        self._on_miss(size, sc)
+
+        if obj_id in self._ghost:
+            # ゴーストヒット → M に直接挿入
+            del self._ghost[obj_id]
+            self._insert_to_M(obj_id, size, sc, sc)
+        else:
+            # S に挿入（容量不足なら S から退避/昇格を繰り返す）
+            while self._used_S + size > self._cap_s:
+                if not self._evict_from_S(sc):
+                    break
+            if size <= self._cap_s:
+                self._data[obj_id] = [size, sc, 0, "S"]
+                self._q_S.append(obj_id)
+                self._used_S += size
+            elif size <= self._cap_m:
+                # S に入らないサイズは直接 M へ
+                self._insert_to_M(obj_id, size, sc, sc)
+            # size > cap_m はキャッシュ不可（no-op）
+        return False
+
+    def _evict_from_S(self, ins_sc: int) -> bool:
+        """
+        S の先頭から 1 件を処理する。
+          freq=1 → M に昇格
+          freq=0 → 退避してゴーストへ
+        何らかの処理をした場合 True を返す。
+        """
+        while self._q_S:
+            ev_id  = self._q_S.popleft()
+            entry  = self._data.get(ev_id)
+            if entry is None or entry[3] != "S":
+                continue   # 遅延削除: すでに処理済みのエントリ
+
+            ev_size, ev_sc, ev_freq, _ = entry
+            del self._data[ev_id]
+            self._used_S -= ev_size
+
+            if ev_freq > 0:
+                # M へ昇格（M が満杯なら M から退避）
+                self._insert_to_M(ev_id, ev_size, ev_sc, ins_sc)
+            else:
+                # 退避 → ゴーストに追加
+                self._on_evict(ev_sc, ins_sc)
+                self._ghost[ev_id] = True
+                if len(self._ghost) > self.MAX_GHOST:
+                    self._ghost.popitem(last=False)
+            return True
+        return False
+
+    def _evict_from_M(self, ins_sc: int) -> bool:
+        """
+        M の先頭から 1 件退避（セカンドチャンスあり）。
+        freq=1 → freq=0 にして末尾へ（セカンドチャンス）
+        freq=0 → 退避
+        True = 退避成功。
+        """
+        # 無限ループ防止: M のサイズの 2 倍を上限にイテレーション
+        limit   = len(self._q_M) * 2 + 2
+        checked = 0
+        while self._q_M and checked < limit:
+            ev_id = self._q_M.popleft()
+            checked += 1
+            entry = self._data.get(ev_id)
+            if entry is None or entry[3] != "M":
+                continue
+
+            ev_size, ev_sc, ev_freq, _ = entry
+            if ev_freq > 0:
+                # セカンドチャンス: freq=0 にして末尾へ戻す
+                self._data[ev_id][2] = 0
+                self._q_M.append(ev_id)
+            else:
+                del self._data[ev_id]
+                self._used_M -= ev_size
+                self._on_evict(ev_sc, ins_sc)
+                return True
+        return False
+
+    def _insert_to_M(self, obj_id: str, size: int, sc: int, ins_sc: int):
+        """M にオブジェクトを挿入する（必要なら退避）。"""
+        while self._used_M + size > self._cap_m:
+            if not self._evict_from_M(ins_sc):
+                break
+        if size <= self._cap_m:
+            self._data[obj_id] = [size, sc, 0, "M"]
+            self._q_M.append(obj_id)
+            self._used_M += size
+
+
+# ═════════════════════════════════════════════
+# ARC
+# ═════════════════════════════════════════════
+
+class ByteAwareARC(_BaseCache):
+    """
+    ARC: Adaptive Replacement Cache
+    (Nimrod Megiddo & Dharmendra S. Modha, FAST 2003)
+
+    4 つのリスト:
+      T1: 最近 1 回アクセスのオブジェクト（LRU 管理）
+      T2: 最近 2 回以上アクセスのオブジェクト（LRU 管理）
+      B1: T1 から退避されたゴースト（キーのみ）
+      B2: T2 から退避されたゴースト（キーのみ）
+
+    適応パラメータ p（T1 の目標バイト容量）:
+      B1 ヒット → p を増加（T1 に多く割く）
+      B2 ヒット → p を減少（T2 に多く割く）
+      delta = size × max(1, |B2| / |B1|)  or  max(1, |B1| / |B2|)
+
+    可変サイズへの対応:
+      - T1/T2 の容量はバイト単位で管理
+      - p もバイト単位（原論文のカウントベースを拡張）
+    """
+    POLICY    = "arc"
+    MAX_GHOST = 200_000   # B1/B2 各々の最大エントリ数
+
+    def __init__(self, capacity_bytes: int, n_classes: int = N_BINS):
+        super().__init__(capacity_bytes, n_classes)
+
+        self._T1 = OrderedDict()   # obj_id -> (size, sc)  LRU 順
+        self._T2 = OrderedDict()   # obj_id -> (size, sc)  LRU 順
+        self._B1 = OrderedDict()   # obj_id -> size  ゴースト T1（LRU 順）
+        self._B2 = OrderedDict()   # obj_id -> size  ゴースト T2（LRU 順）
+
+        self._used_T1 = 0
+        self._used_T2 = 0
+
+        # p: T1 の目標バイト容量（0 で初期化、アクセスに応じて適応）
+        self._p: float = 0.0
+
+    # ── Replace ──────────────────────────────
+
+    def _arc_replace(self, ins_sc: int, ins_size: int = 1):
+        """
+        ARC の Replace ルール:
+          used_T1 >= p かつ T1 に要素があれば T1 の LRU 端を B1 へ退避。
+          それ以外は T2 の LRU 端を B2 へ退避。
+        """
+        if self._T1 and (self._used_T1 >= max(self._p, ins_size) or not self._T2):
+            ev_id, (ev_size, ev_sc) = self._T1.popitem(last=False)
+            self._used_T1 -= ev_size
+            self._B1[ev_id] = ev_size
+            if len(self._B1) > self.MAX_GHOST:
+                self._B1.popitem(last=False)
+            self._on_evict(ev_sc, ins_sc)
+        elif self._T2:
+            ev_id, (ev_size, ev_sc) = self._T2.popitem(last=False)
+            self._used_T2 -= ev_size
+            self._B2[ev_id] = ev_size
+            if len(self._B2) > self.MAX_GHOST:
+                self._B2.popitem(last=False)
+            self._on_evict(ev_sc, ins_sc)
+        elif self._T1:
+            # T2 が空のフォールバック
+            ev_id, (ev_size, ev_sc) = self._T1.popitem(last=False)
+            self._used_T1 -= ev_size
+            self._B1[ev_id] = ev_size
+            if len(self._B1) > self.MAX_GHOST:
+                self._B1.popitem(last=False)
+            self._on_evict(ev_sc, ins_sc)
+
+    def access(self, obj_id: str, size: int, sc: int) -> bool:
+        cap = self.capacity
+
+        # ── Case 1: T1 ヒット → T2 MRU へ ──
+        if obj_id in self._T1:
+            old_size, old_sc = self._T1.pop(obj_id)
+            self._used_T1 -= old_size
+            self._T2[obj_id] = (size, sc)
+            self._used_T2  += size
+            self._on_hit(size, sc)
+            return True
+
+        # ── Case 2: T2 ヒット → T2 内 MRU へ ──
+        if obj_id in self._T2:
+            self._T2.move_to_end(obj_id)
+            self._on_hit(size, sc)
+            return True
+
+        # ── ミス ──
+        self._on_miss(size, sc)
+
+        in_B1 = obj_id in self._B1
+        in_B2 = obj_id in self._B2
+
+        # ── Case 3: B1 ゴーストヒット → p を増加、T2 に挿入 ──
+        if in_B1:
+            self._B1.pop(obj_id)
+            b1n = max(len(self._B1), 1)
+            b2n = max(len(self._B2), 1)
+            delta = max(size, size * b2n / b1n)
+            self._p = min(self._p + delta, float(cap))
+
+            while self._used_T1 + self._used_T2 + size > cap:
+                self._arc_replace(sc, size)
+            self._T2[obj_id] = (size, sc)
+            self._used_T2   += size
+            return False
+
+        # ── Case 4: B2 ゴーストヒット → p を減少、T2 に挿入 ──
+        if in_B2:
+            self._B2.pop(obj_id)
+            b1n = max(len(self._B1), 1)
+            b2n = max(len(self._B2), 1)
+            delta = max(size, size * b1n / b2n)
+            self._p = max(self._p - delta, 0.0)
+
+            while self._used_T1 + self._used_T2 + size > cap:
+                self._arc_replace(sc, size)
+            self._T2[obj_id] = (size, sc)
+            self._used_T2   += size
+            return False
+
+        # ── Case 5: 完全ミス → T1 に挿入 ──
+        while self._used_T1 + self._used_T2 + size > cap:
+            self._arc_replace(sc, size)
+
+        if size <= cap:
+            self._T1[obj_id] = (size, sc)
+            self._used_T1   += size
+        return False
+
 
 # ─────────────────────────────────────────────
-# 分割キャッシュシミュレータ
+# ポリシー名 → クラスのマッピング
 # ─────────────────────────────────────────────
+
+POLICIES: dict = {
+    "lru":    ByteAwareLRU,
+    "fifo":   ByteAwareFIFO,
+    "s3fifo": ByteAwareS3FIFO,
+    "arc":    ByteAwareARC,
+}
+POLICY_LABELS = {
+    "lru":    "LRU",
+    "fifo":   "FIFO",
+    "s3fifo": "S3-FIFO",
+    "arc":    "ARC",
+}
+
+
+# ═════════════════════════════════════════════
+# 分割キャッシュ（サイズクラスごとに独立した LRU）
+# ═════════════════════════════════════════════
 
 class SizePartitionedCache:
     """
-    サイズクラスごとに独立した LRU キャッシュを持つ分割キャッシュ。
-    各キャッシュの容量は、そのクラスのバイト占有率に比例して割り当てる。
+    各サイズクラスに独立した ByteAwareLRU を持つ分割キャッシュ。
+    容量配分はバイト占有率に比例。
     """
 
-    def __init__(self, total_capacity_bytes: int, thresholds: list,
-                 class_byte_fracs: np.ndarray):
-        self.n_classes = len(thresholds) + 1
-        self.thresholds = thresholds
+    def __init__(self, total_bytes: int,
+                 class_byte_fracs,
+                 n_classes: int = N_BINS):
+        capacities = [max(int(f * total_bytes), 1) for f in class_byte_fracs]
+        self.caches = [ByteAwareLRU(int(c), n_classes) for c in capacities]
 
-        # バイト占有率に基づいて容量を比例配分 (最小 1 バイト)
-        capacities = np.maximum(
-            (class_byte_fracs * total_capacity_bytes).astype(int), 1
-        )
-        self.caches = [
-            ByteAwareLRU(int(cap), thresholds) for cap in capacities
-        ]
-        self.capacities = capacities
-
-    def access(self, obj_id: str, size: int):
-        sc = get_size_class(size, self.thresholds)
-        return self.caches[sc].access(obj_id, size)
+    def access(self, obj_id: str, size: int, sc: int) -> bool:
+        return self.caches[sc].access(obj_id, size, sc)
 
     def hit_rate(self) -> float:
-        total_hits   = sum(c.hits   for c in self.caches)
-        total_misses = sum(c.misses for c in self.caches)
-        total = total_hits + total_misses
-        return total_hits / total if total > 0 else 0.0
+        h = sum(c.hits   for c in self.caches)
+        m = sum(c.misses for c in self.caches)
+        return h / (h + m) if (h + m) else 0.0
 
     def byte_miss_rate(self) -> float:
-        total_hit_b  = sum(c.hit_bytes  for c in self.caches)
-        total_miss_b = sum(c.miss_bytes for c in self.caches)
-        total = total_hit_b + total_miss_b
-        return total_miss_b / total if total > 0 else 0.0
+        hb = sum(c.hit_bytes  for c in self.caches)
+        mb = sum(c.miss_bytes for c in self.caches)
+        return mb / (hb + mb) if (hb + mb) else 0.0
 
 
 # ─────────────────────────────────────────────
 # サイズ-人気度分析
 # ─────────────────────────────────────────────
 
-def analyze_size_popularity(df: pd.DataFrame, thresholds: list) -> pd.DataFrame:
-    """
-    各オブジェクトのサイズとアクセス頻度を集計し、
-    Spearman 相関とサイズクラス別統計を返す。
+def analyze_size_popularity(df):
+    import pandas as pd
+    from scipy.stats import spearmanr
 
-    OracleGeneral の next_access_vtime を使って one-hit-wonder を正確に判定する。
-    next_access_vtime == -1 はそのアクセス以降アクセスなし（最終アクセス）を意味する。
-    """
-    has_vtime = ("next_access_vtime" in df.columns
-                 and df["next_access_vtime"].notna().any())
+    class_labels = build_class_labels()
 
-    agg_dict = {
-        "size": ("obj_size", "first"),
-        "freq": ("obj_id", "count"),
-    }
-    obj_stats = df.groupby("obj_id").agg(**agg_dict).reset_index()
-
-    if has_vtime:
-        # next_access_vtime == -1 のアクセス = そのオブジェクトの最終アクセス
-        # 全アクセスが1回だけ = (freq==1) AND (next_access_vtime==-1) で確認
-        last_vtime = df.groupby("obj_id")["next_access_vtime"].last()
-        obj_stats = obj_stats.join(last_vtime.rename("last_vtime"), on="obj_id")
-        # 1回アクセスのオブジェクト = OHW（One-Hit Wonder）
-        obj_stats["is_ohw"] = (obj_stats["freq"] == 1)
-    else:
-        obj_stats["is_ohw"] = (obj_stats["freq"] == 1)
-        obj_stats["last_vtime"] = np.nan
-
-    # Spearman 相関: サイズ vs アクセス頻度
-    rho, pval = spearmanr(obj_stats["size"], obj_stats["freq"])
-    print(f"  サイズ-人気度 Spearman ρ = {rho:.4f}  (p = {pval:.4g})")
-
-    # サイズクラス別集計
-    obj_stats["size_class"] = obj_stats["size"].apply(
-        lambda s: get_size_class(s, thresholds)
+    obj_stats = (
+        df.groupby("obj_id")
+        .agg(size=("obj_size", "first"),
+             freq=("obj_id", "count"),
+             sc=("size_class", "first"))
+        .reset_index()
     )
-    class_labels = build_class_labels(thresholds)
-    obj_stats["size_class_label"] = obj_stats["size_class"].map(class_labels)
+    obj_stats["is_ohw"] = obj_stats["freq"] == 1
 
-    class_stats = obj_stats.groupby("size_class_label").agg(
+    rho, pval = spearmanr(obj_stats["size"], obj_stats["freq"])
+    print(f"  サイズ-人気度 Spearman ρ = {rho:+.4f}  (p = {pval:.3g})")
+
+    class_stats = obj_stats.groupby("sc").agg(
+        size_class_label=("sc",
+            lambda x: class_labels.get(x.iloc[0], str(x.iloc[0]))),
         n_objects=("obj_id", "count"),
         total_requests=("freq", "sum"),
         mean_freq=("freq", "mean"),
         median_freq=("freq", "median"),
-        one_hit_wonder_frac=("is_ohw", "mean"),
+        ohw_frac=("is_ohw", "mean"),
         mean_size=("size", "mean"),
-        total_bytes=("size", "sum"),
-    ).reset_index()
-    class_stats["rho"] = rho
-    class_stats["rho_pvalue"] = pval
+    ).reset_index().rename(columns={"sc": "size_class"})
+
+    class_stats["size_rho"]   = rho
+    class_stats["size_rho_p"] = pval
     return class_stats
 
 
-# ─────────────────────────────────────────────
-# メカニズム指標の集計
-# ─────────────────────────────────────────────
+# ═════════════════════════════════════════════
+# 可視化
+# ═════════════════════════════════════════════
 
-def compute_mechanism_metrics(
-    unified_lru: ByteAwareLRU,
-    partitioned: SizePartitionedCache,
-    thresholds: list,
-) -> dict:
+def plot_results(unified,
+                 partitioned,
+                 sp_stats,
+                 trace_name: str,
+                 cache_size_pct: float,
+                 out_path: str):
     """
-    統合キャッシュと分割キャッシュの比較から、
-    退避干渉の程度とその影響を定量化する。
+    LRU ベースの詳細 5 パネル図。
+      (A) 退避行列（件数）
+      (B) 退避行列（正規化）
+      (C) 4 倍幅 bin 集約行列
+      (D) クラス別ヒット率：統合 LRU vs 分割 LRU
+      (E) OHW 率
     """
-    n_classes = len(thresholds) + 1
-    class_labels = build_class_labels(thresholds)
+    import matplotlib.pyplot as plt
 
-    # --- 退避行列の非対称性スコア ---
-    # 大クラス(上位半分)→小クラス(下位半分)への退避割合
-    em = unified_lru.eviction_matrix
-    mid = n_classes // 2
+    class_labels = build_class_labels()
+    n = unified.n_classes
 
-    large_evicts_small = em[:mid, mid:].sum()   # 小→大に退避  (行=退避先=小、列=挿入元=大)
-    total_evictions = em.sum()
-    # 注: em[i][j] = サイズクラスi が クラスj の挿入によって退避された数
-    #     大(j>=mid)が小(i<mid)を退避: em[i<mid, j>=mid]
-    large_evicts_small = em[:mid, mid:].sum()
-    asymmetry_score = large_evicts_small / total_evictions if total_evictions > 0 else 0.0
+    fig = plt.figure(figsize=(22, 14))
+    fig.suptitle(
+        f"{trace_name}  |  LRU  キャッシュ容量 {cache_size_pct:.0%} × WSS\n"
+        f"退避行列 (25×25 fine-grained, 2の指数乗 bin)",
+        fontsize=11
+    )
+    gs = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.35)
 
-    # --- クラス別ヒット率改善 ---
-    unified_class_hr   = unified_lru.class_hit_rates()
-    partitioned_class_hr = np.array([
+    # ── (A) 退避行列 生カウント ──
+    ax = fig.add_subplot(gs[0:2, 0])
+    im = plot_eviction_heatmap(
+        ax, unified.eviction_matrix,
+        title="(A) 退避行列（件数）",
+        normalize_cols=False, cmap="YlOrRd", label_every=2
+    )
+    plt.colorbar(im, ax=ax, fraction=0.046)
+
+    # ── (B) 退避行列 正規化 ──
+    ax = fig.add_subplot(gs[0:2, 1])
+    im2 = plot_eviction_heatmap(
+        ax, unified.eviction_matrix,
+        title="(B) 退避行列（正規化）\n列=挿入クラスで正規化",
+        normalize_cols=True, cmap="Blues", label_every=2
+    )
+    plt.colorbar(im2, ax=ax, fraction=0.046)
+
+    # ── (C) 4 倍幅集約 ──
+    ax = fig.add_subplot(gs[0:2, 2])
+    em_x4 = aggregate_matrix(unified.eviction_matrix, n_merge=4)
+    coarse_labels = build_class_labels([2 ** i for i in range(10, 34, 4)])
+    col_sums = em_x4.sum(axis=0, keepdims=True)
+    col_sums = np.where(col_sums == 0, 1, col_sums)
+    em_x4_norm = em_x4 / col_sums
+    im3 = ax.imshow(em_x4_norm, cmap="Blues", aspect="auto", vmin=0, vmax=1)
+    nc  = em_x4.shape[0]
+    cl  = [coarse_labels.get(i, str(i)) for i in range(nc)]
+    ax.set_xticks(range(nc)); ax.set_xticklabels(cl, rotation=45, ha="right", fontsize=7)
+    ax.set_yticks(range(nc)); ax.set_yticklabels(cl, fontsize=7)
+    ax.set_title("(C) 退避行列（4倍幅 bin に集約）\n隣接 bin を統合した粗粒度ビュー", fontsize=9)
+    ax.set_xlabel("挿入クラス", fontsize=8)
+    ax.set_ylabel("退避クラス", fontsize=8)
+    plt.colorbar(im3, ax=ax, fraction=0.046)
+    for i in range(nc):
+        for j in range(nc):
+            ax.text(j, i, f"{em_x4_norm[i,j]:.2f}",
+                    ha="center", va="center", fontsize=6,
+                    color="white" if em_x4_norm[i, j] > 0.6 else "black")
+
+    # ── (D) クラス別ヒット率：統合 vs 分割 ──
+    ax = fig.add_subplot(gs[2, 0:2])
+    unified_hr    = unified.class_hit_rates()
+    partitioned_hr = np.array([
         c.class_hit_rates()[i] for i, c in enumerate(partitioned.caches)
     ])
+    active = [i for i in range(n)
+              if (unified.class_hits[i] + unified.class_misses[i]) > 0]
+    x   = np.arange(len(active))
+    w   = 0.35
+    lbls = [class_labels.get(i, str(i)) for i in active]
+    ax.bar(x - w/2, unified_hr[active],     w, label="統合 LRU",   color="#DC2626", alpha=0.8)
+    ax.bar(x + w/2, partitioned_hr[active], w, label="サイズ分割", color="#1976D2", alpha=0.8)
+    ax.set_xticks(x); ax.set_xticklabels(lbls, rotation=45, ha="right", fontsize=7)
+    ax.set_ylabel("ヒット率"); ax.set_ylim(0, 1)
+    ax.set_title("(D) サイズクラス別ヒット率：統合 LRU vs 分割 LRU", fontsize=9)
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3, axis="y")
 
-    # --- 総合サマリー ---
-    metrics = {
-        "unified_hit_rate":      unified_lru.hit_rate(),
-        "unified_byte_miss_rate": unified_lru.byte_miss_rate(),
-        "partitioned_hit_rate":   partitioned.hit_rate(),
-        "partitioned_byte_miss_rate": partitioned.byte_miss_rate(),
-        "hit_rate_improvement":  partitioned.hit_rate() - unified_lru.hit_rate(),
-        "bmr_improvement":       unified_lru.byte_miss_rate() - partitioned.byte_miss_rate(),
-        "asymmetry_score":       asymmetry_score,
-        "total_evictions":       int(total_evictions),
-    }
-    for i in range(n_classes):
-        lbl = class_labels[i].replace(" ", "").replace("≥", "ge").replace("<", "lt").replace("-", "_")
-        metrics[f"unified_hr_{lbl}"]      = float(unified_class_hr[i])
-        metrics[f"partitioned_hr_{lbl}"]  = float(partitioned_class_hr[i])
-        metrics[f"hr_gain_{lbl}"]         = float(partitioned_class_hr[i] - unified_class_hr[i])
+    # ── (E) OHW 率 ──
+    ax = fig.add_subplot(gs[2, 2])
+    if sp_stats is not None and "ohw_frac" in sp_stats.columns:
+        active_sc = sp_stats[sp_stats["size_class"].isin(active)]
+        ax.bar(range(len(active_sc)),
+               active_sc["ohw_frac"].values,
+               color="#9C27B0", alpha=0.8)
+        ax.set_xticks(range(len(active_sc)))
+        ax.set_xticklabels(active_sc["size_class_label"].values,
+                           rotation=45, ha="right", fontsize=7)
+        ax.set_ylabel("One-Hit-Wonder 率")
+        ax.set_ylim(0, 1)
+        ax.set_title("(E) OHW 率（サイズクラス別）\n高い = 退避汚染の主因候補", fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
 
-    return metrics
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  グラフ保存: {out_path}")
 
 
-# ─────────────────────────────────────────────
-# 可視化
-# ─────────────────────────────────────────────
-
-def plot_eviction_matrix(
-    unified_lru: ByteAwareLRU,
-    thresholds: list,
+def plot_policy_comparison_heatmaps(
+    caches: dict,
     trace_name: str,
     cache_size_pct: float,
     out_path: str,
 ):
-    class_labels = build_class_labels(thresholds)
-    n_classes = len(thresholds) + 1
-    labels = [class_labels[i] for i in range(n_classes)]
+    """
+    4 ポリシーの正規化退避行列を 2×2 グリッドで並べる比較図。
+    追加パネルとして非対称性スコアと全体ヒット率の棒グラフを表示。
+    """
+    import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    pol_keys = list(caches.keys())
+    n_pol    = len(pol_keys)
+    if n_pol == 0:
+        return
+
+    grid_keys = pol_keys[:4]
+    n_cols    = 2
+    n_rows    = (len(grid_keys) + 1) // 2
+
+    fig = plt.figure(figsize=(14, 5 * n_rows + 4))
     fig.suptitle(
-        f"{trace_name}  |  統合キャッシュ  |  キャッシュ容量={cache_size_pct:.0%}",
-        fontsize=12
+        f"{trace_name}  |  ポリシー別 退避行列比較  |  容量 {cache_size_pct:.0%} × WSS\n"
+        f"列（挿入クラス）で正規化。ポリシー間で非対称パターンが一致 → トレース本来の特性",
+        fontsize=11
     )
 
-    # (A) 退避行列（件数）
-    ax = axes[0]
-    em = unified_lru.eviction_matrix.astype(float)
-    im = ax.imshow(em, cmap="YlOrRd", aspect="auto")
-    ax.set_xticks(range(n_classes))
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_yticks(range(n_classes))
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("挿入クラス（キャッシュミスの元）", fontsize=9)
-    ax.set_ylabel("退避クラス（追い出されたオブジェクト）", fontsize=9)
-    ax.set_title("退避行列（件数）", fontsize=10)
-    plt.colorbar(im, ax=ax)
-    for i in range(n_classes):
-        for j in range(n_classes):
-            val = int(em[i, j])
-            if val > 0:
-                ax.text(j, i, f"{val:,}", ha="center", va="center",
-                        fontsize=7, color="black" if em[i, j] < em.max() * 0.6 else "white")
+    gs = fig.add_gridspec(n_rows + 1, n_cols, hspace=0.55, wspace=0.35)
 
-    # (B) 正規化退避行列
-    ax = axes[1]
-    em_norm = unified_lru.normalized_eviction_matrix()
-    im2 = ax.imshow(em_norm, cmap="Blues", aspect="auto", vmin=0, vmax=1)
-    ax.set_xticks(range(n_classes))
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_yticks(range(n_classes))
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("挿入クラス", fontsize=9)
-    ax.set_ylabel("退避クラス", fontsize=9)
-    ax.set_title("正規化退避行列\n（列=挿入クラスで正規化）", fontsize=10)
-    plt.colorbar(im2, ax=ax)
-    for i in range(n_classes):
-        for j in range(n_classes):
-            ax.text(j, i, f"{em_norm[i, j]:.2f}", ha="center", va="center",
-                    fontsize=7, color="black" if em_norm[i, j] < 0.6 else "white")
+    for idx, key in enumerate(grid_keys):
+        row, col = divmod(idx, n_cols)
+        ax  = fig.add_subplot(gs[row, col])
+        pol = caches[key]
+        asym = pol.asymmetry_score()
+        im  = plot_eviction_heatmap(
+            ax, pol.eviction_matrix,
+            title=(f"({chr(65+idx)}) {POLICY_LABELS.get(key, key)}\n"
+                   f"HR={pol.hit_rate():.4f}  asymmetry={asym:.4f}"),
+            normalize_cols=True, cmap="Blues", label_every=2
+        )
+        plt.colorbar(im, ax=ax, fraction=0.046)
 
-    # (C) サイズクラス別ヒット率
-    ax = axes[2]
-    hr = unified_lru.class_hit_rates()
-    colors = plt.cm.tab10(np.linspace(0, 1, n_classes))
-    bars = ax.bar(range(n_classes), hr, color=colors, alpha=0.8)
-    ax.set_xticks(range(n_classes))
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("ヒット率", fontsize=9)
-    ax.set_title("統合キャッシュ\nサイズクラス別ヒット率", fontsize=10)
-    ax.set_ylim(0, 1)
-    ax.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars, hr):
-        ax.text(bar.get_x() + bar.get_width() / 2, val + 0.01,
-                f"{val:.3f}", ha="center", va="bottom", fontsize=8)
+    ax_asym = fig.add_subplot(gs[n_rows, 0])
+    labels    = [POLICY_LABELS.get(k, k) for k in pol_keys]
+    asym_vals = [caches[k].asymmetry_score() for k in pol_keys]
+    colors_bar = plt.cm.tab10(np.linspace(0, 1, max(len(pol_keys), 2)))
+    bars = ax_asym.bar(range(len(pol_keys)), asym_vals,
+                       color=colors_bar[:len(pol_keys)], alpha=0.85)
+    ax_asym.set_xticks(range(len(pol_keys)))
+    ax_asym.set_xticklabels(labels, fontsize=9)
+    ax_asym.set_ylabel("非対称性スコア\n（大クラスが小クラスを退避させる割合）")
+    ax_asym.set_ylim(0, max(asym_vals) * 1.3 + 0.01)
+    ax_asym.set_title("ポリシー別 退避非対称性スコア\n"
+                      "値が揃う → ポリシー非依存の特性", fontsize=9)
+    ax_asym.grid(True, alpha=0.3, axis="y")
+    for bar, val in zip(bars, asym_vals):
+        ax_asym.text(bar.get_x() + bar.get_width() / 2, val + 0.002,
+                     f"{val:.4f}", ha="center", va="bottom", fontsize=8)
 
-    plt.tight_layout()
+    ax_hr = fig.add_subplot(gs[n_rows, 1])
+    hr_vals = [caches[k].hit_rate() for k in pol_keys]
+    ax_hr.bar(range(len(pol_keys)), hr_vals,
+              color=colors_bar[:len(pol_keys)], alpha=0.85)
+    ax_hr.set_xticks(range(len(pol_keys)))
+    ax_hr.set_xticklabels(labels, fontsize=9)
+    ax_hr.set_ylabel("ヒット率")
+    ax_hr.set_ylim(0, min(max(hr_vals) * 1.2 + 0.01, 1.0))
+    ax_hr.set_title("ポリシー別ヒット率", fontsize=9)
+    ax_hr.grid(True, alpha=0.3, axis="y")
+    for i, val in enumerate(hr_vals):
+        ax_hr.text(i, val + 0.003, f"{val:.4f}",
+                   ha="center", va="bottom", fontsize=8)
+
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  グラフ保存: {out_path}")
 
 
-def plot_mechanism_comparison(
-    results_by_cache_size: dict,
-    trace_name: str,
-    out_path: str,
-):
-    """統合 vs 分割キャッシュの性能比較グラフ"""
-    cache_sizes = sorted(results_by_cache_size.keys())
-    unified_hr   = [results_by_cache_size[cs]["unified_hit_rate"]      for cs in cache_sizes]
-    partitioned_hr = [results_by_cache_size[cs]["partitioned_hit_rate"] for cs in cache_sizes]
-    unified_bmr  = [results_by_cache_size[cs]["unified_byte_miss_rate"] for cs in cache_sizes]
-    partitioned_bmr = [results_by_cache_size[cs]["partitioned_byte_miss_rate"] for cs in cache_sizes]
-    asymmetry    = [results_by_cache_size[cs]["asymmetry_score"]        for cs in cache_sizes]
+# ═════════════════════════════════════════════
+# シミュレーション実行
+# ═════════════════════════════════════════════
 
-    x_labels = [f"{cs:.0%}" for cs in cache_sizes]
+def run_single_trace(trace_path: str,
+                     cache_size_fracs: list,
+                     out_dir: str,
+                     policy_names: list = None,
+                     max_requests: int = None) -> list:
+    """
+    1 トレースに対して複数ポリシー × 複数キャッシュサイズでシミュレーションを実行する。
+    全ポリシーを 1 パスで同時シミュレーションするため効率的。
+    """
+    import pandas as pd
+    if policy_names is None:
+        policy_names = list(POLICIES.keys())
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    fig.suptitle(f"{trace_name}  |  統合 vs 分割キャッシュ比較", fontsize=12)
-
-    # ヒット率
-    ax = axes[0]
-    ax.plot(x_labels, unified_hr,     "o-", label="統合 LRU",  color="#DC2626", linewidth=1.5)
-    ax.plot(x_labels, partitioned_hr, "s-", label="サイズ分割", color="#1976D2", linewidth=1.5)
-    ax.set_xlabel("キャッシュ容量 (ワーキングセット比)")
-    ax.set_ylabel("ヒット率")
-    ax.set_title("ヒット率")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # バイトミス率
-    ax = axes[1]
-    ax.plot(x_labels, unified_bmr,     "o-", label="統合 LRU",  color="#DC2626", linewidth=1.5)
-    ax.plot(x_labels, partitioned_bmr, "s-", label="サイズ分割", color="#1976D2", linewidth=1.5)
-    ax.set_xlabel("キャッシュ容量 (ワーキングセット比)")
-    ax.set_ylabel("バイトミス率")
-    ax.set_title("バイトミス率")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # 退避非対称性スコア
-    ax = axes[2]
-    ax.bar(x_labels, asymmetry, color="#9C27B0", alpha=0.8)
-    ax.set_xlabel("キャッシュ容量 (ワーキングセット比)")
-    ax.set_ylabel("大クラス→小クラス退避割合")
-    ax.set_title("退避非対称性スコア\n（仮説1: 高いほど干渉が主因）")
-    ax.set_ylim(0, 1)
-    ax.grid(True, alpha=0.3, axis="y")
-
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  グラフ保存: {out_path}")
-
-
-# ─────────────────────────────────────────────
-# メイン処理
-# ─────────────────────────────────────────────
-
-def run_single_trace(
-    trace_path: str,
-    cache_size_fracs: list,
-    thresholds: list,
-    out_dir: str,
-    max_requests: int = None,
-):
     trace_name = Path(trace_path).stem
     os.makedirs(out_dir, exist_ok=True)
     print(f"\n{'='*60}")
-    print(f"トレース: {trace_name}")
+    print(f"退避行列シミュレーション: {trace_name}")
+    print(f"ポリシー: {', '.join(POLICY_LABELS.get(p, p) for p in policy_names)}")
     print(f"{'='*60}")
 
-    # トレース読み込み
-    df = load_trace(trace_path, max_requests=max_requests)
-    n_classes = len(thresholds) + 1
-    class_labels = build_class_labels(thresholds)
+    df = load_trace(trace_path, max_requests)
 
-    # ── サイズ-人気度分析 ──
-    print("\n[1/3] サイズ-人気度分析...")
-    sp_stats = analyze_size_popularity(df, thresholds)
-    sp_path = os.path.join(out_dir, f"{trace_name}_size_popularity.csv")
-    sp_stats.to_csv(sp_path, index=False, encoding="utf-8-sig")
-    print(f"  保存: {sp_path}")
-    print(sp_stats[["size_class_label", "n_objects", "total_requests",
-                     "mean_freq", "one_hit_wonder_frac"]].to_string(index=False))
+    wss_bytes = int(df.groupby("obj_id")["obj_size"].first().sum())
+    print(f"  WSS: {wss_bytes / 1e9:.3f} GB")
 
-    # ── ワーキングセットサイズの推定 ──
-    # ユニークオブジェクトの総バイト数をワーキングセットサイズとみなす
-    wss_bytes = df.groupby("obj_id")["obj_size"].first().sum()
-    print(f"\n  ワーキングセットサイズ（推定）: {wss_bytes / 1e9:.3f} GB")
-
-    # サイズクラス別バイト占有率（分割キャッシュの容量配分に使用）
-    df["size_class"] = df["obj_size"].apply(lambda s: get_size_class(s, thresholds))
-    class_byte_fracs = (
-        df.groupby("size_class")["obj_size"]
-        .sum()
-        .reindex(range(n_classes), fill_value=0)
+    class_byte_sums = (
+        df.groupby("size_class")["obj_size"].sum()
+        .reindex(range(N_BINS), fill_value=0)
         .values.astype(float)
     )
-    class_byte_fracs /= class_byte_fracs.sum() + 1e-10
-    print("  サイズクラス別バイト占有率:")
-    for i, lbl in class_labels.items():
-        print(f"    {lbl:<15}: {class_byte_fracs[i]:.3%}")
+    class_byte_fracs = class_byte_sums / (class_byte_sums.sum() + 1e-10)
 
-    # ── キャッシュシミュレーション ──
-    print("\n[2/3] キャッシュシミュレーション...")
-    all_results = {}
+    print("\nサイズ-人気度分析...")
+    sp_stats = analyze_size_popularity(df)
+    sp_path  = os.path.join(out_dir, f"{trace_name}_size_popularity.csv")
+    sp_stats.to_csv(sp_path, index=False, encoding="utf-8-sig")
+    print(sp_stats[["size_class_label", "n_objects",
+                     "total_requests", "ohw_frac"]].to_string(index=False))
+
+    obj_ids = df["obj_id"].values
+    sizes   = df["obj_size"].values.astype(int)
+    classes = df["size_class"].values.astype(int)
+
+    all_metrics = []
 
     for frac in cache_size_fracs:
         cap = max(int(wss_bytes * frac), 1)
-        print(f"\n  キャッシュ容量: {frac:.0%} × WSS = {cap / 1e6:.1f} MB")
+        print(f"\n  容量 {frac:.0%} × WSS = {cap / 1e6:.1f} MB ...")
 
-        # 統合 LRU
-        unified = ByteAwareLRU(cap, thresholds)
-        # 分割キャッシュ（バイト占有率比例配分）
-        partitioned = SizePartitionedCache(cap, thresholds, class_byte_fracs)
+        active_caches = {
+            name: POLICIES[name](cap, N_BINS)
+            for name in policy_names
+            if name in POLICIES
+        }
+        partitioned = SizePartitionedCache(cap, class_byte_fracs, N_BINS)
 
-        for _, row in df.iterrows():
-            unified.access(str(row["obj_id"]), int(row["obj_size"]))
-            partitioned.access(str(row["obj_id"]), int(row["obj_size"]))
+        for oid, sz, sc in zip(obj_ids, sizes, classes):
+            oid_str = str(oid)
+            for cache in active_caches.values():
+                cache.access(oid_str, sz, sc)
+            partitioned.access(oid_str, sz, sc)
 
-        # 退避行列を CSV 保存
-        em_df = pd.DataFrame(
-            unified.eviction_matrix,
-            index=[class_labels[i] for i in range(n_classes)],
-            columns=[class_labels[i] for i in range(n_classes)],
+        class_labels = build_class_labels()
+        label_list   = [class_labels.get(i, str(i)) for i in range(N_BINS)]
+
+        for pol_name, cache in active_caches.items():
+            for n_merge, suffix in [(1, ""), (2, "_x2"), (4, "_x4")]:
+                if n_merge == 1:
+                    em       = cache.eviction_matrix
+                    row_lbls = col_lbls = label_list
+                else:
+                    em = aggregate_matrix(cache.eviction_matrix, n_merge=n_merge)
+                    ct = [2 ** i for i in range(10, 34, n_merge)]
+                    cl = build_class_labels(ct)
+                    nc = em.shape[0]
+                    row_lbls = col_lbls = [cl.get(i, str(i)) for i in range(nc)]
+
+                em_df = pd.DataFrame(em, index=row_lbls, columns=col_lbls)
+                em_df.index.name = "evicted \\ inserting"
+                csv_path = os.path.join(
+                    out_dir,
+                    f"{trace_name}_{pol_name}_eviction_matrix"
+                    f"_cs{int(frac*100):02d}pct{suffix}.csv"
+                )
+                em_df.to_csv(csv_path, encoding="utf-8-sig")
+
+        if "lru" in active_caches:
+            plot_results(
+                active_caches["lru"], partitioned, sp_stats,
+                trace_name, frac,
+                os.path.join(out_dir,
+                             f"{trace_name}_lru_eviction_heatmap"
+                             f"_cs{int(frac*100):02d}pct.png")
+            )
+
+        plot_policy_comparison_heatmaps(
+            active_caches, trace_name, frac,
+            os.path.join(out_dir,
+                         f"{trace_name}_policy_comparison"
+                         f"_cs{int(frac*100):02d}pct.png")
         )
-        em_df.index.name = "evicted_class \\ inserting_class"
-        em_path = os.path.join(
-            out_dir, f"{trace_name}_eviction_matrix_cs{int(frac*100):02d}pct.csv"
-        )
-        em_df.to_csv(em_path, encoding="utf-8-sig")
-        print(f"  退避行列保存: {em_path}")
-        print("\n  退避行列 (正規化):")
-        print(pd.DataFrame(
-            unified.normalized_eviction_matrix(),
-            index=[class_labels[i] for i in range(n_classes)],
-            columns=[class_labels[i] for i in range(n_classes)],
-        ).round(3).to_string())
 
-        # グラフ
-        plot_eviction_matrix(
-            unified, thresholds, trace_name, frac,
-            os.path.join(out_dir, f"{trace_name}_eviction_cs{int(frac*100):02d}pct.png")
-        )
+        row = {
+            "trace":           trace_name,
+            "cache_size_frac": frac,
+            "partitioned_lru_hit_rate":      partitioned.hit_rate(),
+            "partitioned_lru_byte_miss_rate": partitioned.byte_miss_rate(),
+        }
+        for pol_name, cache in active_caches.items():
+            asym = cache.asymmetry_score()
+            row[f"{pol_name}_hit_rate"]       = cache.hit_rate()
+            row[f"{pol_name}_byte_miss_rate"]  = cache.byte_miss_rate()
+            row[f"{pol_name}_asymmetry_score"] = asym
+            row[f"{pol_name}_total_evictions"] = int(cache.eviction_matrix.sum())
+            print(f"    {POLICY_LABELS.get(pol_name, pol_name):<8}: "
+                  f"HR={cache.hit_rate():.4f}  "
+                  f"BMR={cache.byte_miss_rate():.4f}  "
+                  f"asym={asym:.4f}")
 
-        # メカニズム指標
-        metrics = compute_mechanism_metrics(unified, partitioned, thresholds)
-        metrics["cache_size_frac"] = frac
-        metrics["trace"] = trace_name
-        all_results[frac] = metrics
+        if "lru" in active_caches:
+            lru = active_caches["lru"]
+            row["hit_rate_improvement"] = partitioned.hit_rate() - lru.hit_rate()
+            row["bmr_improvement"]      = lru.byte_miss_rate() - partitioned.byte_miss_rate()
+        all_metrics.append(row)
 
-        print(f"  統合ヒット率:  {metrics['unified_hit_rate']:.4f}")
-        print(f"  分割ヒット率:  {metrics['partitioned_hit_rate']:.4f}  "
-              f"(改善: {metrics['hit_rate_improvement']:+.4f})")
-        print(f"  統合バイトMR:  {metrics['unified_byte_miss_rate']:.4f}")
-        print(f"  分割バイトMR:  {metrics['partitioned_byte_miss_rate']:.4f}  "
-              f"(改善: {metrics['bmr_improvement']:+.4f})")
-        print(f"  退避非対称性:  {metrics['asymmetry_score']:.4f}")
-
-    # ── サマリー保存 ──
-    print("\n[3/3] サマリー保存...")
-    summary_df = pd.DataFrame(list(all_results.values()))
+    summary_df   = pd.DataFrame(all_metrics)
     summary_path = os.path.join(out_dir, f"{trace_name}_mechanism_summary.csv")
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
-    print(f"  保存: {summary_path}")
-
-    # 比較グラフ
-    if len(all_results) > 1:
-        plot_mechanism_comparison(
-            all_results, trace_name,
-            os.path.join(out_dir, f"{trace_name}_comparison.png")
-        )
-
-    return all_results
+    return all_metrics
 
 
-# ─────────────────────────────────────────────
+# ═════════════════════════════════════════════
 # エントリーポイント
-# ─────────────────────────────────────────────
+# ═════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(
         description="クロスサイズ退避行列によるキャッシュメカニズム分析"
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--trace", type=str,
-                       help="単一トレースファイル (CSV)")
-    group.add_argument("--trace-dir", type=str,
-                       help="トレースファイルが格納されたディレクトリ")
+    group.add_argument("--trace",     type=str)
+    group.add_argument("--trace-dir", type=str)
 
     parser.add_argument(
         "--cache-sizes", type=float, nargs="+",
         default=[0.01, 0.05, 0.1, 0.2, 0.3],
-        help="キャッシュ容量 / ワーキングセットサイズ の比 (複数指定可, デフォルト: 0.01 0.05 0.1 0.2 0.3)"
     )
     parser.add_argument(
-        "--thresholds", type=int, nargs="+",
-        default=DEFAULT_THRESHOLDS,
-        help=f"サイズクラス境界 (バイト, デフォルト: {DEFAULT_THRESHOLDS})"
+        "--policies", type=str, nargs="+",
+        default=list(POLICIES.keys()),
+        choices=list(POLICIES.keys()),
     )
-    parser.add_argument(
-        "--out", type=str, default="./output/eviction_analysis",
-        help="出力ディレクトリ (デフォルト: ./output/eviction_analysis)"
-    )
-    parser.add_argument(
-        "--max-requests", type=int, default=None,
-        help="読み込む最大リクエスト数 (デバッグ用)"
-    )
-    parser.add_argument(
-        "--time-col",   type=int, default=0, help="タイムスタンプ列インデックス"
-    )
-    parser.add_argument(
-        "--id-col",     type=int, default=1, help="オブジェクトID列インデックス"
-    )
-    parser.add_argument(
-        "--size-col",   type=int, default=2, help="オブジェクトサイズ列インデックス"
-    )
+    parser.add_argument("--out", type=str, default="./output/eviction_matrix")
+    parser.add_argument("--max-requests", type=int, default=None)
 
     args = parser.parse_args()
 
-    # トレースファイルリスト
     if args.trace:
         trace_files = [args.trace]
     else:
-        trace_dir = Path(args.trace_dir)
+        td = Path(args.trace_dir)
         trace_files = sorted(
-            list(trace_dir.glob("*.csv")) +
-            list(trace_dir.glob("*.tsv")) +
-            list(trace_dir.glob("*.txt"))
+            list(td.glob("*.oracleGeneral")) + list(td.glob("*.bin")) +
+            list(td.glob("*.lcs"))           + list(td.glob("*.csv"))
         )
         if not trace_files:
-            print(f"エラー: {trace_dir} にトレースファイルが見つかりません")
-            sys.exit(1)
-        print(f"{len(trace_files)} 件のトレースを処理します")
+            print(f"エラー: {td} にトレースが見つかりません"); sys.exit(1)
 
-    all_summaries = []
+    all_results = []
     for tf in trace_files:
         results = run_single_trace(
-            trace_path=str(tf),
+            str(tf),
             cache_size_fracs=args.cache_sizes,
-            thresholds=args.thresholds,
             out_dir=args.out,
+            policy_names=args.policies,
             max_requests=args.max_requests,
         )
-        for cs, metrics in results.items():
-            all_summaries.append(metrics)
+        all_results.extend(results)
 
-    # 全トレース横断サマリー
-    if all_summaries:
-        agg_df = pd.DataFrame(all_summaries)
+    if all_results:
+        import pandas as pd
+        agg      = pd.DataFrame(all_results)
         agg_path = os.path.join(args.out, "ALL_TRACES_mechanism_summary.csv")
-        agg_df.to_csv(agg_path, index=False, encoding="utf-8-sig")
-        print(f"\n全トレース横断サマリー保存: {agg_path}")
-
-        # 主要指標の相関サマリー
-        if len(agg_df) > 3:
-            print("\n=== 仮説検証サマリー ===")
-            for metric_x, metric_y in [
-                ("asymmetry_score", "hit_rate_improvement"),
-                ("asymmetry_score", "bmr_improvement"),
-            ]:
-                if metric_x in agg_df.columns and metric_y in agg_df.columns:
-                    valid = agg_df[[metric_x, metric_y]].dropna()
-                    if len(valid) > 3:
-                        rho, pval = spearmanr(valid[metric_x], valid[metric_y])
-                        print(f"  {metric_x} vs {metric_y}: ρ={rho:.3f} (p={pval:.4g})")
+        agg.to_csv(agg_path, index=False, encoding="utf-8-sig")
+        print(f"\n全トレースサマリー: {agg_path}")
 
 
 if __name__ == "__main__":
