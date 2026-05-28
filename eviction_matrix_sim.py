@@ -58,7 +58,9 @@ from cache_common import (
     get_size_class, get_size_class_vectorized,
     build_class_labels, aggregate_matrix, plot_eviction_heatmap,
     load_trace,
+    setup_matplotlib_font,
 )
+setup_matplotlib_font()
 
 
 # ═════════════════════════════════════════════
@@ -936,8 +938,12 @@ def main():
     else:
         td = Path(args.trace_dir)
         trace_files = sorted(
-            list(td.glob("*.oracleGeneral")) + list(td.glob("*.bin")) +
-            list(td.glob("*.lcs"))           + list(td.glob("*.csv"))
+            list(td.glob("*.oracleGeneral")) +
+            list(td.glob("*.oracleGeneral.zst")) +
+            list(td.glob("*.oracleGeneral.bin.zst")) +
+            list(td.glob("*.bin")) +
+            list(td.glob("*.lcs")) +
+            list(td.glob("*.csv"))
         )
         if not trace_files:
             print(f"エラー: {td} にトレースが見つかりません"); sys.exit(1)
