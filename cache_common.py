@@ -37,13 +37,15 @@ def setup_matplotlib_font() -> bool:
     日本語フォントを matplotlib に設定し、PDF/EPS 出力時のフォント埋め込みを有効化する。
 
     設定優先順:
-      1. japanize-matplotlib がインストール済みなら自動設定（最推奨）
+      0. プロジェクト同梱フォント（fonts/*.ttf / fonts/*.otf）← 最優先
+             python download_font.py を一度実行すると fonts/ に配置される
+      1. japanize-matplotlib がインストール済みなら自動設定
              pip install japanize-matplotlib
       2. フォントマネージャに登録済みのシステムフォントを名前で探索
              Windows : Meiryo / BIZ UDGothic / Yu Gothic / MS Gothic
              macOS   : Hiragino Sans / Apple SD Gothic Neo
              Linux   : Noto Sans CJK JP / IPAexGothic / IPAGothic
-      3. フォントファイルを直接探索してフォントマネージャに登録
+      3. Windows フォントディレクトリのファイルを直接探索して登録
 
     フォント埋め込み設定（PNG では不要だが PDF/EPS 出力に備えて常に設定）:
       pdf.fonttype = 42  → TrueType フォントを PDF に埋め込む
@@ -57,10 +59,31 @@ def setup_matplotlib_font() -> bool:
     import matplotlib.font_manager as fm
     import os
     import platform
+    from pathlib import Path
 
     # PDF / EPS 出力へのフォント埋め込みは成否によらず常に設定
     matplotlib.rcParams["pdf.fonttype"] = 42
     matplotlib.rcParams["ps.fonttype"]  = 42
+
+    def _try_font_file(fpath: str) -> bool:
+        """フォントファイルを登録して font.family に設定する。成功したら True。"""
+        try:
+            fm.fontManager.addfont(fpath)
+            prop = fm.FontProperties(fname=fpath)
+            matplotlib.rcParams["font.family"] = prop.get_name()
+            return True
+        except Exception:
+            return False
+
+    # ── 方法0: プロジェクト同梱フォント（fonts/ ディレクトリ）────────
+    # cache_common.py と同じ場所にある fonts/ を探す。
+    # download_font.py を実行すると NotoSansJP-Regular.ttf が置かれる。
+    _here = Path(__file__).parent
+    _fonts_dir = _here / "fonts"
+    if _fonts_dir.is_dir():
+        for _fp in sorted(_fonts_dir.glob("*.ttf")) + sorted(_fonts_dir.glob("*.otf")):
+            if _fp.stat().st_size > 200_000 and _try_font_file(str(_fp)):
+                return True
 
     # ── 方法1: japanize-matplotlib ────────────────────────────────
     try:
@@ -95,35 +118,92 @@ def setup_matplotlib_font() -> bool:
             "yugothic.ttc",
             "msgothic.ttc",
         ]
-    elif system == "Darwin":
-        font_dir = "/System/Library/Fonts"
-        font_files = [
-            "ヒラギノ角ゴシック W3.ttc",
-            "Hiragino Sans GB.ttc",
-        ]
-    else:
-        font_dir = "/usr/share/fonts"
-        font_files = [
-            "opentype/ipafont-gothic/ipag.ttf",
-            "truetype/fonts-japanese-gothic.ttf",
-            "opentype/noto/NotoSansCJK-Regular.ttc",
-        ]
-
-    for fname in font_files:
-        fpath = os.path.join(font_dir, fname)
-        if os.path.isfile(fpath):
-            try:
-                fm.fontManager.addfont(fpath)
-                prop = fm.FontProperties(fname=fpath)
-                matplotlib.rcParams["font.family"] = prop.get_name()
+        for fname in font_files:
+            fpath = os.path.join(font_dir, fname)
+            if os.path.isfile(fpath) and _try_font_file(fpath):
                 return True
-            except Exception:
+
+    elif system == "Darwin":
+        for font_dir in ["/System/Library/Fonts", "/Library/Fonts",
+                         os.path.expanduser("~/Library/Fonts")]:
+            for fname in ["ヒラギノ角ゴシック W3.ttc", "Hiragino Sans GB.ttc",
+                          "HiraginoSans-W3.ttc"]:
+                fpath = os.path.join(font_dir, fname)
+                if os.path.isfile(fpath) and _try_font_file(fpath):
+                    return True
+
+    else:
+        # ── Linux: 方法3a fc-list で日本語対応フォントを取得 ────────
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["fc-list", ":lang=ja", "--format=%{file}\n"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in res.stdout.splitlines():
+                fpath = line.strip()
+                if fpath and os.path.isfile(fpath) and _try_font_file(fpath):
+                    return True
+        except Exception:
+            pass
+
+        # ── Linux: 方法3b フォントディレクトリを再帰スキャン ─────────
+        # CJK/JP 系フォントファイル名のパターン（優先度順）
+        _JP_PATTERNS = [
+            # IPAfont
+            "ipag.ttf", "ipagp.ttf", "ipam.ttf", "ipamp.ttf",
+            "ipaexg.ttf", "ipaexm.ttf",
+            # Noto CJK
+            "NotoSansCJKjp-Regular.otf", "NotoSansCJK-Regular.ttc",
+            "NotoSansJP-Regular.ttf", "NotoSansCJKjp-Regular.ttf",
+            "NotoSerifCJKjp-Regular.otf",
+            # Takao
+            "TakaoGothic.ttf", "TakaoPGothic.ttf", "TakaoExGothic.ttf",
+            # VL Gothic
+            "VL-Gothic-Regular.ttf", "VL-PGothic-Regular.ttf",
+            # Droid (フォールバック: CJK 含む)
+            "DroidSansFallbackFull.ttf", "DroidSansFallback.ttf",
+        ]
+        _FONT_ROOTS = [
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            os.path.expanduser("~/.fonts"),
+            os.path.expanduser("~/.local/share/fonts"),
+        ]
+        # まず名前が一致するものを優先
+        for root in _FONT_ROOTS:
+            if not os.path.isdir(root):
                 continue
+            for dirpath, _, filenames in os.walk(root):
+                for fname in filenames:
+                    if fname in _JP_PATTERNS:
+                        fpath = os.path.join(dirpath, fname)
+                        if _try_font_file(fpath):
+                            return True
+        # 次に名前パターンで広く検索
+        _JP_KEYWORDS = ["cjk", "jp", "japanese", "ipa", "gothic", "mincho",
+                        "takao", "vlgoth", "droid"]
+        for root in _FONT_ROOTS:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _, filenames in os.walk(root):
+                for fname in filenames:
+                    if not fname.lower().endswith((".ttf", ".otf", ".ttc")):
+                        continue
+                    fname_l = fname.lower()
+                    if any(k in fname_l for k in _JP_KEYWORDS):
+                        fpath = os.path.join(dirpath, fname)
+                        size = os.path.getsize(fpath)
+                        if size > 200_000 and _try_font_file(fpath):
+                            return True
 
     print(
         "  [font] 日本語フォントが見つかりませんでした。\n"
-        "         グラフの日本語が文字化けする場合は以下を実行してください:\n"
-        "           pip install japanize-matplotlib"
+        "         以下のいずれかを実行してください:\n"
+        "           python download_font.py                      # フォントをダウンロードして同梱\n"
+        "           pip install japanize-matplotlib              # パッケージとして追加\n"
+        "           sudo apt install fonts-noto-cjk              # Ubuntu: Noto CJK\n"
+        "           sudo apt install fonts-ipafont-gothic        # Ubuntu: IPAex ゴシック"
     )
     return False
 
@@ -346,31 +426,71 @@ OG_FORMAT      = "=IQIq"
 OG_RECORD_SIZE = _struct.calcsize(OG_FORMAT)  # 24 bytes
 
 
-def _open_trace_binary(path: str) -> bytes:
+def iter_oracle_general(
+    path: str,
+    sample_stride: int = 1,
+    max_requests: int = None,
+):
     """
-    バイナリトレースファイルを読み込む。
-    拡張子が .zst の場合は zstandard で透過的に展開してから返す。
+    OracleGeneral バイナリを 1 レコードずつストリーミングで読み出すジェネレータ。
 
-    対応拡張子パターン:
-      .oracleGeneral           非圧縮
-      .oracleGeneral.zst       zstd 圧縮
-      .oracleGeneral.bin.zst   zstd 圧縮（bin 付き）
+    メモリ使用量: O(1)（読み込みバッファ分のみ）。
+    zstd 圧縮ファイルも透過的に対応。
+
+    Args:
+        path          : ファイルパス（.zst / .oracleGeneral.bin.zst も可）
+        sample_stride : N のとき、sz>0 レコード N 件に 1 件だけ yield する。
+                        1 = 全件（デフォルト）、10 = 約 1/10 にダウンサンプリング。
+                        eviction_matrix_sim 用途では 10〜100 が実用的。
+        max_requests  : yield する最大件数。None = 全件。
+
+    Yields:
+        (ts: int, obj_id: int, obj_size: int, next_access_vtime: int)
+        obj_id は uint64 をそのまま Python int として返す。
     """
-    from pathlib import Path
-    if Path(path).suffix.lower() == ".zst":
+    from pathlib import Path as _Path
+
+    _rec      = _struct.Struct(OG_FORMAT)
+    _rec_size = OG_RECORD_SIZE
+    _CHUNK    = _rec_size * 65_536   # 約 1.5 MB / チャンク
+
+    _path  = str(path)
+    _is_zst = _Path(_path).suffix.lower() == ".zst"
+
+    def _gen(fobj):
+        """ファイルオブジェクトを読み進めるジェネレータ本体。"""
+        seen    = 0   # sz > 0 レコードを見た件数（stride 判定用）
+        yielded = 0   # 実際に yield した件数
+        while True:
+            buf = fobj.read(_CHUNK)
+            if not buf:
+                return
+            n_recs = len(buf) // _rec_size
+            for i in range(n_recs):
+                if max_requests is not None and yielded >= max_requests:
+                    return
+                ts, oid, sz, nv = _rec.unpack_from(buf, i * _rec_size)
+                if sz > 0:
+                    if seen % sample_stride == 0:
+                        yield ts, oid, sz, nv
+                        yielded += 1
+                    seen += 1
+
+    if _is_zst:
         try:
-            import zstandard as zstd
+            import zstandard as _zstd
         except ImportError:
             raise ImportError(
                 "zstd 圧縮ファイルの読み込みには zstandard ライブラリが必要です:\n"
                 "  pip install zstandard"
             )
-        dctx = zstd.ZstdDecompressor()
-        with open(path, "rb") as f:
-            with dctx.stream_reader(f) as reader:
-                return reader.read()
-    with open(path, "rb") as f:
-        return f.read()
+        _dctx = _zstd.ZstdDecompressor()
+        with open(_path, "rb") as _f:
+            with _dctx.stream_reader(_f) as _reader:
+                yield from _gen(_reader)
+    else:
+        with open(_path, "rb") as _f:
+            yield from _gen(_f)
 
 
 def load_oracle_general(path: str,
@@ -382,36 +502,58 @@ def load_oracle_general(path: str,
 
     next_access_vtime == -1: このアクセス以降に再アクセスなし
 
-    .zst 圧縮ファイルも透過的に読み込める（_open_trace_binary 経由）。
+    ストリーミング読み込みのため、max_requests が小さい場合でも
+    ファイル全体をメモリに展開しない。
     """
-    raw = _open_trace_binary(path)
+    _BLOCK = 1_000_000   # 1 ブロックあたりの事前確保レコード数
 
-    n = len(raw) // OG_RECORD_SIZE
-    if max_requests:
-        n = min(n, max_requests)
+    # ブロック単位で numpy 配列に積み上げる
+    buf_ts  = np.empty(_BLOCK, dtype=np.uint32)
+    buf_oid = np.empty(_BLOCK, dtype=np.uint64)
+    buf_sz  = np.empty(_BLOCK, dtype=np.uint32)
+    buf_nv  = np.empty(_BLOCK, dtype=np.int64)
+    arrs_ts, arrs_oid, arrs_sz, arrs_nv = [], [], [], []
+    i = 0
 
-    ts_arr       = np.empty(n, dtype=np.uint32)
-    obj_id_arr   = np.empty(n, dtype=np.uint64)
-    size_arr     = np.empty(n, dtype=np.uint32)
-    vtime_arr    = np.empty(n, dtype=np.int64)
+    for ts, oid, sz, nv in iter_oracle_general(path, max_requests=max_requests):
+        buf_ts[i]  = ts
+        buf_oid[i] = oid
+        buf_sz[i]  = sz
+        buf_nv[i]  = nv
+        i += 1
+        if i == _BLOCK:
+            arrs_ts.append(buf_ts.copy())
+            arrs_oid.append(buf_oid.copy())
+            arrs_sz.append(buf_sz.copy())
+            arrs_nv.append(buf_nv.copy())
+            i = 0
 
-    valid = 0
-    for i in range(n):
-        off = i * OG_RECORD_SIZE
-        ts, oid, sz, nv = _struct.unpack_from(OG_FORMAT, raw, off)
-        if sz > 0:
-            ts_arr[valid]    = ts
-            obj_id_arr[valid] = oid
-            size_arr[valid]  = sz
-            vtime_arr[valid] = nv
-            valid += 1
+    # 端数ブロック
+    if i > 0:
+        arrs_ts.append(buf_ts[:i].copy())
+        arrs_oid.append(buf_oid[:i].copy())
+        arrs_sz.append(buf_sz[:i].copy())
+        arrs_nv.append(buf_nv[:i].copy())
+
+    # 空トレース対応
+    if not arrs_ts:
+        return pd.DataFrame(columns=[
+            "vtime", "timestamp", "obj_id",
+            "obj_size", "next_access_vtime", "size_class"
+        ])
+
+    ts_a  = np.concatenate(arrs_ts)
+    oid_a = np.concatenate(arrs_oid)
+    sz_a  = np.concatenate(arrs_sz)
+    nv_a  = np.concatenate(arrs_nv)
+    n = len(ts_a)
 
     df = pd.DataFrame({
-        "vtime":              np.arange(valid, dtype=np.int64),
-        "timestamp":          ts_arr[:valid].astype(np.int64),
-        "obj_id":             obj_id_arr[:valid].astype(str),
-        "obj_size":           size_arr[:valid].astype(np.int64),
-        "next_access_vtime":  vtime_arr[:valid],
+        "vtime":             np.arange(n, dtype=np.int64),
+        "timestamp":         ts_a.astype(np.int64),
+        "obj_id":            oid_a.astype(np.int64),   # uint64 → int64（groupby 等で使用）
+        "obj_size":          sz_a.astype(np.int64),
+        "next_access_vtime": nv_a,
     })
 
     # サイズクラスをここで一括付与（vectorized）
@@ -420,17 +562,27 @@ def load_oracle_general(path: str,
     )
 
     ohw_frac = float((df["next_access_vtime"] == -1).mean())
-    print(f"  読み込み完了: {len(df):,} req  "
+    print(f"  読み込み完了: {n:,} req  "
           f"ユニーク={df['obj_id'].nunique():,}  "
           f"OHW={ohw_frac:.3%}  "
           f"サイズ=[{df['obj_size'].min()}, {df['obj_size'].max()}]B")
     return df
 
 
-def load_trace(path: str, max_requests: int = None) -> pd.DataFrame:
+def load_trace(path: str,
+               max_requests: int = None,
+               sample_stride: int = 1) -> pd.DataFrame:
     """
     ファイル形式を自動判定して読み込む。
     OracleGeneral バイナリ・zstd 圧縮バイナリ・CSV に対応。
+
+    Args:
+        path          : トレースファイルパス
+        max_requests  : 読み込む最大リクエスト数（先頭から）
+        sample_stride : N 件に 1 件だけ取得（OracleGeneral のみ有効）
+                        注: stride > 1 のとき vtime が間引かれ、
+                            next_access_vtime との差（RD）は縮小される。
+                            クラス間の相対比較には有効。
 
     対応拡張子:
       .oracleGeneral                  非圧縮バイナリ
@@ -462,7 +614,44 @@ def load_trace(path: str, max_requests: int = None) -> pd.DataFrame:
     if is_binary:
         label = f"OracleGeneral バイナリ{'(zstd圧縮)' if is_zst else ''}"
         print(f"  形式: {label} ({p.name})")
-        return load_oracle_general(path, max_requests)
+        # sample_stride は load_oracle_general → iter_oracle_general に伝達
+        _BLOCK = 1_000_000
+        buf_ts  = np.empty(_BLOCK, dtype=np.uint32)
+        buf_oid = np.empty(_BLOCK, dtype=np.uint64)
+        buf_sz  = np.empty(_BLOCK, dtype=np.uint32)
+        buf_nv  = np.empty(_BLOCK, dtype=np.int64)
+        arrs_ts, arrs_oid, arrs_sz, arrs_nv = [], [], [], []
+        i = 0
+        for ts, oid, sz, nv in iter_oracle_general(path, sample_stride, max_requests):
+            buf_ts[i] = ts; buf_oid[i] = oid; buf_sz[i] = sz; buf_nv[i] = nv
+            i += 1
+            if i == _BLOCK:
+                arrs_ts.append(buf_ts.copy()); arrs_oid.append(buf_oid.copy())
+                arrs_sz.append(buf_sz.copy()); arrs_nv.append(buf_nv.copy())
+                i = 0
+        if i > 0:
+            arrs_ts.append(buf_ts[:i].copy()); arrs_oid.append(buf_oid[:i].copy())
+            arrs_sz.append(buf_sz[:i].copy()); arrs_nv.append(buf_nv[:i].copy())
+        if not arrs_ts:
+            return pd.DataFrame(columns=["vtime","timestamp","obj_id",
+                                          "obj_size","next_access_vtime","size_class"])
+        ts_a = np.concatenate(arrs_ts); oid_a = np.concatenate(arrs_oid)
+        sz_a = np.concatenate(arrs_sz); nv_a  = np.concatenate(arrs_nv)
+        n = len(ts_a)
+        df = pd.DataFrame({
+            "vtime":             np.arange(n, dtype=np.int64),
+            "timestamp":         ts_a.astype(np.int64),
+            "obj_id":            oid_a.astype(np.int64),
+            "obj_size":          sz_a.astype(np.int64),
+            "next_access_vtime": nv_a,
+        })
+        df["size_class"] = get_size_class_vectorized(df["obj_size"].values, POW2_THRESHOLDS)
+        ohw_frac = float((df["next_access_vtime"] == -1).mean())
+        print(f"  読み込み完了: {n:,} req  "
+              f"ユニーク={df['obj_id'].nunique():,}  "
+              f"OHW={ohw_frac:.3%}  "
+              f"サイズ=[{df['obj_size'].min()}, {df['obj_size'].max()}]B")
+        return df
 
     # CSV フォールバック
     print(f"  形式: CSV ({p.name})")
