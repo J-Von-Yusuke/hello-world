@@ -56,7 +56,9 @@ from cache_common import (
     get_size_class_vectorized,
     build_class_labels,
     load_trace,
+    setup_matplotlib_font,
 )
+setup_matplotlib_font()
 
 
 # ─────────────────────────────────────────────
@@ -348,6 +350,7 @@ def run_mrc_analysis(
     capacity_fracs: list = None,
     max_requests: int = None,
     n_mrc_points: int = 200,
+    sample_stride: int = 1,
 ):
     if thresholds is None:
         thresholds = POW2_THRESHOLDS
@@ -359,9 +362,11 @@ def run_mrc_analysis(
     print(f"\n{'='*60}")
     print(f"MRC 分析: {trace_name}")
     print(f"{'='*60}")
+    if sample_stride > 1:
+        print(f"  サンプリング: 1/{sample_stride}（MRC 形状はほぼ保たれるがキャッシュサイズ軸が縮小）")
 
     # load_trace が vtime / size_class を自動付与する
-    df = load_trace(trace_path, max_requests)
+    df = load_trace(trace_path, max_requests, sample_stride=sample_stride)
 
     if "next_access_vtime" not in df.columns or (df["next_access_vtime"] == -2).all():
         print("  [エラー] next_access_vtime がありません。OracleGeneral 形式を使用してください。")
@@ -471,7 +476,10 @@ def main():
         default=[0.05, 0.1, 0.2, 0.3, 0.5]
     )
     parser.add_argument("--n-mrc-points", type=int, default=200)
-    parser.add_argument("--max-requests",  type=int, default=None)
+    parser.add_argument("--max-requests",  type=int, default=None, metavar="M",
+                        help="先頭 M 件だけ読み込む（推奨: 5_000_000〜10_000_000）")
+    parser.add_argument("--sample-stride", type=int, default=1, metavar="N",
+                        help="N 件に 1 件だけ読み込む（MRC 形状はほぼ保たれる）")
 
     args = parser.parse_args()
 
@@ -499,6 +507,7 @@ def main():
             capacity_fracs=args.capacity_fracs,
             max_requests=args.max_requests,
             n_mrc_points=args.n_mrc_points,
+            sample_stride=args.sample_stride,
         )
 
 
