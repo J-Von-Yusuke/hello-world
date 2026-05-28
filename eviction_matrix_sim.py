@@ -57,7 +57,7 @@ from cache_common import (
     POW2_THRESHOLDS, N_BINS,
     get_size_class, get_size_class_vectorized,
     build_class_labels, aggregate_matrix, plot_eviction_heatmap,
-    load_trace,
+    load_trace, iter_oracle_general,
     setup_matplotlib_font,
 )
 setup_matplotlib_font()
@@ -776,14 +776,108 @@ def plot_policy_comparison_heatmaps(
 # シミュレーション実行
 # ═════════════════════════════════════════════
 
+def _scan_wss_streaming(trace_path: str,
+                        sample_stride: int = 1,
+                        max_requests: int = None):
+    """
+    Pass 1: トレースをストリーミングスキャンして WSS / クラス統計 / オブジェクト情報を収集する。
+
+    Returns:
+        wss_bytes       : ワーキングセットサイズ（バイト）
+        class_byte_fracs: クラス別バイト占有率 (shape: N_BINS,)
+        obj_info        : {obj_id_int: [first_size, sc, count]} 辞書
+                          ※ユニークオブジェクト数が多いとメモリを使う。
+                          --sample-stride で間引くと比例して削減できる。
+        n_req           : 処理したリクエスト総数
+    """
+    class_byte_sums = np.zeros(N_BINS, dtype=np.float64)
+    obj_info: dict = {}   # {oid_int: [first_size, sc, count]}
+    n_req = 0
+
+    _prog_interval = 5_000_000
+    for ts, oid, sz, nv in iter_oracle_general(trace_path, sample_stride, max_requests):
+        # サイズクラス: POW2_THRESHOLDS の高速パス (bit_length)
+        bl = sz.bit_length()
+        sc = max(0, min(bl - 10, N_BINS - 1)) if sz >= 1024 else 0
+
+        class_byte_sums[sc] += sz
+        if oid in obj_info:
+            obj_info[oid][2] += 1
+        else:
+            obj_info[oid] = [sz, sc, 1]
+        n_req += 1
+
+        if n_req % _prog_interval == 0:
+            print(f"    [Pass1] {n_req:,} req 処理済み "
+                  f"ユニーク={len(obj_info):,}", end="\r", flush=True)
+
+    print(f"    [Pass1] 完了: {n_req:,} req  ユニーク={len(obj_info):,}        ")
+
+    wss_bytes = sum(v[0] for v in obj_info.values())
+    total_bytes = class_byte_sums.sum()
+    class_byte_fracs = class_byte_sums / (total_bytes + 1e-10)
+
+    return wss_bytes, class_byte_fracs, obj_info, n_req
+
+
+def _sp_stats_from_obj_info(obj_info: dict) -> "pd.DataFrame":
+    """
+    Pass 1 で収集した obj_info から analyze_size_popularity 相当の統計を計算する。
+    obj_info = {oid: [first_size, sc, count]}
+    """
+    from scipy.stats import spearmanr
+
+    class_labels = build_class_labels()
+
+    if not obj_info:
+        return pd.DataFrame()
+
+    sizes  = np.array([v[0] for v in obj_info.values()], dtype=np.int64)
+    scs    = np.array([v[1] for v in obj_info.values()], dtype=np.int32)
+    counts = np.array([v[2] for v in obj_info.values()], dtype=np.int64)
+
+    rho, pval = spearmanr(sizes, counts)
+    print(f"  サイズ-人気度 Spearman ρ = {rho:+.4f}  (p = {pval:.3g})")
+
+    rows = []
+    for sc in range(N_BINS):
+        mask = (scs == sc)
+        if mask.sum() == 0:
+            continue
+        sc_counts = counts[mask]
+        sc_sizes  = sizes[mask]
+        total_req = int(sc_counts.sum())
+        n_ohw     = int((sc_counts == 1).sum())
+        rows.append({
+            "size_class":       sc,
+            "size_class_label": class_labels.get(sc, str(sc)),
+            "n_objects":        int(mask.sum()),
+            "total_requests":   total_req,
+            "mean_freq":        float(sc_counts.mean()),
+            "median_freq":      float(np.median(sc_counts)),
+            "ohw_frac":         n_ohw / max(mask.sum(), 1),
+            "mean_size":        float(sc_sizes.mean()),
+            "size_rho":         rho,
+            "size_rho_p":       pval,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def run_single_trace(trace_path: str,
                      cache_size_fracs: list,
                      out_dir: str,
                      policy_names: list = None,
-                     max_requests: int = None) -> list:
+                     max_requests: int = None,
+                     sample_stride: int = 1) -> list:
     """
     1 トレースに対して複数ポリシー × 複数キャッシュサイズでシミュレーションを実行する。
-    全ポリシーを 1 パスで同時シミュレーションするため効率的。
+
+    【高速化ポイント】
+      Pass 1 : ストリーミングで WSS・サイズ人気度統計を取得（メモリ O(ユニーク数)）
+      Pass 2 : 全 frac × 全 policy のキャッシュを同時に 1 パスで処理
+               （従来: frac ごとに N パス → 1 パスに削減）
+      sample_stride > 1 : N 件に 1 件だけ処理して実行時間を削減
     """
     import pandas as pd
     if policy_names is None:
@@ -794,54 +888,92 @@ def run_single_trace(trace_path: str,
     print(f"\n{'='*60}")
     print(f"退避行列シミュレーション: {trace_name}")
     print(f"ポリシー: {', '.join(POLICY_LABELS.get(p, p) for p in policy_names)}")
+    if sample_stride > 1:
+        print(f"サンプリング: 1/{sample_stride}（約 {100/sample_stride:.1f}%）")
     print(f"{'='*60}")
 
-    df = load_trace(trace_path, max_requests)
-
-    wss_bytes = int(df.groupby("obj_id")["obj_size"].first().sum())
-    print(f"  WSS: {wss_bytes / 1e9:.3f} GB")
-
-    class_byte_sums = (
-        df.groupby("size_class")["obj_size"].sum()
-        .reindex(range(N_BINS), fill_value=0)
-        .values.astype(float)
+    # ──────────────────────────────────────────
+    # Pass 1: WSS スキャン + サイズ人気度統計
+    # ──────────────────────────────────────────
+    print("\n[Pass 1] WSS スキャン...")
+    wss_bytes, class_byte_fracs, obj_info, n_req_p1 = _scan_wss_streaming(
+        trace_path, sample_stride, max_requests
     )
-    class_byte_fracs = class_byte_sums / (class_byte_sums.sum() + 1e-10)
+    print(f"  WSS: {wss_bytes / 1e9:.3f} GB  "
+          f"(サンプリング後 {n_req_p1:,} req)")
 
     print("\nサイズ-人気度分析...")
-    sp_stats = analyze_size_popularity(df)
-    sp_path  = os.path.join(out_dir, f"{trace_name}_size_popularity.csv")
-    sp_stats.to_csv(sp_path, index=False, encoding="utf-8-sig")
-    print(sp_stats[["size_class_label", "n_objects",
-                     "total_requests", "ohw_frac"]].to_string(index=False))
+    sp_stats = _sp_stats_from_obj_info(obj_info)
+    if len(sp_stats) > 0:
+        sp_path = os.path.join(out_dir, f"{trace_name}_size_popularity.csv")
+        sp_stats.to_csv(sp_path, index=False, encoding="utf-8-sig")
+        print(sp_stats[["size_class_label", "n_objects",
+                         "total_requests", "ohw_frac"]].to_string(index=False))
 
-    obj_ids = df["obj_id"].values
-    sizes   = df["obj_size"].values.astype(int)
-    classes = df["size_class"].values.astype(int)
+    # Pass 1 のオブジェクト辞書は以降不要なので解放
+    del obj_info
 
-    all_metrics = []
+    # ──────────────────────────────────────────
+    # Pass 2: 全 frac × 全 policy を同時シミュレーション
+    # ──────────────────────────────────────────
+    print("\n[Pass 2] キャッシュシミュレーション（全サイズ×全ポリシー同時実行）...")
+
+    # キャッシュインスタンスを全サイズ・全ポリシー分まとめて生成
+    active_caches: dict = {}          # {(frac, pol_name): cache}
+    partitioned_caches: dict = {}     # {frac: SizePartitionedCache}
+    cap_info: dict = {}               # {frac: cap_bytes}
 
     for frac in cache_size_fracs:
         cap = max(int(wss_bytes * frac), 1)
-        print(f"\n  容量 {frac:.0%} × WSS = {cap / 1e6:.1f} MB ...")
+        cap_info[frac] = cap
+        for pol_name in policy_names:
+            if pol_name in POLICIES:
+                active_caches[(frac, pol_name)] = POLICIES[pol_name](cap, N_BINS)
+        partitioned_caches[frac] = SizePartitionedCache(cap, class_byte_fracs, N_BINS)
 
-        active_caches = {
-            name: POLICIES[name](cap, N_BINS)
-            for name in policy_names
-            if name in POLICIES
-        }
-        partitioned = SizePartitionedCache(cap, class_byte_fracs, N_BINS)
+    n_caches = len(active_caches) + len(partitioned_caches)
+    print(f"  キャッシュ数: {n_caches}  "
+          f"({len(cache_size_fracs)} サイズ × "
+          f"{len(policy_names)} ポリシー + 分割キャッシュ)")
 
-        for oid, sz, sc in zip(obj_ids, sizes, classes):
-            oid_str = str(oid)
-            for cache in active_caches.values():
-                cache.access(oid_str, sz, sc)
-            partitioned.access(oid_str, sz, sc)
+    n_req   = 0
+    _prog   = 2_000_000
 
-        class_labels = build_class_labels()
-        label_list   = [class_labels.get(i, str(i)) for i in range(N_BINS)]
+    for ts, oid, sz, nv in iter_oracle_general(trace_path, sample_stride, max_requests):
+        # サイズクラスを高速計算
+        bl = sz.bit_length()
+        sc = max(0, min(bl - 10, N_BINS - 1)) if sz >= 1024 else 0
 
-        for pol_name, cache in active_caches.items():
+        # 全キャッシュを同時更新（oid は int のまま渡す）
+        for cache in active_caches.values():
+            cache.access(oid, sz, sc)
+        for part in partitioned_caches.values():
+            part.access(oid, sz, sc)
+
+        n_req += 1
+        if n_req % _prog == 0:
+            print(f"    {n_req:,} req 処理済み", end="\r", flush=True)
+
+    print(f"    シミュレーション完了: {n_req:,} req 処理          ")
+
+    # ──────────────────────────────────────────
+    # 結果収集・保存（frac ごとに CSV / グラフを出力）
+    # ──────────────────────────────────────────
+    class_labels = build_class_labels()
+    label_list   = [class_labels.get(i, str(i)) for i in range(N_BINS)]
+    all_metrics  = []
+
+    for frac in cache_size_fracs:
+        cap        = cap_info[frac]
+        partitioned = partitioned_caches[frac]
+        frac_caches = {pol: active_caches[(frac, pol)]
+                       for pol in policy_names
+                       if (frac, pol) in active_caches}
+
+        print(f"\n  容量 {frac:.0%} × WSS = {cap / 1e6:.1f} MB")
+
+        # 退避行列を CSV 保存（1×, 2×集約, 4×集約）
+        for pol_name, cache in frac_caches.items():
             for n_merge, suffix in [(1, ""), (2, "_x2"), (4, "_x4")]:
                 if n_merge == 1:
                     em       = cache.eviction_matrix
@@ -862,9 +994,10 @@ def run_single_trace(trace_path: str,
                 )
                 em_df.to_csv(csv_path, encoding="utf-8-sig")
 
-        if "lru" in active_caches:
+        # グラフ生成
+        if "lru" in frac_caches:
             plot_results(
-                active_caches["lru"], partitioned, sp_stats,
+                frac_caches["lru"], partitioned, sp_stats,
                 trace_name, frac,
                 os.path.join(out_dir,
                              f"{trace_name}_lru_eviction_heatmap"
@@ -872,19 +1005,20 @@ def run_single_trace(trace_path: str,
             )
 
         plot_policy_comparison_heatmaps(
-            active_caches, trace_name, frac,
+            frac_caches, trace_name, frac,
             os.path.join(out_dir,
                          f"{trace_name}_policy_comparison"
                          f"_cs{int(frac*100):02d}pct.png")
         )
 
+        # サマリー行を生成
         row = {
             "trace":           trace_name,
             "cache_size_frac": frac,
             "partitioned_lru_hit_rate":      partitioned.hit_rate(),
             "partitioned_lru_byte_miss_rate": partitioned.byte_miss_rate(),
         }
-        for pol_name, cache in active_caches.items():
+        for pol_name, cache in frac_caches.items():
             asym = cache.asymmetry_score()
             row[f"{pol_name}_hit_rate"]       = cache.hit_rate()
             row[f"{pol_name}_byte_miss_rate"]  = cache.byte_miss_rate()
@@ -895,10 +1029,10 @@ def run_single_trace(trace_path: str,
                   f"BMR={cache.byte_miss_rate():.4f}  "
                   f"asym={asym:.4f}")
 
-        if "lru" in active_caches:
-            lru = active_caches["lru"]
-            row["hit_rate_improvement"] = partitioned.hit_rate() - lru.hit_rate()
-            row["bmr_improvement"]      = lru.byte_miss_rate() - partitioned.byte_miss_rate()
+        lru_cache = frac_caches.get("lru")
+        if lru_cache:
+            row["hit_rate_improvement"] = partitioned.hit_rate() - lru_cache.hit_rate()
+            row["bmr_improvement"]      = lru_cache.byte_miss_rate() - partitioned.byte_miss_rate()
         all_metrics.append(row)
 
     summary_df   = pd.DataFrame(all_metrics)
@@ -913,23 +1047,55 @@ def run_single_trace(trace_path: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="クロスサイズ退避行列によるキャッシュメカニズム分析"
+        description="クロスサイズ退避行列によるキャッシュメカニズム分析",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+【大規模トレース向けオプション】
+  --sample-stride N   N 件に 1 件だけ処理（N=10 で 1/10、N=100 で 1/100）
+                      退避行列の相対パターンはほぼ保たれる。
+                      34GiB のトレースには --sample-stride 20〜100 が実用的。
+  --max-requests M    先頭 M 件だけ読み込む（--sample-stride と併用可）
+  --jobs J            トレースファイルを J プロセスで並列処理（複数ファイル時のみ有効）
+
+【実行例】
+  # 単一ファイル、1/10 サンプリング
+  python eviction_matrix_sim.py --trace ./traces/cdn.oracleGeneral.zst \\
+      --sample-stride 10 --out ./out
+
+  # 複数ファイルを 4 並列
+  python eviction_matrix_sim.py --trace-dir ./traces \\
+      --sample-stride 20 --jobs 4 --out ./out
+"""
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--trace",     type=str)
-    group.add_argument("--trace-dir", type=str)
+    group.add_argument("--trace",     type=str, help="単一トレースファイル")
+    group.add_argument("--trace-dir", type=str, help="トレースディレクトリ（一括処理）")
 
     parser.add_argument(
         "--cache-sizes", type=float, nargs="+",
         default=[0.01, 0.05, 0.1, 0.2, 0.3],
+        help="WSS に対するキャッシュサイズ比率（デフォルト: 0.01 0.05 0.1 0.2 0.3）",
     )
     parser.add_argument(
         "--policies", type=str, nargs="+",
         default=list(POLICIES.keys()),
         choices=list(POLICIES.keys()),
+        help="実行するポリシー（デフォルト: 全ポリシー）",
     )
-    parser.add_argument("--out", type=str, default="./output/eviction_matrix")
-    parser.add_argument("--max-requests", type=int, default=None)
+    parser.add_argument("--out", type=str, default="./output/eviction_matrix",
+                        help="出力ディレクトリ")
+    parser.add_argument(
+        "--sample-stride", type=int, default=1, metavar="N",
+        help="N 件に 1 件だけ処理（大規模トレース向け。デフォルト: 1=全件）",
+    )
+    parser.add_argument(
+        "--max-requests", type=int, default=None, metavar="M",
+        help="先頭 M 件だけ処理（--sample-stride と併用可）",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=1, metavar="J",
+        help="並列処理数（--trace-dir 使用時のみ有効。デフォルト: 1）",
+    )
 
     args = parser.parse_args()
 
@@ -948,16 +1114,32 @@ def main():
         if not trace_files:
             print(f"エラー: {td} にトレースが見つかりません"); sys.exit(1)
 
-    all_results = []
-    for tf in trace_files:
-        results = run_single_trace(
-            str(tf),
+    os.makedirs(args.out, exist_ok=True)
+
+    def _run(tf_path: str) -> list:
+        return run_single_trace(
+            tf_path,
             cache_size_fracs=args.cache_sizes,
             out_dir=args.out,
             policy_names=args.policies,
             max_requests=args.max_requests,
+            sample_stride=args.sample_stride,
         )
-        all_results.extend(results)
+
+    all_results = []
+
+    n_jobs = min(max(args.jobs, 1), len(trace_files))
+    if n_jobs > 1:
+        # 複数プロセス並列（multiprocessing）
+        from multiprocessing import Pool
+        print(f"\n{len(trace_files)} トレースを {n_jobs} プロセスで並列処理します")
+        tf_strs = [str(tf) for tf in trace_files]
+        with Pool(processes=n_jobs) as pool:
+            for res in pool.imap_unordered(_run, tf_strs):
+                all_results.extend(res)
+    else:
+        for tf in trace_files:
+            all_results.extend(_run(str(tf)))
 
     if all_results:
         import pandas as pd
