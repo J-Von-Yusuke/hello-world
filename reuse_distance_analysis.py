@@ -59,7 +59,7 @@ from scipy.stats import spearmanr, kruskal
 from cache_common import (
     POW2_THRESHOLDS, N_BINS,
     get_size_class, get_size_class_vectorized,
-    build_class_labels, load_trace,
+    build_class_labels, load_trace, iter_oracle_general,
     setup_matplotlib_font,
 )
 setup_matplotlib_font()
@@ -292,11 +292,12 @@ def _load_japanese_font() -> None:
     探索順:
       1. プロジェクト内 fonts/*.ttf / fonts/*.otf
       2. fc-list :lang=ja  （Linux/Ubuntu でインストール済みフォント）
-      3. フォントが見つからない場合は警告のみ（文字化けするが処理は続行）
+      3. /usr/share/fonts 以下を再帰スキャンして日本語系フォントを検索
+      4. 見つからない場合は警告のみ（文字化けするが処理は続行）
 
-    フォントを用意する方法:
-      python download_font.py          … fonts/ にダウンロード
-      sudo apt install fonts-noto-cjk  … Ubuntu システムフォント
+    ポイント:
+      - font.sans-serif の先頭に追加 + font.family = "sans-serif" で確実に適用
+      - axes.unicode_minus = False でマイナス記号の文字化けも防ぐ
     """
     import subprocess
     import matplotlib.font_manager as _fm
@@ -304,12 +305,22 @@ def _load_japanese_font() -> None:
 
     plt.rcParams["pdf.fonttype"] = 42
     plt.rcParams["ps.fonttype"]  = 42
+    plt.rcParams["axes.unicode_minus"] = False
 
-    def _try(fpath: str) -> bool:
+    def _apply(fpath: str) -> bool:
+        """フォントファイルを登録し、sans-serif の先頭に設定する。"""
         try:
+            p = Path(fpath)
+            if not p.exists() or p.stat().st_size < 10_000:
+                return False
             _fm.fontManager.addfont(fpath)
             prop = _fm.FontProperties(fname=fpath)
-            plt.rcParams["font.family"] = prop.get_name()
+            name = prop.get_name()
+            current = list(plt.rcParams.get("font.sans-serif", []))
+            if name not in current:
+                plt.rcParams["font.sans-serif"] = [name] + current
+            plt.rcParams["font.family"] = "sans-serif"
+            print(f"  [font] 日本語フォント設定: {name}  ({p.name})")
             return True
         except Exception:
             return False
@@ -318,7 +329,7 @@ def _load_japanese_font() -> None:
     _fonts_dir = Path(__file__).parent / "fonts"
     if _fonts_dir.is_dir():
         for fp in sorted(_fonts_dir.glob("*.ttf")) + sorted(_fonts_dir.glob("*.otf")):
-            if fp.stat().st_size > 200_000 and _try(str(fp)):
+            if fp.stat().st_size > 200_000 and _apply(str(fp)):
                 return
 
     # 2. fc-list :lang=ja でシステムフォントを取得（Ubuntu など）
@@ -329,15 +340,27 @@ def _load_japanese_font() -> None:
         )
         for line in res.stdout.splitlines():
             fpath = line.strip()
-            if fpath and _try(fpath):
+            if fpath and _apply(fpath):
                 return
     except Exception:
         pass
 
+    # 3. /usr/share/fonts 以下を再帰スキャン（日本語系キーワードで絞り込み）
+    _JP_KEYWORDS = ("jp", "ja", "cjk", "gothic", "mincho", "noto", "ipa",
+                    "droid", "meiryo", "hiragino", "takao", "vlgothic")
+    for _font_root in ("/usr/share/fonts", "/usr/local/share/fonts"):
+        _root = Path(_font_root)
+        if not _root.is_dir():
+            continue
+        for fp in sorted(_root.rglob("*.ttf")) + sorted(_root.rglob("*.otf")):
+            if any(kw in fp.name.lower() for kw in _JP_KEYWORDS):
+                if _apply(str(fp)):
+                    return
+
     print(
         "  [font] 日本語フォントが見つかりません。グラフの日本語が文字化けします。\n"
-        "         解決方法: python download_font.py  または"
-        "  sudo apt install fonts-noto-cjk"
+        "         解決方法: sudo apt install fonts-noto-cjk  または"
+        "  sudo apt install fonts-ipafont-gothic"
     )
 
 
@@ -597,6 +620,7 @@ def run_single_trace(
     thresholds: list = None,
     out_dir: str = "./output/reuse_dist",
     max_requests: int = None,
+    sample_stride: int = 1,
 ) -> dict:
     if thresholds is None:
         thresholds = POW2_THRESHOLDS
@@ -607,8 +631,13 @@ def run_single_trace(
     print(f"Reuse Distance 分析: {trace_name}")
     print(f"{'='*60}")
 
-    # 読み込み（cache_common.load_trace が形式を自動判定）
-    df = load_trace(trace_path, max_requests)
+    # 読み込み（ストリーミング。sample_stride>1 のとき vtime が間引かれるため
+    # next_access_vtime との差（RD絶対値）は stride 倍縮小されるが、
+    # クラス間の相対分布形状の比較には引き続き有効。）
+    if sample_stride > 1:
+        print(f"  サンプリング: 1/{sample_stride}（RD 絶対値は約 1/{sample_stride} に縮小。"
+              f"クラス間相対比較は有効）")
+    df = load_trace(trace_path, max_requests, sample_stride=sample_stride)
     if "next_access_vtime" not in df.columns or (df["next_access_vtime"] == -2).all():
         print("  [エラー] next_access_vtime がありません。OracleGeneral形式を使用してください。")
         return {}
@@ -683,8 +712,12 @@ def main():
         help="出力ディレクトリ"
     )
     parser.add_argument(
-        "--max-requests", type=int, default=None,
-        help="読み込む最大リクエスト数（デバッグ用）"
+        "--max-requests", type=int, default=None, metavar="M",
+        help="先頭 M 件だけ読み込む（大規模トレース向け。推奨: 5_000_000〜10_000_000）"
+    )
+    parser.add_argument(
+        "--sample-stride", type=int, default=1, metavar="N",
+        help="N 件に 1 件だけ読み込む（RD 絶対値は縮小されるが、クラス間相対比較は有効）"
     )
 
     args = parser.parse_args()
@@ -708,7 +741,8 @@ def main():
     all_results = []
     for tf in trace_files:
         result = run_single_trace(
-            str(tf), args.thresholds, args.out, args.max_requests
+            str(tf), args.thresholds, args.out,
+            args.max_requests, args.sample_stride,
         )
         if result:
             all_results.append(result)
