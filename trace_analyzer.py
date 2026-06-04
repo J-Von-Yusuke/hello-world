@@ -60,6 +60,11 @@ from collections import defaultdict
 #  定数・ユーティリティ
 # ─────────────────────────────────────────────
 N_BINS = 30
+_ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'   # zstandard フレームマジック
+
+def _is_zstd(path: str) -> bool:
+    with open(path, 'rb') as f:
+        return f.read(4) == _ZSTD_MAGIC
 
 def bin_idx(size: int) -> int:
     if size <= 0:
@@ -93,13 +98,31 @@ ORACLE_RECORD = struct.Struct("=IQIi")
 ORACLE_SIZE   = ORACLE_RECORD.size  # 20 bytes
 
 def iter_oraclegeneral(path: str):
-    with open(path, "rb") as f:
-        while True:
-            buf = f.read(ORACLE_SIZE)
-            if len(buf) < ORACLE_SIZE:
-                break
-            ts, oid, sz, _ = ORACLE_RECORD.unpack(buf)
-            yield ts, oid, sz
+    """oraclegeneral バイナリイテレータ（平文 / zstd 圧縮の自動判別）"""
+    if _is_zstd(path):
+        try:
+            import zstandard as _zstd
+        except ImportError:
+            print("[ERROR] zstd 圧縮ファイルには 'zstandard' が必要です: "
+                  "pip install zstandard", file=sys.stderr)
+            sys.exit(1)
+        dctx = _zstd.ZstdDecompressor()
+        with open(path, 'rb') as fh:
+            with dctx.stream_reader(fh) as f:
+                while True:
+                    buf = f.read(ORACLE_SIZE)
+                    if len(buf) < ORACLE_SIZE:
+                        break
+                    ts, oid, sz, _ = ORACLE_RECORD.unpack(buf)
+                    yield ts, oid, sz
+    else:
+        with open(path, 'rb') as f:
+            while True:
+                buf = f.read(ORACLE_SIZE)
+                if len(buf) < ORACLE_SIZE:
+                    break
+                ts, oid, sz, _ = ORACLE_RECORD.unpack(buf)
+                yield ts, oid, sz
 
 def iter_csv(path: str, sep: str = ",", has_header: bool = True,
              col_ts: int = 0, col_id: int = 1, col_sz: int = 2):
@@ -119,10 +142,55 @@ def iter_csv(path: str, sep: str = ",", has_header: bool = True,
                 continue
 
 
+
+# ─────────────────────────────────────────────
+#  サンプリングユーティリティ
+# ─────────────────────────────────────────────
+def parse_ram_size(s: str) -> int:
+    """'1GiB', '512MiB', '256KiB', '1GB' などをバイト数に変換"""
+    for suffix, mult in [('gib', 1<<30), ('mib', 1<<20), ('kib', 1<<10),
+                         ('gb', 10**9),  ('mb', 10**6),  ('kb', 10**3), ('b', 1)]:
+        if s.lower().endswith(suffix):
+            return int(float(s[:-len(suffix)]) * mult)
+    return int(s)
+
+
+def make_sampler(rate: float):
+    """Knuth乗算ハッシュによる決定論的オブジェクトサンプラーを返す。
+    rate >= 1.0 のとき None を返す（全件採用）。
+    同じ obj_id は常に同じ判定になるので再利用間隔が破綻しない。"""
+    if rate >= 1.0:
+        return None
+    threshold = int(rate * (1 << 32))
+    def _accept(oid: int) -> bool:
+        return ((oid * 2654435761) & 0xFFFFFFFF) < threshold
+    return _accept
+
+
+def quick_pass_unique_bytes(path: str, fmt: str, sep: str,
+                             has_header: bool, col_ts: int,
+                             col_id: int, col_sz: int):
+    """全ユニークオブジェクトのサイズ合計と個数を返す軽量パス。
+    --sample-ram のサンプリング率計算専用。"""
+    obj_size = {}
+    if fmt == 'oraclegeneral':
+        it = iter_oraclegeneral(path)
+    else:
+        it = iter_csv(path, sep=sep, has_header=has_header,
+                      col_ts=col_ts, col_id=col_id, col_sz=col_sz)
+    for _, oid, sz in it:
+        obj_size[oid] = sz
+    total = sum(obj_size.values())
+    return total, len(obj_size)
+
+
 # ─────────────────────────────────────────────
 #  パス 1: 全リクエスト統計（ストリーミング）
 # ─────────────────────────────────────────────
-def pass1_global(iterator, max_reuse_sample: int):
+def pass1_global(iterator, max_reuse_sample: int, sampler=None):
+    """トレースをストリーミング集計する。
+    sampler が指定されているとき、sampler(obj_id) が False のリクエストはスキップする。
+    再利用間隔はサンプリング後のインデックスで計算するため整合性が保たれる。"""
     bin_req   = [0] * N_BINS
     bin_bytes = [0] * N_BINS
     obj_count = defaultdict(int)
@@ -130,10 +198,11 @@ def pass1_global(iterator, max_reuse_sample: int):
     obj_last  = {}
     reuse_intervals = defaultdict(list)
     sample_done = False
-    total_req   = 0
+    total_req   = 0          # サンプリング後の採用リクエスト数（再利用間隔の基準にも使う）
 
-    for idx, (ts, oid, sz) in enumerate(iterator):
-        total_req += 1
+    for (ts, oid, sz) in iterator:
+        if sampler is not None and not sampler(oid):
+            continue
         bi = bin_idx(sz)
         bin_req[bi]   += 1
         bin_bytes[bi] += sz
@@ -141,10 +210,11 @@ def pass1_global(iterator, max_reuse_sample: int):
         obj_size[oid]   = sz
         if not sample_done:
             if oid in obj_last:
-                reuse_intervals[bi].append(idx - obj_last[oid])
-            obj_last[oid] = idx
-            if idx + 1 >= max_reuse_sample:
+                reuse_intervals[bi].append(total_req - obj_last[oid])
+            obj_last[oid] = total_req
+            if total_req + 1 >= max_reuse_sample:
                 sample_done = True
+        total_req += 1
 
     return bin_req, bin_bytes, obj_count, obj_size, reuse_intervals, total_req
 
@@ -656,13 +726,49 @@ def main():
                         help="表示する閾値候補数")
     parser.add_argument("--cache-ratio", type=float, default=None,
                         help="キャッシュ容量/ワークロードbyte (例: 0.10)")
+    parser.add_argument("--sample-rate", type=float, default=None,
+                        help="オブジェクトIDハッシュによるサンプリング率 (例: 0.1 = 10%%)")
+    parser.add_argument("--sample-ram",  default=None,
+                        help="サンプリング後ユニークオブジェクトのRAM目標量 (例: 1GiB, 512MiB)")
     args = parser.parse_args()
 
     if not os.path.exists(args.trace):
         print(f"[ERROR] ファイルが見つかりません: {args.trace}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[INFO] 読み込み中: {args.trace}")
+    # ── サンプリング設定 ──────────────────────────────────────────────
+    if args.sample_rate is not None and args.sample_ram is not None:
+        print("[ERROR] --sample-rate と --sample-ram は同時に指定できません",
+              file=sys.stderr)
+        sys.exit(1)
+
+    sampler = None
+    sample_rate_used = None
+
+    if args.sample_rate is not None:
+        sample_rate_used = float(args.sample_rate)
+        sampler = make_sampler(sample_rate_used)
+        print(f"[INFO] サンプリング率: {sample_rate_used*100:.2f}%"
+              f" (Knuth乗算ハッシュ、同一obj_id は常に同じ判定)")
+
+    elif args.sample_ram is not None:
+        target_bytes = parse_ram_size(args.sample_ram)
+        print(f"[INFO] RAM目標: {human_bytes(target_bytes)}"
+              f" → 第1パス: ユニークオブジェクトサイズ集計中...")
+        total_uniq_bytes, n_uniq = quick_pass_unique_bytes(
+            args.trace, args.format, args.sep, not args.no_header,
+            args.col_ts, args.col_id, args.col_sz)
+        sample_rate_used = min(1.0, target_bytes / total_uniq_bytes) if total_uniq_bytes else 1.0
+        sampler = make_sampler(sample_rate_used)
+        print(f"[INFO] ユニークオブジェクト: {n_uniq:,}個 /"
+              f" {human_bytes(total_uniq_bytes)} (全体)")
+        print(f"[INFO] 計算サンプリング率: {sample_rate_used*100:.2f}%"
+              f"  推定採用RAM: {human_bytes(min(target_bytes, total_uniq_bytes))}")
+
+    # ── イテレータ生成 ─────────────────────────────────────────────────
+    compressed = _is_zstd(args.trace) if args.format == "oraclegeneral" else False
+    print(f"[INFO] 読み込み中: {args.trace}"
+          f"{'  (zstd圧縮)' if compressed else ''}")
     if args.format == "oraclegeneral":
         iterator = iter_oraclegeneral(args.trace)
     else:
@@ -671,7 +777,7 @@ def main():
                             col_ts=args.col_ts, col_id=args.col_id, col_sz=args.col_sz)
 
     bin_req, bin_bytes, obj_count, obj_size, reuse_intervals, total_req = \
-        pass1_global(iterator, args.sample)
+        pass1_global(iterator, args.sample, sampler)
 
     total_bytes  = sum(bin_bytes)
     total_unique = len(obj_count)
@@ -701,8 +807,14 @@ def main():
                       f"{human_bytes(cache_bytes)}, "
                       f"収容可能オブジェクト目安: {int(cache_bytes/mean_sz):,}")
 
+    sample_info = (f"  サンプリング率: {sample_rate_used*100:.2f}%"
+                   if sample_rate_used is not None and sample_rate_used < 1.0
+                   else "")
+
     print("\n" + "═" * 80)
-    print(f"  キャッシュトレース分析レポート v2: {os.path.basename(args.trace)}")
+    print(f"  キャッシュトレース分析レポート v2.1: {os.path.basename(args.trace)}")
+    if sample_info:
+        print(sample_info)
     print("═" * 80)
 
     print_size_distribution(bin_stats, total_req, total_bytes)
@@ -720,4 +832,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
