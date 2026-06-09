@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>コンテンツサイズ分布とキャッシュ性能の関係分析</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --bg2: #1a1d27; --bg3: #22263a;
+    --border: #2e3350; --text: #e2e8f0; --muted: #8892a4;
+    --blue: #60a5fa; --green: #34d399; --red: #f87171;
+    --yellow: #fbbf24; --purple: #a78bfa; --orange: #fb923c;
+    --cyan: #22d3ee; --pink: #f472b6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 'Segoe UI', system-ui, sans-serif; }
+  h1 { font-size: 1.4rem; font-weight: 700; padding: 20px 24px 8px; color: #fff; }
+  h2 { font-size: 1.05rem; font-weight: 600; color: var(--blue); margin-bottom: 12px; }
+  h3 { font-size: 0.9rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; padding: 0 24px 16px; }
+  
+  .tab-bar { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .tab { padding: 8px 14px; cursor: pointer; font-size: 0.8rem; color: var(--muted); border-radius: 6px 6px 0 0; border: 1px solid transparent; border-bottom: none; transition: all .15s; }
+  .tab:hover { color: var(--text); background: var(--bg2); }
+  .tab.active { color: var(--blue); background: var(--bg2); border-color: var(--border); }
+  
+  .panel { display: none; padding: 20px 24px; }
+  .panel.active { display: block; }
+  
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .chart-wrap { position: relative; height: 240px; }
+  .chart-wrap-tall { position: relative; height: 300px; }
+  
+  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat { background: var(--bg3); border-radius: 8px; padding: 10px 14px; flex: 1; min-width: 110px; }
+  .stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-val { font-size: 1.3rem; font-weight: 700; }
+  .val-good { color: var(--green); }
+  .val-bad { color: var(--red); }
+  .val-neutral { color: var(--yellow); }
+  .val-blue { color: var(--blue); }
+  
+  .perf-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .perf-table th { background: var(--bg3); color: var(--muted); text-align: center; padding: 6px 10px; font-weight: 500; border-bottom: 1px solid var(--border); }
+  .perf-table td { padding: 6px 10px; text-align: center; border-bottom: 1px solid var(--border); }
+  .perf-table tr:last-child td { border-bottom: none; }
+  .good { color: var(--green); font-weight: 600; }
+  .bad { color: var(--red); font-weight: 600; }
+  .neutral { color: var(--yellow); }
+  
+  .overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media(max-width: 900px) { .grid2, .grid3, .overview-grid { grid-template-columns: 1fr; } }
+  
+  .legend-row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-size: 0.78rem; color: var(--muted); }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .legend-line { width: 18px; height: 3px; border-radius: 2px; }
+  
+  .insight { background: var(--bg3); border-left: 3px solid var(--blue); border-radius: 0 8px 8px 0; padding: 10px 14px; margin-top: 12px; font-size: 0.83rem; line-height: 1.7; }
+  .insight.green { border-color: var(--green); }
+  .insight.red { border-color: var(--red); }
+  .insight.yellow { border-color: var(--yellow); }
+  
+  .trace-type { font-size: 0.72rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  .type-blk { background: #1e3a5f; color: var(--blue); }
+  .type-kv { background: #1a3a2a; color: var(--green); }
+  .type-cdn { background: #3a2a1a; color: var(--orange); }
+</style>
+</head>
+<body>
+
+<h1>コンテンツサイズ分布とキャッシュ性能の関係分析</h1>
+<p class="subtitle">RegionSplit提案手法 vs オブジェクト単位LRU ｜ キャッシュサイズ：10% / 30% / 50%</p>
+
+<div class="tab-bar" id="tabBar"></div>
+
+<div id="panels"></div>
+
+<script>
+const DATA = {"metaKV": {"global": {"ohw_rate": 0.495286, "zipf_alpha": 1.2391, "mean_size": 1830.0}, "bins": [{"bin": 0, "label": "0", "q": 1.736, "byte_share": 0, "r": 0.2118, "rho": 28.57, "a": 1.2229, "mean_size": 0.0}, {"bin": 3, "label": "8B", "q": 41.751, "byte_share": 0.68, "r": 0.4563, "rho": 52.46, "a": 1.2382, "mean_size": 9.1}, {"bin": 4, "label": "16B", "q": 6.961, "byte_share": 0.254, "r": 0.5266, "rho": 64.79, "a": 1.2463, "mean_size": 20.3}, {"bin": 5, "label": "32B", "q": 15.907, "byte_share": 1.39, "r": 0.4625, "rho": 42.55, "a": 1.2343, "mean_size": 48.6}, {"bin": 6, "label": "64B", "q": 13.896, "byte_share": 2.263, "r": 0.5287, "rho": 65.47, "a": 1.3581, "mean_size": 90.6}, {"bin": 7, "label": "128B", "q": 5.376, "byte_share": 1.745, "r": 0.5604, "rho": 62.07, "a": 1.243, "mean_size": 180.5}, {"bin": 8, "label": "256B", "q": 4.071, "byte_share": 2.689, "r": 0.559, "rho": 56.26, "a": 1.1325, "mean_size": 367.5}, {"bin": 9, "label": "512B", "q": 5.014, "byte_share": 6.167, "r": 0.5719, "rho": 165.71, "a": 1.3744, "mean_size": 684.2}, {"bin": 10, "label": "1KiB", "q": 2.28, "byte_share": 5.879, "r": 0.5465, "rho": 124.46, "a": 1.4918, "mean_size": 1434.5}, {"bin": 11, "label": "2KiB", "q": 0.926, "byte_share": 5.014, "r": 0.6189, "rho": 26.25, "a": 0.9339, "mean_size": 3013.1}, {"bin": 12, "label": "4KiB", "q": 0.674, "byte_share": 6.446, "r": 0.7109, "rho": 80.1, "a": 1.2299, "mean_size": 5318.3}, {"bin": 13, "label": "8KiB", "q": 1.048, "byte_share": 21.246, "r": 0.3751, "rho": 66.84, "a": 1.1265, "mean_size": 11277.4}, {"bin": 14, "label": "16KiB", "q": 0.194, "byte_share": 9.048, "r": 0.9499, "rho": 40.86, "a": 0.3814, "mean_size": 25967.1}, {"bin": 15, "label": "32KiB", "q": 0.09, "byte_share": 6.165, "r": 0.856, "rho": 41.44, "a": 0.7946, "mean_size": 37958.4}, {"bin": 16, "label": "64KiB", "q": 0.035, "byte_share": 5.747, "r": 0.5104, "rho": 26.63, "a": 1.3842, "mean_size": 91320.3}, {"bin": 17, "label": "128KiB", "q": 0.02, "byte_share": 6.448, "r": 0.5138, "rho": 17.36, "a": 1.1862, "mean_size": 183205.4}, {"bin": 18, "label": "256KiB", "q": 0.022, "byte_share": 18.82, "r": 0.5115, "rho": 6.87, "a": 0.725, "mean_size": 472637.5}], "perf": {"10": {"lru_mr": 5.12, "lru_bmr": 11.92, "best_delta_mr": -1.78, "best_delta_bmr": 0.72, "sweep_mr": [["LRU", 5.12], ["1kiB", 3.37], ["4kiB", 3.34], ["16kiB", 3.6], ["64kiB", 4.65], ["256kiB", 5.04], ["1MiB", 5.85]], "sweep_bmr": [["LRU", 11.92], ["1kiB", 12.86], ["4kiB", 13.42], ["16kiB", 13.99], ["64kiB", 14.11], ["256kiB", 12.64], ["1MiB", 12.92]]}, "30": {"lru_mr": 3.64, "lru_bmr": 10.56, "best_delta_mr": -0.4, "best_delta_bmr": 0.22, "sweep_mr": [["LRU", 3.64], ["1kiB", 3.27], ["4kiB", 3.25], ["16kiB", 3.24], ["64kiB", 3.37], ["256kiB", 3.45], ["1MiB", 4.05]], "sweep_bmr": [["LRU", 10.56], ["1kiB", 10.88], ["4kiB", 10.84], ["16kiB", 10.78], ["64kiB", 11.73], ["256kiB", 10.85], ["1MiB", 10.98]]}, "50": {"lru_mr": 3.36, "lru_bmr": 10.38, "best_delta_mr": -0.12, "best_delta_bmr": 0.07, "sweep_mr": [["LRU", 3.36], ["1kiB", 3.25], ["4kiB", 3.24], ["16kiB", 3.24], ["64kiB", 3.26], ["256kiB", 3.27], ["1MiB", 3.5]], "sweep_bmr": [["LRU", 10.38], ["1kiB", 10.49], ["4kiB", 10.48], ["16kiB", 10.45], ["64kiB", 10.61], ["256kiB", 10.48], ["1MiB", 10.53]]}}}, "twiKV": {"global": {"ohw_rate": 0.647144, "zipf_alpha": 0.4424, "mean_size": 2916.3}, "bins": [{"bin": 5, "label": "32B", "q": 51.236, "byte_share": 1.037, "r": 0.0001, "rho": 2.72, "a": 0.3507, "mean_size": 44.0}, {"bin": 7, "label": "128B", "q": 37.161, "byte_share": 2.793, "r": 0.9363, "rho": 2.41, "a": 0.1779, "mean_size": 163.4}, {"bin": 9, "label": "512B", "q": 0.002, "byte_share": 0.001, "r": 0.8, "rho": 2.04, "a": 0.2572, "mean_size": 930.0}, {"bin": 10, "label": "1KiB", "q": 0.153, "byte_share": 0.129, "r": 0.9121, "rho": 2.48, "a": 0.2072, "mean_size": 1833.0}, {"bin": 11, "label": "2KiB", "q": 1.802, "byte_share": 2.478, "r": 0.9258, "rho": 2.53, "a": 0.189, "mean_size": 2989.0}, {"bin": 12, "label": "4KiB", "q": 3.179, "byte_share": 8.365, "r": 0.8796, "rho": 2.43, "a": 0.2414, "mean_size": 5720.5}, {"bin": 13, "label": "8KiB", "q": 2.54, "byte_share": 13.787, "r": 0.8727, "rho": 2.43, "a": 0.2504, "mean_size": 11799.5}, {"bin": 14, "label": "16KiB", "q": 2.038, "byte_share": 22.237, "r": 0.8581, "rho": 2.43, "a": 0.2662, "mean_size": 23722.2}, {"bin": 15, "label": "32KiB", "q": 1.448, "byte_share": 30.199, "r": 0.8687, "rho": 2.41, "a": 0.2503, "mean_size": 45349.2}, {"bin": 16, "label": "64KiB", "q": 0.387, "byte_share": 15.086, "r": 0.8671, "rho": 2.38, "a": 0.2516, "mean_size": 84724.8}, {"bin": 17, "label": "128KiB", "q": 0.054, "byte_share": 3.889, "r": 0.9016, "rho": 2.31, "a": 0.2051, "mean_size": 157598.4}], "perf": {"10": {"lru_mr": 62.79, "lru_bmr": 84.26, "best_delta_mr": 0.0, "best_delta_bmr": 0.0, "sweep_mr": [["LRU", 62.79], ["1kiB", 62.79], ["4kiB", 62.79], ["16kiB", 62.79], ["64kiB", 62.79], ["256kiB", 62.79], ["1MiB", 62.79]], "sweep_bmr": [["LRU", 84.26], ["1kiB", 84.26], ["4kiB", 84.26], ["16kiB", 84.26], ["64kiB", 84.26], ["256kiB", 84.26], ["1MiB", 84.26]]}, "30": {"lru_mr": 62.79, "lru_bmr": 84.26, "best_delta_mr": 0.0, "best_delta_bmr": 0.0, "sweep_mr": [["LRU", 62.79], ["1kiB", 62.79], ["4kiB", 62.79], ["16kiB", 62.79], ["64kiB", 62.79], ["256kiB", 62.79], ["1MiB", 62.79]], "sweep_bmr": [["LRU", 84.26], ["1kiB", 84.26], ["4kiB", 84.26], ["16kiB", 84.26], ["64kiB", 84.26], ["256kiB", 84.26], ["1MiB", 84.26]]}, "50": {"lru_mr": 62.79, "lru_bmr": 84.26, "best_delta_mr": 0.0, "best_delta_bmr": 0.0, "sweep_mr": [["LRU", 62.79], ["1kiB", 62.79], ["4kiB", 62.79], ["16kiB", 62.79], ["64kiB", 62.79], ["256kiB", 62.79], ["1MiB", 62.79]], "sweep_bmr": [["LRU", 84.26], ["1kiB", 84.26], ["4kiB", 84.26], ["16kiB", 84.26], ["64kiB", 84.26], ["256kiB", 84.26], ["1MiB", 84.26]]}}}, "metaCDN": {"global": {"ohw_rate": 0.623906, "zipf_alpha": 0.6995, "mean_size": 25308054.4}, "bins": [{"bin": 0, "label": "0", "q": 0.0, "byte_share": 0.0, "r": 1.0, "rho": 1.0, "a": 0.9, "mean_size": 1.0}, {"bin": 1, "label": "2B", "q": 0.0, "byte_share": 0.0, "r": 0.75, "rho": 2.0, "a": 0.9, "mean_size": 2.0}, {"bin": 2, "label": "4B", "q": 0.064, "byte_share": 0.0, "r": 0.7837, "rho": 4.72, "a": 0.4959, "mean_size": 4.0}, {"bin": 3, "label": "8B", "q": 0.004, "byte_share": 0.0, "r": 0.9333, "rho": 7.92, "a": 0.3008, "mean_size": 12.0}, {"bin": 4, "label": "16B", "q": 0.026, "byte_share": 0.0, "r": 0.7202, "rho": 9.9, "a": 0.8407, "mean_size": 17.6}, {"bin": 5, "label": "32B", "q": 0.047, "byte_share": 0.0, "r": 0.8705, "rho": 4.18, "a": 0.3585, "mean_size": 47.7}, {"bin": 6, "label": "64B", "q": 0.027, "byte_share": 0.0, "r": 0.7107, "rho": 3.54, "a": 0.5167, "mean_size": 89.3}, {"bin": 7, "label": "128B", "q": 0.273, "byte_share": 0.0, "r": 0.5756, "rho": 6.94, "a": 0.8392, "mean_size": 201.5}, {"bin": 8, "label": "256B", "q": 0.186, "byte_share": 0.0, "r": 0.7491, "rho": 4.43, "a": 0.5367, "mean_size": 373.7}, {"bin": 9, "label": "512B", "q": 1.074, "byte_share": 0.0, "r": 0.6239, "rho": 4.85, "a": 0.6561, "mean_size": 805.8}, {"bin": 10, "label": "1KiB", "q": 4.464, "byte_share": 0.0, "r": 0.5988, "rho": 5.77, "a": 0.7094, "mean_size": 1512.1}, {"bin": 11, "label": "2KiB", "q": 4.52, "byte_share": 0.0, "r": 0.6308, "rho": 5.1, "a": 0.704, "mean_size": 2987.6}, {"bin": 12, "label": "4KiB", "q": 5.519, "byte_share": 0.0, "r": 0.7152, "rho": 4.37, "a": 0.5891, "mean_size": 6149.0}, {"bin": 13, "label": "8KiB", "q": 8.769, "byte_share": 0.001, "r": 0.6866, "rho": 3.36, "a": 0.5179, "mean_size": 11893.9}, {"bin": 14, "label": "16KiB", "q": 10.695, "byte_share": 0.003, "r": 0.7033, "rho": 3.92, "a": 0.5586, "mean_size": 23607.2}, {"bin": 15, "label": "32KiB", "q": 11.164, "byte_share": 0.006, "r": 0.6844, "rho": 4.46, "a": 0.5984, "mean_size": 46801.2}, {"bin": 16, "label": "64KiB", "q": 9.577, "byte_share": 0.01, "r": 0.6195, "rho": 4.44, "a": 0.6294, "mean_size": 93504.0}, {"bin": 17, "label": "128KiB", "q": 7.308, "byte_share": 0.014, "r": 0.5634, "rho": 4.65, "a": 0.6915, "mean_size": 181869.4}, {"bin": 18, "label": "256KiB", "q": 5.018, "byte_share": 0.02, "r": 0.5804, "rho": 5.75, "a": 0.7679, "mean_size": 369019.3}, {"bin": 19, "label": "512KiB", "q": 12.55, "byte_share": 0.124, "r": 0.3906, "rho": 6.44, "a": 0.834, "mean_size": 913529.8}, {"bin": 20, "label": "1MiB", "q": 3.395, "byte_share": 0.055, "r": 0.4836, "rho": 10.18, "a": 0.9352, "mean_size": 1494776.6}, {"bin": 21, "label": "2MiB", "q": 3.09, "byte_share": 0.099, "r": 0.4358, "rho": 11.7, "a": 1.0131, "mean_size": 2959479.6}, {"bin": 22, "label": "4MiB", "q": 2.255, "byte_share": 0.143, "r": 0.4083, "rho": 12.41, "a": 1.1117, "mean_size": 5862270.1}, {"bin": 23, "label": "8MiB", "q": 3.114, "byte_share": 0.366, "r": 0.3735, "rho": 15.65, "a": 1.1499, "mean_size": 10887123.5}, {"bin": 24, "label": "16MiB", "q": 0.984, "byte_share": 0.23, "r": 0.3976, "rho": 24.85, "a": 1.3183, "mean_size": 21665882.0}, {"bin": 25, "label": "32MiB", "q": 2.692, "byte_share": 1.475, "r": 0.211, "rho": 38.88, "a": 1.5141, "mean_size": 50808413.6}, {"bin": 26, "label": "64MiB", "q": 0.538, "byte_share": 0.535, "r": 0.1803, "rho": 106.87, "a": 1.8155, "mean_size": 92233583.9}, {"bin": 27, "label": "128MiB", "q": 0.331, "byte_share": 0.663, "r": 0.1379, "rho": 116.89, "a": 1.9581, "mean_size": 185857949.1}, {"bin": 28, "label": "256MiB", "q": 0.252, "byte_share": 0.99, "r": 0.163, "rho": 177.07, "a": 2.0858, "mean_size": 364753109.1}, {"bin": 29, "label": "512MiB", "q": 2.064, "byte_share": 95.268, "r": 0.3899, "rho": 15.37, "a": 0.9722, "mean_size": 4281690244.0}], "perf": {"10": {"lru_mr": 44.67, "lru_bmr": 6.28, "best_delta_mr": -9.2, "best_delta_bmr": 0.66, "sweep_mr": [["LRU", 44.67], ["1kiB", 44.97], ["4kiB", 42.87], ["16kiB", 40.5], ["64kiB", 37.27], ["256kiB", 35.47], ["1MiB", 38.44]], "sweep_bmr": [["LRU", 6.28], ["1kiB", 6.95], ["4kiB", 6.94], ["16kiB", 6.94], ["64kiB", 7.01], ["256kiB", 7.36], ["1MiB", 8.0]]}, "30": {"lru_mr": 37.59, "lru_bmr": 5.25, "best_delta_mr": -3.99, "best_delta_bmr": 0.4, "sweep_mr": [["LRU", 37.59], ["1kiB", 38.16], ["4kiB", 37.3], ["16kiB", 36.27], ["64kiB", 34.78], ["256kiB", 33.89], ["1MiB", 33.6]], "sweep_bmr": [["LRU", 5.25], ["1kiB", 5.7], ["4kiB", 5.69], ["16kiB", 5.68], ["64kiB", 5.66], ["256kiB", 5.65], ["1MiB", 5.96]]}, "50": {"lru_mr": 34.7, "lru_bmr": 4.99, "best_delta_mr": -1.41, "best_delta_bmr": 0.21, "sweep_mr": [["LRU", 34.7], ["1kiB", 35.24], ["4kiB", 34.9], ["16kiB", 34.46], ["64kiB", 33.82], ["256kiB", 33.43], ["1MiB", 33.29]], "sweep_bmr": [["LRU", 4.99], ["1kiB", 5.24], ["4kiB", 5.23], ["16kiB", 5.23], ["64kiB", 5.21], ["256kiB", 5.2], ["1MiB", 5.24]]}}}, "tncntCDN": {"global": {"ohw_rate": 0.549618, "zipf_alpha": 0.9818, "mean_size": 25047.8}, "bins": [{"bin": 2, "label": "4B", "q": 0.0, "byte_share": 0.0, "r": 0.0, "rho": 2.0, "a": 0.9, "mean_size": 4.0}, {"bin": 5, "label": "32B", "q": 0.0, "byte_share": 0.0, "r": 0.5739, "rho": 6.47, "a": 0.9436, "mean_size": 48.5}, {"bin": 6, "label": "64B", "q": 0.0, "byte_share": 0.0, "r": 0.5191, "rho": 6.5, "a": 0.9329, "mean_size": 95.5}, {"bin": 7, "label": "128B", "q": 0.006, "byte_share": 0.0, "r": 0.5365, "rho": 11.01, "a": 1.0152, "mean_size": 177.6}, {"bin": 8, "label": "256B", "q": 0.018, "byte_share": 0.0, "r": 0.5201, "rho": 14.83, "a": 1.0924, "mean_size": 402.0}, {"bin": 9, "label": "512B", "q": 0.094, "byte_share": 0.003, "r": 0.5169, "rho": 14.45, "a": 1.0457, "mean_size": 819.3}, {"bin": 10, "label": "1KiB", "q": 0.529, "byte_share": 0.032, "r": 0.5269, "rho": 9.37, "a": 0.9345, "mean_size": 1665.8}, {"bin": 11, "label": "2KiB", "q": 4.45, "byte_share": 0.518, "r": 0.5363, "rho": 8.05, "a": 0.8864, "mean_size": 3235.1}, {"bin": 12, "label": "4KiB", "q": 14.76, "byte_share": 3.336, "r": 0.5286, "rho": 12.07, "a": 1.0012, "mean_size": 6284.9}, {"bin": 13, "label": "8KiB", "q": 36.887, "byte_share": 16.114, "r": 0.5655, "rho": 10.63, "a": 0.9634, "mean_size": 12147.9}, {"bin": 14, "label": "16KiB", "q": 21.361, "byte_share": 16.816, "r": 0.5508, "rho": 11.23, "a": 1.0068, "mean_size": 21891.1}, {"bin": 15, "label": "32KiB", "q": 14.117, "byte_share": 23.768, "r": 0.5315, "rho": 12.24, "a": 1.0635, "mean_size": 46817.7}, {"bin": 16, "label": "64KiB", "q": 6.2, "byte_share": 19.582, "r": 0.5419, "rho": 10.97, "a": 1.0244, "mean_size": 87830.8}, {"bin": 17, "label": "128KiB", "q": 1.158, "byte_share": 7.062, "r": 0.5454, "rho": 9.69, "a": 0.9519, "mean_size": 169591.3}, {"bin": 18, "label": "256KiB", "q": 0.269, "byte_share": 3.284, "r": 0.5476, "rho": 18.47, "a": 1.0339, "mean_size": 339458.4}, {"bin": 19, "label": "512KiB", "q": 0.054, "byte_share": 1.402, "r": 0.5253, "rho": 17.61, "a": 1.1482, "mean_size": 715642.7}, {"bin": 20, "label": "1MiB", "q": 0.053, "byte_share": 2.924, "r": 0.4295, "rho": 39.01, "a": 1.4877, "mean_size": 1526439.2}, {"bin": 21, "label": "2MiB", "q": 0.034, "byte_share": 3.615, "r": 0.3603, "rho": 54.13, "a": 1.6864, "mean_size": 2962019.2}, {"bin": 22, "label": "4MiB", "q": 0.009, "byte_share": 1.545, "r": 0.3903, "rho": 63.22, "a": 1.7083, "mean_size": 5053577.3}], "perf": {"10": {"lru_mr": 25.0, "lru_bmr": 21.69, "best_delta_mr": 1.07, "best_delta_bmr": 2.06, "sweep_mr": [["LRU", 25.0], ["1kiB", 27.1], ["4kiB", 26.74], ["16kiB", 26.07], ["64kiB", 26.1], ["256kiB", 26.83], ["1MiB", 26.97]], "sweep_bmr": [["LRU", 21.69], ["1kiB", 23.75], ["4kiB", 23.86], ["16kiB", 24.17], ["64kiB", 24.61], ["256kiB", 24.57], ["1MiB", 24.55]]}, "30": {"lru_mr": 20.04, "lru_bmr": 17.42, "best_delta_mr": 0.25, "best_delta_bmr": 0.86, "sweep_mr": [["LRU", 20.04], ["1kiB", 20.97], ["4kiB", 20.78], ["16kiB", 20.29], ["64kiB", 20.39], ["256kiB", 20.83], ["1MiB", 20.91]], "sweep_bmr": [["LRU", 17.42], ["1kiB", 18.28], ["4kiB", 18.29], ["16kiB", 18.49], ["64kiB", 18.66], ["256kiB", 18.59], ["1MiB", 18.56]]}, "50": {"lru_mr": 18.77, "lru_bmr": 16.39, "best_delta_mr": 0.03, "best_delta_bmr": 0.42, "sweep_mr": [["LRU", 18.77], ["1kiB", 19.23], ["4kiB", 19.15], ["16kiB", 18.8], ["64kiB", 18.85], ["256kiB", 19.15], ["1MiB", 19.2]], "sweep_bmr": [["LRU", 16.39], ["1kiB", 16.81], ["4kiB", 16.81], ["16kiB", 16.89], ["64kiB", 17.0], ["256kiB", 16.98], ["1MiB", 16.95]]}}}, "wikiCDN": {"global": {"ohw_rate": 0.413897, "zipf_alpha": 1.5713, "mean_size": 165751.5}, "bins": [{"bin": 3, "label": "8B", "q": 0.0, "byte_share": 0.0, "r": 0.5, "rho": 22.0, "a": 0.9, "mean_size": 10.0}, {"bin": 5, "label": "32B", "q": 0.001, "byte_share": 0.0, "r": 0.8393, "rho": 224.44, "a": 1.5724, "mean_size": 43.9}, {"bin": 6, "label": "64B", "q": 0.644, "byte_share": 0.002, "r": 0.211, "rho": 4413.58, "a": 2.2897, "mean_size": 105.6}, {"bin": 7, "label": "128B", "q": 0.326, "byte_share": 0.002, "r": 0.2658, "rho": 334.14, "a": 2.2022, "mean_size": 197.6}, {"bin": 8, "label": "256B", "q": 8.619, "byte_share": 0.079, "r": 0.2332, "rho": 1203.4, "a": 2.311, "mean_size": 386.0}, {"bin": 9, "label": "512B", "q": 9.242, "byte_share": 0.168, "r": 0.2987, "rho": 815.71, "a": 2.1643, "mean_size": 763.5}, {"bin": 10, "label": "1KiB", "q": 6.712, "byte_share": 0.255, "r": 0.3683, "rho": 241.44, "a": 1.7409, "mean_size": 1596.9}, {"bin": 11, "label": "2KiB", "q": 8.393, "byte_share": 0.633, "r": 0.4573, "rho": 90.55, "a": 1.4997, "mean_size": 3167.1}, {"bin": 12, "label": "4KiB", "q": 15.409, "byte_share": 2.135, "r": 0.4543, "rho": 86.77, "a": 1.5958, "mean_size": 5823.0}, {"bin": 13, "label": "8KiB", "q": 19.818, "byte_share": 5.639, "r": 0.3808, "rho": 96.94, "a": 1.7166, "mean_size": 11956.1}, {"bin": 14, "label": "16KiB", "q": 16.336, "byte_share": 9.059, "r": 0.3452, "rho": 75.85, "a": 1.6442, "mean_size": 23303.0}, {"bin": 15, "label": "32KiB", "q": 7.632, "byte_share": 8.396, "r": 0.3626, "rho": 52.43, "a": 1.5163, "mean_size": 46227.8}, {"bin": 16, "label": "64KiB", "q": 3.602, "byte_share": 7.955, "r": 0.4468, "rho": 41.65, "a": 1.3716, "mean_size": 92799.6}, {"bin": 17, "label": "128KiB", "q": 1.59, "byte_share": 7.064, "r": 0.4889, "rho": 26.66, "a": 1.2134, "mean_size": 186651.9}, {"bin": 18, "label": "256KiB", "q": 0.786, "byte_share": 6.784, "r": 0.4987, "rho": 21.83, "a": 1.1559, "mean_size": 362516.2}, {"bin": 19, "label": "512KiB", "q": 0.343, "byte_share": 5.928, "r": 0.5182, "rho": 20.12, "a": 1.1274, "mean_size": 726844.7}, {"bin": 20, "label": "1MiB", "q": 0.205, "byte_share": 7.299, "r": 0.5279, "rho": 19.87, "a": 1.1228, "mean_size": 1492659.9}, {"bin": 21, "label": "2MiB", "q": 0.202, "byte_share": 14.24, "r": 0.5622, "rho": 23.35, "a": 1.1218, "mean_size": 2955392.1}, {"bin": 22, "label": "4MiB", "q": 0.106, "byte_share": 14.614, "r": 0.5671, "rho": 21.35, "a": 1.0837, "mean_size": 5788845.2}, {"bin": 23, "label": "8MiB", "q": 0.028, "byte_share": 7.419, "r": 0.6003, "rho": 21.73, "a": 1.0473, "mean_size": 11067406.0}, {"bin": 24, "label": "16MiB", "q": 0.003, "byte_share": 1.439, "r": 0.597, "rho": 12.74, "a": 1.0078, "mean_size": 21384118.5}, {"bin": 25, "label": "32MiB", "q": 0.0, "byte_share": 0.45, "r": 0.4886, "rho": 11.78, "a": 1.0523, "mean_size": 44034810.6}, {"bin": 26, "label": "64MiB", "q": 0.0, "byte_share": 0.23, "r": 0.4464, "rho": 8.26, "a": 1.0828, "mean_size": 91798385.2}, {"bin": 27, "label": "128MiB", "q": 0.0, "byte_share": 0.123, "r": 0.5333, "rho": 8.86, "a": 1.3779, "mean_size": 196897116.0}, {"bin": 28, "label": "256MiB", "q": 0.0, "byte_share": 0.062, "r": 0.75, "rho": 17.0, "a": 0.9, "mean_size": 345778437.5}, {"bin": 29, "label": "512MiB", "q": 0.0, "byte_share": 0.025, "r": 0.0, "rho": 2.0, "a": 0.9, "mean_size": 1410075101.0}], "perf": {"10": {"lru_mr": 7.19, "lru_bmr": 21.64, "best_delta_mr": -3.7, "best_delta_bmr": 1.47, "sweep_mr": [["LRU", 7.19], ["1kiB", 7.75], ["4kiB", 7.2], ["16kiB", 5.42], ["64kiB", 3.6], ["256kiB", 3.49], ["1MiB", 4.3]], "sweep_bmr": [["LRU", 21.64], ["1kiB", 23.11], ["4kiB", 23.19], ["16kiB", 23.76], ["64kiB", 25.68], ["256kiB", 29.53], ["1MiB", 31.94]]}, "30": {"lru_mr": 3.06, "lru_bmr": 11.66, "best_delta_mr": -1.02, "best_delta_bmr": 0.7, "sweep_mr": [["LRU", 3.06], ["1kiB", 3.21], ["4kiB", 3.07], ["16kiB", 2.65], ["64kiB", 2.21], ["256kiB", 2.04], ["1MiB", 2.07]], "sweep_bmr": [["LRU", 11.66], ["1kiB", 12.36], ["4kiB", 12.37], ["16kiB", 12.42], ["64kiB", 12.59], ["256kiB", 13.48], ["1MiB", 15.82]]}, "50": {"lru_mr": 2.24, "lru_bmr": 8.98, "best_delta_mr": -0.34, "best_delta_bmr": 0.32, "sweep_mr": [["LRU", 2.24], ["1kiB", 2.3], ["4kiB", 2.25], ["16kiB", 2.11], ["64kiB", 1.98], ["256kiB", 1.92], ["1MiB", 1.9]], "sweep_bmr": [["LRU", 8.98], ["1kiB", 9.3], ["4kiB", 9.3], ["16kiB", 9.3], ["64kiB", 9.32], ["256kiB", 9.44], ["1MiB", 9.76]]}}}, "metaBlk": {"global": {"ohw_rate": 0.607469, "zipf_alpha": 0.598, "mean_size": 4655857.2}, "bins": [{"bin": 2, "label": "4B", "q": 0.0, "byte_share": 0.0, "r": 0.0, "rho": 3.0, "a": 0.9, "mean_size": 4.0}, {"bin": 4, "label": "16B", "q": 0.002, "byte_share": 0.0, "r": 0.8182, "rho": 2.25, "a": 0.3381, "mean_size": 22.5}, {"bin": 5, "label": "32B", "q": 0.361, "byte_share": 0.0, "r": 0.4525, "rho": 4.84, "a": 0.7702, "mean_size": 46.2}, {"bin": 6, "label": "64B", "q": 0.009, "byte_share": 0.0, "r": 0.1429, "rho": 3.28, "a": 0.6186, "mean_size": 85.2}, {"bin": 7, "label": "128B", "q": 0.461, "byte_share": 0.0, "r": 0.7256, "rho": 2.91, "a": 0.4516, "mean_size": 181.7}, {"bin": 8, "label": "256B", "q": 0.259, "byte_share": 0.0, "r": 0.7419, "rho": 3.51, "a": 0.5154, "mean_size": 372.3}, {"bin": 9, "label": "512B", "q": 0.417, "byte_share": 0.0, "r": 0.6634, "rho": 5.02, "a": 0.6657, "mean_size": 767.1}, {"bin": 10, "label": "1KiB", "q": 1.157, "byte_share": 0.0, "r": 0.4438, "rho": 4.61, "a": 0.7196, "mean_size": 1394.8}, {"bin": 11, "label": "2KiB", "q": 0.678, "byte_share": 0.001, "r": 0.5586, "rho": 3.43, "a": 0.5693, "mean_size": 3084.7}, {"bin": 12, "label": "4KiB", "q": 0.954, "byte_share": 0.001, "r": 0.5478, "rho": 4.01, "a": 0.6463, "mean_size": 5589.3}, {"bin": 13, "label": "8KiB", "q": 0.854, "byte_share": 0.003, "r": 0.4938, "rho": 3.8, "a": 0.6612, "mean_size": 11960.0}, {"bin": 14, "label": "16KiB", "q": 1.298, "byte_share": 0.008, "r": 0.5783, "rho": 4.82, "a": 0.659, "mean_size": 24060.1}, {"bin": 15, "label": "32KiB", "q": 1.25, "byte_share": 0.015, "r": 0.5856, "rho": 4.01, "a": 0.6237, "mean_size": 46616.4}, {"bin": 16, "label": "64KiB", "q": 1.903, "byte_share": 0.047, "r": 0.5689, "rho": 4.33, "a": 0.6409, "mean_size": 97530.3}, {"bin": 17, "label": "128KiB", "q": 2.426, "byte_share": 0.118, "r": 0.42, "rho": 4.54, "a": 0.6625, "mean_size": 193253.7}, {"bin": 18, "label": "256KiB", "q": 3.95, "byte_share": 0.383, "r": 0.3552, "rho": 4.42, "a": 0.6331, "mean_size": 383576.4}, {"bin": 19, "label": "512KiB", "q": 8.446, "byte_share": 1.816, "r": 0.5707, "rho": 4.09, "a": 0.6325, "mean_size": 851238.6}, {"bin": 20, "label": "1MiB", "q": 19.899, "byte_share": 6.7, "r": 0.6661, "rho": 4.27, "a": 0.6003, "mean_size": 1333189.4}, {"bin": 21, "label": "2MiB", "q": 15.762, "byte_share": 10.576, "r": 0.3066, "rho": 4.45, "a": 0.59, "mean_size": 2656784.3}, {"bin": 22, "label": "4MiB", "q": 9.039, "byte_share": 14.923, "r": 0.5582, "rho": 2.56, "a": 0.4503, "mean_size": 6537165.0}, {"bin": 23, "label": "8MiB", "q": 30.876, "byte_share": 65.411, "r": 0.703, "rho": 3.01, "a": 0.4729, "mean_size": 8388770.5}], "perf": {"10": {"lru_mr": 48.85, "lru_bmr": 63.71, "best_delta_mr": -0.04, "best_delta_bmr": -0.01, "sweep_mr": [["LRU", 48.85], ["1kiB", 48.87], ["4kiB", 48.86], ["16kiB", 48.86], ["64kiB", 48.85], ["256kiB", 48.84], ["1MiB", 48.81]], "sweep_bmr": [["LRU", 63.71], ["1kiB", 63.72], ["4kiB", 63.72], ["16kiB", 63.72], ["64kiB", 63.72], ["256kiB", 63.71], ["1MiB", 63.7]]}, "30": {"lru_mr": 48.56, "lru_bmr": 63.48, "best_delta_mr": -0.01, "best_delta_bmr": 0.0, "sweep_mr": [["LRU", 48.56], ["1kiB", 48.56], ["4kiB", 48.56], ["16kiB", 48.55], ["64kiB", 48.55], ["256kiB", 48.55], ["1MiB", 48.55]], "sweep_bmr": [["LRU", 63.48], ["1kiB", 63.48], ["4kiB", 63.48], ["16kiB", 63.48], ["64kiB", 63.48], ["256kiB", 63.48], ["1MiB", 63.48]]}, "50": {"lru_mr": 48.51, "lru_bmr": 63.44, "best_delta_mr": -0.01, "best_delta_bmr": -0.01, "sweep_mr": [["LRU", 48.51], ["1kiB", 48.51], ["4kiB", 48.51], ["16kiB", 48.51], ["64kiB", 48.51], ["256kiB", 48.51], ["1MiB", 48.5]], "sweep_bmr": [["LRU", 63.44], ["1kiB", 63.43], ["4kiB", 63.43], ["16kiB", 63.43], ["64kiB", 63.43], ["256kiB", 63.43], ["1MiB", 63.43]]}}}, "tncntBlk": {"global": {"ohw_rate": 0.10166, "zipf_alpha": 1.2389, "mean_size": 12262.8}, "bins": [{"bin": 9, "label": "512B", "q": 9.949, "byte_share": 0.236, "r": 0.0005, "rho": 3.76, "a": 0.5622, "mean_size": 512.0}, {"bin": 10, "label": "1KiB", "q": 0.733, "byte_share": 0.042, "r": 0.0982, "rho": 20.64, "a": 1.0913, "mean_size": 1226.6}, {"bin": 11, "label": "2KiB", "q": 0.602, "byte_share": 0.077, "r": 0.2767, "rho": 24.8, "a": 1.413, "mean_size": 2778.9}, {"bin": 12, "label": "4KiB", "q": 42.312, "byte_share": 8.064, "r": 0.1475, "rho": 41.09, "a": 1.4457, "mean_size": 4116.8}, {"bin": 13, "label": "8KiB", "q": 15.299, "byte_share": 6.614, "r": 0.1958, "rho": 27.95, "a": 1.3461, "mean_size": 9338.1}, {"bin": 14, "label": "16KiB", "q": 11.213, "byte_share": 10.891, "r": 0.2298, "rho": 35.42, "a": 1.476, "mean_size": 20980.7}, {"bin": 15, "label": "32KiB", "q": 13.907, "byte_share": 24.924, "r": 0.2476, "rho": 42.68, "a": 1.5621, "mean_size": 38714.1}, {"bin": 16, "label": "64KiB", "q": 3.151, "byte_share": 12.178, "r": 0.2605, "rho": 38.23, "a": 1.4979, "mean_size": 83476.7}, {"bin": 17, "label": "128KiB", "q": 1.471, "byte_share": 11.696, "r": 0.2613, "rho": 41.29, "a": 1.5195, "mean_size": 171704.2}, {"bin": 18, "label": "256KiB", "q": 0.993, "byte_share": 16.309, "r": 0.206, "rho": 56.04, "a": 1.6208, "mean_size": 354922.9}, {"bin": 19, "label": "512KiB", "q": 0.37, "byte_share": 8.971, "r": 0.1953, "rho": 41.88, "a": 1.5412, "mean_size": 524288.0}], "perf": {"10": {"lru_mr": 24.4, "lru_bmr": 21.01, "best_delta_mr": -0.49, "best_delta_bmr": 4.6, "sweep_mr": [["LRU", 24.4], ["1kiB", 32.39], ["4kiB", 31.83], ["16kiB", 23.91], ["64kiB", 27.44], ["256kiB", 30.35], ["1MiB", 31.72]], "sweep_bmr": [["LRU", 21.01], ["1kiB", 30.83], ["4kiB", 30.5], ["16kiB", 25.61], ["64kiB", 27.32], ["256kiB", 28.75], ["1MiB", 29.35]]}, "30": {"lru_mr": 11.18, "lru_bmr": 8.35, "best_delta_mr": -2.62, "best_delta_bmr": -0.53, "sweep_mr": [["LRU", 11.18], ["1kiB", 14.1], ["4kiB", 13.67], ["16kiB", 8.56], ["64kiB", 10.13], ["256kiB", 12.35], ["1MiB", 14.11]], "sweep_bmr": [["LRU", 8.35], ["1kiB", 11.75], ["4kiB", 11.49], ["16kiB", 7.82], ["64kiB", 8.59], ["256kiB", 10.15], ["1MiB", 11.51]]}, "50": {"lru_mr": 7.41, "lru_bmr": 4.79, "best_delta_mr": -1.04, "best_delta_bmr": -0.04, "sweep_mr": [["LRU", 7.41], ["1kiB", 8.73], ["4kiB", 8.49], ["16kiB", 6.37], ["64kiB", 6.53], ["256kiB", 7.61], ["1MiB", 8.8]], "sweep_bmr": [["LRU", 4.79], ["1kiB", 6.34], ["4kiB", 6.46], ["16kiB", 4.8], ["64kiB", 4.75], ["256kiB", 5.49], ["1MiB", 6.35]]}}}, "cldphyBlk": {"global": {"ohw_rate": 0.540649, "zipf_alpha": 0.4734, "mean_size": 5567.6}, "bins": [{"bin": 9, "label": "512B", "q": 0.348, "byte_share": 0.034, "r": 0.8635, "rho": 2.91, "a": 0.2335, "mean_size": 512.0}, {"bin": 10, "label": "1KiB", "q": 33.834, "byte_share": 9.111, "r": 0.5645, "rho": 2.01, "a": 0.2605, "mean_size": 1430.2}, {"bin": 11, "label": "2KiB", "q": 20.967, "byte_share": 9.813, "r": 0.5051, "rho": 2.01, "a": 0.257, "mean_size": 2485.7}, {"bin": 12, "label": "4KiB", "q": 43.501, "byte_share": 34.289, "r": 0.5289, "rho": 3.83, "a": 0.6397, "mean_size": 4186.4}, {"bin": 13, "label": "8KiB", "q": 0.613, "byte_share": 1.093, "r": 0.5099, "rho": 3.02, "a": 0.4894, "mean_size": 9479.3}, {"bin": 14, "label": "16KiB", "q": 0.198, "byte_share": 0.645, "r": 0.4875, "rho": 4.43, "a": 0.6232, "mean_size": 17332.6}, {"bin": 15, "label": "32KiB", "q": 0.078, "byte_share": 0.631, "r": 0.5529, "rho": 4.32, "a": 0.6669, "mean_size": 42764.5}, {"bin": 16, "label": "64KiB", "q": 0.07, "byte_share": 1.097, "r": 0.8008, "rho": 7.31, "a": 0.6076, "mean_size": 82852.6}, {"bin": 17, "label": "128KiB", "q": 0.068, "byte_share": 2.31, "r": 0.7531, "rho": 10.02, "a": 0.7547, "mean_size": 179533.1}, {"bin": 18, "label": "256KiB", "q": 0.163, "byte_share": 10.817, "r": 0.7286, "rho": 22.32, "a": 0.8254, "mean_size": 351850.5}, {"bin": 19, "label": "512KiB", "q": 0.023, "byte_share": 3.245, "r": 0.9331, "rho": 2.47, "a": 0.168, "mean_size": 751472.8}, {"bin": 20, "label": "1MiB", "q": 0.136, "byte_share": 26.914, "r": 0.9484, "rho": 2.15, "a": 0.1229, "mean_size": 1048622.0}], "perf": {"10": {"lru_mr": 82.92, "lru_bmr": 75.6, "best_delta_mr": -3.95, "best_delta_bmr": -2.13, "sweep_mr": [["LRU", 82.92], ["1kiB", 80.63], ["4kiB", 81.87], ["16kiB", 80.88], ["64kiB", 80.09], ["256kiB", 78.97], ["1MiB", 79.47]], "sweep_bmr": [["LRU", 75.6], ["1kiB", 74.22], ["4kiB", 74.4], ["16kiB", 74.25], ["64kiB", 74.05], ["256kiB", 73.47], ["1MiB", 73.63]]}, "30": {"lru_mr": 79.04, "lru_bmr": 72.97, "best_delta_mr": -13.56, "best_delta_bmr": -6.74, "sweep_mr": [["LRU", 79.04], ["1kiB", 72.97], ["4kiB", 76.88], ["16kiB", 72.79], ["64kiB", 71.27], ["256kiB", 65.48], ["1MiB", 66.83]], "sweep_bmr": [["LRU", 72.97], ["1kiB", 69.5], ["4kiB", 70.34], ["16kiB", 69.44], ["64kiB", 68.73], ["256kiB", 66.23], ["1MiB", 66.76]]}, "50": {"lru_mr": 77.06, "lru_bmr": 71.8, "best_delta_mr": -18.01, "best_delta_bmr": -9.41, "sweep_mr": [["LRU", 77.06], ["1kiB", 66.23], ["4kiB", 72.43], ["16kiB", 64.75], ["64kiB", 62.48], ["256kiB", 59.05], ["1MiB", 59.83]], "sweep_bmr": [["LRU", 71.8], ["1kiB", 65.46], ["4kiB", 66.97], ["16kiB", 64.88], ["64kiB", 63.82], ["256kiB", 62.39], ["1MiB", 62.62]]}}}, "mrsBlk": {"global": {"ohw_rate": 0.839321, "zipf_alpha": 0.5904, "mean_size": 52289.6}, "bins": [{"bin": 9, "label": "512B", "q": 0.138, "byte_share": 0.002, "r": 0.9691, "rho": 3.67, "a": 0.1378, "mean_size": 512.0}, {"bin": 10, "label": "1KiB", "q": 0.835, "byte_share": 0.029, "r": 0.9272, "rho": 4.9, "a": 0.3152, "mean_size": 1234.3}, {"bin": 11, "label": "2KiB", "q": 0.713, "byte_share": 0.052, "r": 0.9572, "rho": 5.21, "a": 0.2246, "mean_size": 2644.2}, {"bin": 12, "label": "4KiB", "q": 43.681, "byte_share": 5.271, "r": 0.5022, "rho": 25.72, "a": 1.2342, "mean_size": 4332.4}, {"bin": 13, "label": "8KiB", "q": 1.958, "byte_share": 0.554, "r": 0.802, "rho": 4.06, "a": 0.4417, "mean_size": 10161.8}, {"bin": 14, "label": "16KiB", "q": 1.115, "byte_share": 0.726, "r": 0.9088, "rho": 4.46, "a": 0.3123, "mean_size": 23370.8}, {"bin": 15, "label": "32KiB", "q": 1.636, "byte_share": 2.179, "r": 0.8111, "rho": 3.36, "a": 0.4149, "mean_size": 47813.5}, {"bin": 16, "label": "64KiB", "q": 49.919, "byte_share": 91.127, "r": 0.8816, "rho": 10.71, "a": 0.3993, "mean_size": 65536.5}, {"bin": 17, "label": "128KiB", "q": 0.002, "byte_share": 0.012, "r": 0.4167, "rho": 6.29, "a": 1.0274, "mean_size": 201514.7}, {"bin": 18, "label": "256KiB", "q": 0.002, "byte_share": 0.017, "r": 0.2105, "rho": 4.6, "a": 0.949, "mean_size": 368424.4}, {"bin": 19, "label": "512KiB", "q": 0.002, "byte_share": 0.031, "r": 0.35, "rho": 3.08, "a": 0.6501, "mean_size": 524288.0}], "perf": {"10": {"lru_mr": 37.65, "lru_bmr": 52.33, "best_delta_mr": -2.43, "best_delta_bmr": 0.83, "sweep_mr": [["LRU", 37.65], ["1kiB", 38.02], ["4kiB", 37.94], ["16kiB", 35.22], ["64kiB", 35.57], ["256kiB", 38.01], ["1MiB", 38.0]], "sweep_bmr": [["LRU", 52.33], ["1kiB", 55.54], ["4kiB", 55.48], ["16kiB", 53.16], ["64kiB", 53.33], ["256kiB", 55.57], ["1MiB", 55.56]]}, "30": {"lru_mr": 34.77, "lru_bmr": 49.46, "best_delta_mr": -1.41, "best_delta_bmr": 0.16, "sweep_mr": [["LRU", 34.77], ["1kiB", 34.85], ["4kiB", 34.7], ["16kiB", 33.36], ["64kiB", 33.47], ["256kiB", 34.88], ["1MiB", 34.83]], "sweep_bmr": [["LRU", 49.46], ["1kiB", 51.5], ["4kiB", 51.27], ["16kiB", 49.62], ["64kiB", 49.66], ["256kiB", 51.58], ["1MiB", 51.46]]}, "50": {"lru_mr": 31.8, "lru_bmr": 46.52, "best_delta_mr": -0.18, "best_delta_bmr": 0.42, "sweep_mr": [["LRU", 31.8], ["1kiB", 31.75], ["4kiB", 31.74], ["16kiB", 31.72], ["64kiB", 31.62], ["256kiB", 31.73], ["1MiB", 31.74]], "sweep_bmr": [["LRU", 46.52], ["1kiB", 47.09], ["4kiB", 47.07], ["16kiB", 47.15], ["64kiB", 46.94], ["256kiB", 47.06], ["1MiB", 47.08]]}}}};
+
+const TRACES = ['metaKV','twiKV','metaCDN','tncntCDN','wikiCDN','metaBlk','tncntBlk','cldphyBlk','mrsBlk'];
+const TRACE_LABELS = {
+  metaKV: 'Meta KV', twiKV: 'Twitter KV',
+  metaCDN: 'Meta CDN', tncntCDN: 'Tencent CDN', wikiCDN: 'Wikipedia CDN',
+  metaBlk: 'Meta Block', tncntBlk: 'Tencent Block', cldphyBlk: 'CloudPhysics Block', mrsBlk: 'MSR Block'
+};
+const TRACE_TYPE = {
+  metaKV:'kv', twiKV:'kv', metaCDN:'cdn', tncntCDN:'cdn', wikiCDN:'cdn',
+  metaBlk:'blk', tncntBlk:'blk', cldphyBlk:'blk', mrsBlk:'blk'
+};
+const TYPE_CLASS = {kv:'type-kv', cdn:'type-cdn', blk:'type-blk'};
+
+const chartInstances = {};
+
+function deltaClass(v) {
+  if (v < -0.5) return 'good';
+  if (v > 0.3) return 'bad';
+  return 'neutral';
+}
+function fmt1(v) { return v.toFixed(2); }
+function fmtDelta(v) { return (v >= 0 ? '+' : '') + v.toFixed(2); }
+
+// Build overview tab
+function buildOverview() {
+  const div = document.createElement('div');
+  div.className = 'panel active';
+  div.id = 'panel-overview';
+
+  let html = '<h2>全トレース サマリー</h2>';
+  html += '<div class="overview-grid">';
+  
+  for (const tc of TRACES) {
+    const d = DATA[tc];
+    const g = d.global;
+    const p10 = d.perf['10'], p30 = d.perf['30'], p50 = d.perf['50'];
+    const type = TRACE_TYPE[tc];
+    
+    // Classify OHW pattern
+    const bins = d.bins;
+    const largeBins = bins.filter(b => b.mean_size > 100000);
+    const smallBins = bins.filter(b => b.mean_size < 10000 && b.mean_size > 0);
+    const avgLargeOhw = largeBins.length ? largeBins.reduce((s,b)=>s+b.r,0)/largeBins.length : null;
+    const avgSmallOhw = smallBins.length ? smallBins.reduce((s,b)=>s+b.r,0)/smallBins.length : null;
+    let ohwPattern = '均一';
+    if (avgLargeOhw !== null && avgSmallOhw !== null) {
+      if (avgLargeOhw > avgSmallOhw + 0.15) ohwPattern = '大サイズ↑';
+      else if (avgLargeOhw < avgSmallOhw - 0.15) ohwPattern = '大サイズ↓';
+    }
+    
+    const mr10c = deltaClass(p10.best_delta_mr);
+    const bmr10c = deltaClass(p10.best_delta_bmr);
+    
+    html += `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <strong style="font-size:1rem">${TRACE_LABELS[tc]}</strong>
+        <span class="trace-type ${TYPE_CLASS[type]}">${type.toUpperCase()}</span>
+      </div>
+      <div class="stat-row">
+        <div class="stat"><div class="stat-label">OHW率</div><div class="stat-val val-blue">${(g.ohw_rate*100).toFixed(1)}%</div></div>
+        <div class="stat"><div class="stat-label">Zipf α</div><div class="stat-val val-blue">${g.zipf_alpha.toFixed(3)}</div></div>
+        <div class="stat"><div class="stat-label">OHW傾向</div><div class="stat-val" style="font-size:1rem">${ohwPattern}</div></div>
+      </div>
+      <table class="perf-table">
+        <tr><th>Cache%</th><th>LRU MR</th><th>ΔMR(best)</th><th>LRU BMR</th><th>ΔBMR(best)</th></tr>
+        <tr>
+          <td>10%</td><td>${fmt1(p10.lru_mr)}%</td>
+          <td class="${deltaClass(p10.best_delta_mr)}">${fmtDelta(p10.best_delta_mr)}pt</td>
+          <td>${fmt1(p10.lru_bmr)}%</td>
+          <td class="${deltaClass(p10.best_delta_bmr)}">${fmtDelta(p10.best_delta_bmr)}pt</td>
+        </tr>
+        <tr>
+          <td>30%</td><td>${fmt1(p30.lru_mr)}%</td>
+          <td class="${deltaClass(p30.best_delta_mr)}">${fmtDelta(p30.best_delta_mr)}pt</td>
+          <td>${fmt1(p30.lru_bmr)}%</td>
+          <td class="${deltaClass(p30.best_delta_bmr)}">${fmtDelta(p30.best_delta_bmr)}pt</td>
+        </tr>
+        <tr>
+          <td>50%</td><td>${fmt1(p50.lru_mr)}%</td>
+          <td class="${deltaClass(p50.best_delta_mr)}">${fmtDelta(p50.best_delta_mr)}pt</td>
+          <td>${fmt1(p50.lru_bmr)}%</td>
+          <td class="${deltaClass(p50.best_delta_bmr)}">${fmtDelta(p50.best_delta_bmr)}pt</td>
+        </tr>
+      </table>
+    </div>`;
+  }
+  html += '</div>';
+
+  // Overview chart: delta MR and BMR bar chart
+  html += `<div class="grid2" style="margin-top:20px">
+    <div class="card">
+      <h3>MR改善量 (ΔMR = best - LRU, 負が改善)</h3>
+      <div class="chart-wrap-tall"><canvas id="ov-mr-chart"></canvas></div>
+      <div class="legend-row">
+        <div class="legend-item"><div class="legend-line" style="background:#60a5fa"></div>10%キャッシュ</div>
+        <div class="legend-item"><div class="legend-line" style="background:#34d399"></div>30%キャッシュ</div>
+        <div class="legend-item"><div class="legend-line" style="background:#fbbf24"></div>50%キャッシュ</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>BMR改善量 (ΔBMR = best - LRU, 負が改善)</h3>
+      <div class="chart-wrap-tall"><canvas id="ov-bmr-chart"></canvas></div>
+      <div class="legend-row">
+        <div class="legend-item"><div class="legend-line" style="background:#60a5fa"></div>10%キャッシュ</div>
+        <div class="legend-item"><div class="legend-line" style="background:#34d399"></div>30%キャッシュ</div>
+        <div class="legend-item"><div class="legend-line" style="background:#fbbf24"></div>50%キャッシュ</div>
+      </div>
+    </div>
+  </div>`;
+
+  div.innerHTML = html;
+  return div;
+}
+
+function buildTracePanel(tc) {
+  const d = DATA[tc];
+  const g = d.global;
+  const bins = d.bins;
+  const labels = bins.map(b => b.label);
+  
+  const div = document.createElement('div');
+  div.className = 'panel';
+  div.id = `panel-${tc}`;
+  
+  const type = TRACE_TYPE[tc];
+  
+  let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <h2 style="margin:0">${TRACE_LABELS[tc]}</h2>
+    <span class="trace-type ${TYPE_CLASS[type]}">${type.toUpperCase()}</span>
+  </div>`;
+  
+  // Global stats
+  html += `<div class="stat-row">
+    <div class="stat"><div class="stat-label">グローバルOHW率</div><div class="stat-val val-blue">${(g.ohw_rate*100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="stat-label">Zipf α</div><div class="stat-val val-blue">${g.zipf_alpha.toFixed(3)}</div></div>
+    <div class="stat"><div class="stat-label">平均オブジェクトサイズ</div><div class="stat-val val-blue">${fmtSize(g.mean_size)}</div></div>
+  </div>`;
+  
+  // Distribution charts
+  html += `<div class="grid2">
+    <div class="card">
+      <h3>リクエスト量分布 (q%) & バイト量分布</h3>
+      <div class="chart-wrap-tall"><canvas id="${tc}-dist"></canvas></div>
+      <div class="legend-row">
+        <div class="legend-item"><div class="legend-dot" style="background:#60a5fa"></div>リクエスト割合(q%)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#fb923c"></div>バイト量割合</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>OHW率 (r) & 平均再利用回数 (ρ) by サイズ</h3>
+      <div class="chart-wrap-tall"><canvas id="${tc}-ohw"></canvas></div>
+      <div class="legend-row">
+        <div class="legend-item"><div class="legend-line" style="background:#f87171"></div>OHW率(r)</div>
+        <div class="legend-item"><div class="legend-line" style="background:#a78bfa"></div>log₂(ρ)</div>
+      </div>
+    </div>
+  </div>`;
+  
+  // Performance sweep charts
+  html += `<div class="grid3" style="margin-top:16px">`;
+  for (const pct of ['10','30','50']) {
+    const p = d.perf[pct];
+    html += `<div class="card">
+      <h3>${pct}%キャッシュ: 閾値スイープ</h3>
+      <div class="chart-wrap"><canvas id="${tc}-sweep-${pct}"></canvas></div>
+      <div style="margin-top:8px;font-size:0.78rem;color:var(--muted)">
+        LRU MR: <strong style="color:var(--text)">${fmt1(p.lru_mr)}%</strong>
+        LRU BMR: <strong style="color:var(--text)">${fmt1(p.lru_bmr)}%</strong>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+  
+  // Insight
+  const mr10 = d.perf['10'].best_delta_mr;
+  const bmr10 = d.perf['10'].best_delta_bmr;
+  const mr30 = d.perf['30'].best_delta_mr;
+  const bmr30 = d.perf['30'].best_delta_bmr;
+  const bmr50 = d.perf['50'].best_delta_bmr;
+  let insightClass = 'blue';
+  let insightText = '';
+  
+  if (mr10 < -1 && bmr10 < 0) {
+    insightClass = 'green';
+    insightText = `MR・BMRともに改善。10%キャッシュでΔMR=${fmtDelta(mr10)}pt、ΔBMR=${fmtDelta(bmr10)}pt。`;
+  } else if (mr10 < -1 && bmr10 > 0.5) {
+    insightClass = 'yellow';
+    insightText = `MR改善（ΔMR=${fmtDelta(mr10)}pt）だがBMRは悪化（ΔBMR=${fmtDelta(bmr10)}pt）。`;
+  } else if (Math.abs(mr10) < 0.3 && Math.abs(bmr10) < 0.3) {
+    insightClass = 'blue';
+    insightText = `RegionSplitの効果はほぼ中立。MR変化=${fmtDelta(mr10)}pt、BMR変化=${fmtDelta(bmr10)}pt。`;
+  } else if (bmr50 < -2) {
+    insightClass = 'green';
+    insightText = `50%キャッシュでBMR大幅改善（ΔBMR=${fmtDelta(bmr50)}pt）。キャッシュサイズ増加で効果が顕在化。`;
+  } else {
+    insightClass = 'blue';
+    insightText = `MR: ${fmtDelta(mr10)}→${fmtDelta(mr30)}pt (10→30%). BMR: ${fmtDelta(bmr10)}→${fmtDelta(bmr30)}pt (10→30%).`;
+  }
+  
+  html += `<div class="insight ${insightClass}" style="margin-top:16px">📊 ${insightText}</div>`;
+  
+  div.innerHTML = html;
+  return div;
+}
+
+function fmtSize(b) {
+  if (b >= 2**30) return (b/2**30).toFixed(1)+'GiB';
+  if (b >= 2**20) return (b/2**20).toFixed(1)+'MiB';
+  if (b >= 2**10) return (b/2**10).toFixed(1)+'KiB';
+  return b.toFixed(0)+'B';
+}
+
+function initCharts() {
+  const defaults = {
+    color: '#8892a4',
+    borderColor: '#2e3350',
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#8892a4', font: { size: 10 } }, grid: { color: '#1e2338' } },
+      y: { ticks: { color: '#8892a4', font: { size: 10 } }, grid: { color: '#1e2338' } }
+    }
+  };
+  
+  // Overview MR chart
+  const ovMrCtx = document.getElementById('ov-mr-chart');
+  if (ovMrCtx) {
+    new Chart(ovMrCtx, {
+      type: 'bar',
+      data: {
+        labels: TRACES.map(t => TRACE_LABELS[t].replace(' Block','').replace(' CDN','').replace(' KV','')),
+        datasets: [
+          { label: '10%', data: TRACES.map(t=>DATA[t].perf['10'].best_delta_mr), backgroundColor: '#3b82f680', borderColor: '#60a5fa', borderWidth: 1 },
+          { label: '30%', data: TRACES.map(t=>DATA[t].perf['30'].best_delta_mr), backgroundColor: '#10b98180', borderColor: '#34d399', borderWidth: 1 },
+          { label: '50%', data: TRACES.map(t=>DATA[t].perf['50'].best_delta_mr), backgroundColor: '#f59e0b80', borderColor: '#fbbf24', borderWidth: 1 },
+        ]
+      },
+      options: { ...defaults, scales: { ...defaults.scales, y: { ...defaults.scales.y, title: { display: true, text: 'Δ MR (pt)', color: '#8892a4' } } } }
+    });
+  }
+  
+  const ovBmrCtx = document.getElementById('ov-bmr-chart');
+  if (ovBmrCtx) {
+    new Chart(ovBmrCtx, {
+      type: 'bar',
+      data: {
+        labels: TRACES.map(t => TRACE_LABELS[t].replace(' Block','').replace(' CDN','').replace(' KV','')),
+        datasets: [
+          { label: '10%', data: TRACES.map(t=>DATA[t].perf['10'].best_delta_bmr), backgroundColor: '#3b82f680', borderColor: '#60a5fa', borderWidth: 1 },
+          { label: '30%', data: TRACES.map(t=>DATA[t].perf['30'].best_delta_bmr), backgroundColor: '#10b98180', borderColor: '#34d399', borderWidth: 1 },
+          { label: '50%', data: TRACES.map(t=>DATA[t].perf['50'].best_delta_bmr), backgroundColor: '#f59e0b80', borderColor: '#fbbf24', borderWidth: 1 },
+        ]
+      },
+      options: { ...defaults, scales: { ...defaults.scales, y: { ...defaults.scales.y, title: { display: true, text: 'Δ BMR (pt)', color: '#8892a4' } } } }
+    });
+  }
+  
+  // Per-trace charts
+  for (const tc of TRACES) {
+    const d = DATA[tc];
+    const bins = d.bins;
+    const labels = bins.map(b => b.label);
+    
+    // Distribution chart
+    const distCtx = document.getElementById(`${tc}-dist`);
+    if (distCtx) {
+      new Chart(distCtx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label: 'リクエスト割合(q%)', data: bins.map(b=>b.q), backgroundColor: '#3b82f660', borderColor: '#60a5fa', borderWidth: 1 },
+            { label: 'バイト量割合', data: bins.map(b=>b.byte_share), backgroundColor: '#f97316' + '60', borderColor: '#fb923c', borderWidth: 1 },
+          ]
+        },
+        options: { ...defaults, scales: { ...defaults.scales, y: { ...defaults.scales.y, title: { display: true, text: '割合 (%)', color: '#8892a4' } } } }
+      });
+    }
+    
+    // OHW + rho chart
+    const ohwCtx = document.getElementById(`${tc}-ohw`);
+    if (ohwCtx) {
+      new Chart(ohwCtx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label: 'OHW率(r)', data: bins.map(b=>b.r), backgroundColor: '#ef444440', borderColor: '#f87171', borderWidth: 1, yAxisID: 'y' },
+            { label: 'log₂(ρ)', data: bins.map(b=>b.rho>0?Math.log2(b.rho):0), type: 'line', borderColor: '#a78bfa', borderWidth: 2, pointRadius: 3, fill: false, tension: 0.3, yAxisID: 'y2' },
+          ]
+        },
+        options: {
+          ...defaults,
+          scales: {
+            x: defaults.scales.x,
+            y: { ...defaults.scales.y, min: 0, max: 1, title: { display: true, text: 'OHW率', color: '#f87171', font:{size:10} } },
+            y2: { position: 'right', min: 0, ticks: { color: '#a78bfa', font:{size:10} }, grid: { display: false }, title: { display: true, text: 'log₂(ρ)', color: '#a78bfa', font:{size:10} } }
+          }
+        }
+      });
+    }
+    
+    // Sweep charts
+    for (const pct of ['10','30','50']) {
+      const sweepCtx = document.getElementById(`${tc}-sweep-${pct}`);
+      if (!sweepCtx) continue;
+      const p = d.perf[pct];
+      const mrData = p.sweep_mr;
+      const bmrData = p.sweep_bmr;
+      const lru_mr = mrData.find(([l])=>l==='LRU')?.[2];
+      const lru_bmr = bmrData.find(([l])=>l==='LRU')?.[2];
+      
+      // Only single-threshold sweep (exclude LRU, show threshold values)
+      const thresholds = ['1kiB','4kiB','16kiB','64kiB','256kiB','1MiB','4MiB','16MiB','64MiB'];
+      const mrByThr = Object.fromEntries(mrData.map(([l,t,v])=>[t,v]));
+      const bmrByThr = Object.fromEntries(bmrData.map(([l,t,v])=>[t,v]));
+      const sweepLabels = thresholds.filter(t => mrByThr[t] !== undefined);
+      
+      new Chart(sweepCtx, {
+        type: 'line',
+        data: {
+          labels: sweepLabels,
+          datasets: [
+            {
+              label: 'MR', data: sweepLabels.map(t=>mrByThr[t]),
+              borderColor: '#60a5fa', borderWidth: 2, pointRadius: 3, tension: 0.2, fill: false
+            },
+            {
+              label: 'LRU MR', data: sweepLabels.map(()=>lru_mr),
+              borderColor: '#60a5fa', borderWidth: 1, borderDash: [4,4], pointRadius: 0, fill: false
+            },
+            {
+              label: 'BMR', data: sweepLabels.map(t=>bmrByThr[t]),
+              borderColor: '#fb923c', borderWidth: 2, pointRadius: 3, tension: 0.2, fill: false
+            },
+            {
+              label: 'LRU BMR', data: sweepLabels.map(()=>lru_bmr),
+              borderColor: '#fb923c', borderWidth: 1, borderDash: [4,4], pointRadius: 0, fill: false
+            },
+          ]
+        },
+        options: {
+          ...defaults,
+          plugins: {
+            legend: { display: true, position: 'bottom', labels: { color: '#8892a4', font:{size:9}, boxWidth: 12, padding: 8 } }
+          },
+          scales: { ...defaults.scales, y: { ...defaults.scales.y, title: { display: true, text: '(%)', color: '#8892a4', font:{size:10} } } }
+        }
+      });
+    }
+  }
+}
+
+// Build DOM
+const tabBar = document.getElementById('tabBar');
+const panelsDiv = document.getElementById('panels');
+
+// Overview tab
+const ovTab = document.createElement('div');
+ovTab.className = 'tab active';
+ovTab.textContent = '全体サマリー';
+ovTab.dataset.panel = 'overview';
+tabBar.appendChild(ovTab);
+panelsDiv.appendChild(buildOverview());
+
+// Per-trace tabs
+for (const tc of TRACES) {
+  const tab = document.createElement('div');
+  tab.className = 'tab';
+  tab.textContent = TRACE_LABELS[tc];
+  tab.dataset.panel = tc;
+  tabBar.appendChild(tab);
+  panelsDiv.appendChild(buildTracePanel(tc));
+}
+
+// Tab switching
+tabBar.addEventListener('click', e => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  tab.classList.add('active');
+  const panel = document.getElementById(`panel-${tab.dataset.panel}`);
+  if (panel) panel.classList.add('active');
+});
+
+// Init charts after DOM
+requestAnimationFrame(() => setTimeout(initCharts, 50));
+</script>
+</body>
+</html>

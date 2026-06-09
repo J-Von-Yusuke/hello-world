@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>OHW分布分析 — 全トレース比較</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"></script>
+<style>
+:root {
+  --bg:#0f1117; --bg2:#181c28; --bg3:#1e2335; --border:#2a3050;
+  --text:#d4d8f0; --muted:#6b7399;
+  --blue:#4f8ef7; --orange:#f97316; --green:#22c55e;
+  --red:#ef4444; --yellow:#facc15; --purple:#a78bfa;
+  --vdip:#f97316;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}
+
+.header{padding:18px 24px 14px;border-bottom:1px solid var(--border);display:flex;align-items:flex-end;gap:24px}
+.header h1{font-size:18px;font-weight:700}
+.header .sub{color:var(--muted);font-size:12px;margin-top:3px}
+.legend-row{display:flex;gap:16px;align-items:center;margin-left:auto}
+.leg{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+.leg-dot{width:12px;height:12px;border-radius:2px}
+
+.layout{display:grid;grid-template-columns:200px 1fr;min-height:calc(100vh - 60px)}
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);padding:12px 10px;display:flex;flex-direction:column;gap:6px}
+.sidebar h2{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:4px 6px 8px}
+.trace-btn{
+  padding:8px 10px;border-radius:6px;border:1px solid var(--border);
+  background:var(--bg3);cursor:pointer;transition:all .12s;text-align:left;
+}
+.trace-btn:hover{border-color:var(--blue);background:#1a2038}
+.trace-btn.active{border-color:var(--blue);background:#1a2a44}
+.trace-btn .tname{font-size:12px;font-weight:600}
+.trace-btn .tmeta{font-size:10px;color:var(--muted);margin-top:2px}
+.badge{display:inline-block;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-right:3px}
+.badge-vdip{background:var(--vdip);color:#000}
+.badge-none{background:#2a3050;color:var(--muted)}
+
+.main{padding:20px 24px;display:flex;flex-direction:column;gap:20px}
+
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.card-header{padding:12px 16px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+.card-title{font-size:14px;font-weight:700}
+.card-sub{font-size:11px;color:var(--muted)}
+.vdip-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:10px;font-weight:700;padding:3px 8px;border-radius:12px;
+  border:1px solid var(--vdip);color:var(--vdip);background:rgba(249,115,22,.08);
+  margin-left:auto;
+}
+
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
+.chart-wrap canvas{width:100%!important}
+.chart-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
+
+.insight{
+  margin:0 16px 16px;padding:10px 14px;border-radius:7px;font-size:12px;line-height:1.6;
+  border-left:3px solid;
+}
+.insight-vdip{background:rgba(249,115,22,.07);border-color:var(--vdip)}
+.insight-none{background:rgba(107,115,153,.07);border-color:var(--border)}
+.insight strong{font-weight:700}
+.mono{font-family:monospace;font-size:11px}
+
+.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:16px}
+.stat{background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:10px 12px}
+.stat-val{font-size:18px;font-weight:700;color:var(--blue)}
+.stat-label{font-size:10px;color:var(--muted);margin-top:3px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>OHW分布分析 — 全トレース</h1>
+    <div class="sub">OHW個数分布・OHWバイト量分布・OHW率 の重ね合わせ (bin1〜28)</div>
+  </div>
+  <div class="legend-row">
+    <div class="leg"><div class="leg-dot" style="background:rgba(79,142,247,.8)"></div>OHW個数分布 (m_b%)</div>
+    <div class="leg"><div class="leg-dot" style="background:rgba(249,115,22,.8)"></div>OHWバイト量分布 (m_b×size%)</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--red);height:3px;border-radius:2px"></div>OHW率 r</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--vdip);width:3px;height:12px;border-radius:1px"></div>V字谷検出</div>
+  </div>
+</div>
+
+<div class="layout">
+<div class="sidebar">
+  <h2>トレース選択</h2>
+  <div id="traceList"></div>
+</div>
+<div class="main" id="mainArea"></div>
+</div>
+
+<script>
+const TRACES = {"cldphyBlk": {"bins": [{"bin": 9, "label": "512B", "size_lo": 512, "N_b": 74958, "m_b": 51324, "r": 0.8635, "rho": 2.912, "req_pct": 0.348, "ohw_req_pct": 0.773, "ohw_byte_pct": 0.052, "byte_pct": 0.034}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 7288433, "m_b": 2859327, "r": 0.5645, "rho": 2.008, "req_pct": 33.834, "ohw_req_pct": 43.055, "ohw_byte_pct": 8.097, "byte_pct": 9.111}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 4516599, "m_b": 1518942, "r": 0.5051, "rho": 2.014, "req_pct": 20.967, "ohw_req_pct": 22.872, "ohw_byte_pct": 7.476, "byte_pct": 9.813}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 9370931, "m_b": 2123402, "r": 0.5289, "rho": 3.832, "req_pct": 43.501, "ohw_req_pct": 31.973, "ohw_byte_pct": 17.601, "byte_pct": 34.289}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 131964, "m_b": 33784, "r": 0.5099, "rho": 3.023, "req_pct": 0.613, "ohw_req_pct": 0.509, "ohw_byte_pct": 0.634, "byte_pct": 1.093}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 42604, "m_b": 7534, "r": 0.4875, "rho": 4.428, "req_pct": 0.198, "ohw_req_pct": 0.113, "ohw_byte_pct": 0.259, "byte_pct": 0.645}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 16872, "m_b": 3757, "r": 0.5529, "rho": 4.317, "req_pct": 0.078, "ohw_req_pct": 0.057, "ohw_byte_pct": 0.318, "byte_pct": 0.631}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 15148, "m_b": 5374, "r": 0.8008, "rho": 7.31, "req_pct": 0.07, "ohw_req_pct": 0.081, "ohw_byte_pct": 0.882, "byte_pct": 1.097}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 14720, "m_b": 3435, "r": 0.7531, "rho": 10.022, "req_pct": 0.068, "ohw_req_pct": 0.052, "ohw_byte_pct": 1.221, "byte_pct": 2.31}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 35175, "m_b": 3777, "r": 0.7286, "rho": 22.316, "req_pct": 0.163, "ohw_req_pct": 0.057, "ohw_byte_pct": 2.631, "byte_pct": 10.817}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 4941, "m_b": 4197, "r": 0.9331, "rho": 2.472, "req_pct": 0.023, "ohw_req_pct": 0.063, "ohw_byte_pct": 6.245, "byte_pct": 3.245}, {"bin": 20, "label": "1MiB", "size_lo": 1048576, "N_b": 29365, "m_b": 26290, "r": 0.9484, "rho": 2.15, "req_pct": 0.136, "ohw_req_pct": 0.396, "ohw_byte_pct": 54.585, "byte_pct": 26.914}], "vdips": []}, "metaBlk": {"bins": [{"bin": 5, "label": "32B", "size_lo": 32, "N_b": 5030, "m_b": 734, "r": 0.4525, "rho": 4.838, "req_pct": 0.361, "ohw_req_pct": 0.178, "ohw_byte_pct": 0.0, "byte_pct": 0.0}, {"bin": 7, "label": "128B", "size_lo": 128, "N_b": 6428, "m_b": 3059, "r": 0.7256, "rho": 2.912, "req_pct": 0.461, "ohw_req_pct": 0.743, "ohw_byte_pct": 0.0, "byte_pct": 0.0}, {"bin": 8, "label": "256B", "size_lo": 256, "N_b": 3618, "m_b": 1630, "r": 0.7419, "rho": 3.506, "req_pct": 0.259, "ohw_req_pct": 0.396, "ohw_byte_pct": 0.0, "byte_pct": 0.0}, {"bin": 9, "label": "512B", "size_lo": 512, "N_b": 5813, "m_b": 1638, "r": 0.6634, "rho": 5.024, "req_pct": 0.417, "ohw_req_pct": 0.398, "ohw_byte_pct": 0.0, "byte_pct": 0.0}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 16145, "m_b": 2382, "r": 0.4438, "rho": 4.611, "req_pct": 1.157, "ohw_req_pct": 0.579, "ohw_byte_pct": 0.0, "byte_pct": 0.0}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 9462, "m_b": 2553, "r": 0.5586, "rho": 3.425, "req_pct": 0.678, "ohw_req_pct": 0.62, "ohw_byte_pct": 0.0, "byte_pct": 0.001}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 13308, "m_b": 3087, "r": 0.5478, "rho": 4.011, "req_pct": 0.954, "ohw_req_pct": 0.75, "ohw_byte_pct": 0.001, "byte_pct": 0.001}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 11908, "m_b": 2434, "r": 0.4938, "rho": 3.797, "req_pct": 0.854, "ohw_req_pct": 0.591, "ohw_byte_pct": 0.001, "byte_pct": 0.003}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 18103, "m_b": 4009, "r": 0.5783, "rho": 4.822, "req_pct": 1.298, "ohw_req_pct": 0.974, "ohw_byte_pct": 0.005, "byte_pct": 0.008}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 17432, "m_b": 4544, "r": 0.5856, "rho": 4.009, "req_pct": 1.25, "ohw_req_pct": 1.104, "ohw_byte_pct": 0.01, "byte_pct": 0.015}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 26545, "m_b": 6200, "r": 0.5689, "rho": 4.33, "req_pct": 1.903, "ohw_req_pct": 1.506, "ohw_byte_pct": 0.029, "byte_pct": 0.047}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 33844, "m_b": 4652, "r": 0.42, "rho": 4.544, "req_pct": 2.426, "ohw_req_pct": 1.13, "ohw_byte_pct": 0.044, "byte_pct": 0.118}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 55110, "m_b": 6103, "r": 0.3552, "rho": 4.423, "req_pct": 3.95, "ohw_req_pct": 1.483, "ohw_byte_pct": 0.113, "byte_pct": 0.383}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 117828, "m_b": 28897, "r": 0.5707, "rho": 4.091, "req_pct": 8.446, "ohw_req_pct": 7.02, "ohw_byte_pct": 1.192, "byte_pct": 1.816}, {"bin": 20, "label": "1MiB", "size_lo": 1048576, "N_b": 277603, "m_b": 88380, "r": 0.6661, "rho": 4.271, "req_pct": 19.899, "ohw_req_pct": 21.471, "ohw_byte_pct": 5.709, "byte_pct": 6.7}, {"bin": 21, "label": "2MiB", "size_lo": 2097152, "N_b": 219894, "m_b": 19875, "r": 0.3066, "rho": 4.45, "req_pct": 15.762, "ohw_req_pct": 4.828, "ohw_byte_pct": 2.559, "byte_pct": 10.576}, {"bin": 22, "label": "4MiB", "size_lo": 4194304, "N_b": 126101, "m_b": 41637, "r": 0.5582, "rho": 2.563, "req_pct": 9.039, "ohw_req_pct": 10.115, "ohw_byte_pct": 13.189, "byte_pct": 14.923}, {"bin": 23, "label": "8MiB", "size_lo": 8388608, "N_b": 430744, "m_b": 189794, "r": 0.703, "rho": 3.006, "req_pct": 30.876, "ohw_req_pct": 46.108, "ohw_byte_pct": 77.147, "byte_pct": 65.411}], "vdips": [10]}, "metaCDN": {"bins": [{"bin": 9, "label": "512B", "size_lo": 512, "N_b": 85472, "m_b": 21781, "r": 0.6239, "rho": 4.85, "req_pct": 1.097, "ohw_req_pct": 1.206, "ohw_byte_pct": 0.003, "byte_pct": 0.0}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 355249, "m_b": 73038, "r": 0.5988, "rho": 5.766, "req_pct": 4.558, "ohw_req_pct": 4.043, "ohw_byte_pct": 0.02, "byte_pct": 0.002}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 359682, "m_b": 90283, "r": 0.6308, "rho": 5.098, "req_pct": 4.615, "ohw_req_pct": 4.998, "ohw_byte_pct": 0.049, "byte_pct": 0.003}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 439204, "m_b": 160331, "r": 0.7152, "rho": 4.367, "req_pct": 5.635, "ohw_req_pct": 8.876, "ohw_byte_pct": 0.178, "byte_pct": 0.008}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 697791, "m_b": 275507, "r": 0.6866, "rho": 3.359, "req_pct": 8.953, "ohw_req_pct": 15.251, "ohw_byte_pct": 0.592, "byte_pct": 0.024}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 851079, "m_b": 320634, "r": 0.7033, "rho": 3.921, "req_pct": 10.92, "ohw_req_pct": 17.75, "ohw_byte_pct": 1.367, "byte_pct": 0.058}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 888375, "m_b": 290535, "r": 0.6844, "rho": 4.462, "req_pct": 11.399, "ohw_req_pct": 16.083, "ohw_byte_pct": 2.456, "byte_pct": 0.119}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 762100, "m_b": 204354, "r": 0.6195, "rho": 4.444, "req_pct": 9.779, "ohw_req_pct": 11.313, "ohw_byte_pct": 3.451, "byte_pct": 0.204}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 581581, "m_b": 126417, "r": 0.5634, "rho": 4.647, "req_pct": 7.462, "ohw_req_pct": 6.998, "ohw_byte_pct": 4.153, "byte_pct": 0.303}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 399348, "m_b": 77473, "r": 0.5804, "rho": 5.746, "req_pct": 5.124, "ohw_req_pct": 4.289, "ohw_byte_pct": 5.164, "byte_pct": 0.422}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 998666, "m_b": 90385, "r": 0.3906, "rho": 6.442, "req_pct": 12.814, "ohw_req_pct": 5.003, "ohw_byte_pct": 14.913, "byte_pct": 2.612}, {"bin": 20, "label": "1MiB", "size_lo": 1048576, "N_b": 270142, "m_b": 22747, "r": 0.4836, "rho": 10.184, "req_pct": 3.466, "ohw_req_pct": 1.259, "ohw_byte_pct": 6.141, "byte_pct": 1.156}, {"bin": 21, "label": "2MiB", "size_lo": 2097152, "N_b": 245879, "m_b": 15229, "r": 0.4358, "rho": 11.697, "req_pct": 3.155, "ohw_req_pct": 0.843, "ohw_byte_pct": 8.14, "byte_pct": 2.083}, {"bin": 22, "label": "4MiB", "size_lo": 4194304, "N_b": 179454, "m_b": 9455, "r": 0.4083, "rho": 12.405, "req_pct": 2.303, "ohw_req_pct": 0.523, "ohw_byte_pct": 10.011, "byte_pct": 3.012}, {"bin": 23, "label": "8MiB", "size_lo": 8388608, "N_b": 247814, "m_b": 9093, "r": 0.3735, "rho": 15.654, "req_pct": 3.18, "ohw_req_pct": 0.503, "ohw_byte_pct": 17.88, "byte_pct": 7.725}, {"bin": 24, "label": "16MiB", "size_lo": 16777216, "N_b": 78339, "m_b": 2027, "r": 0.3976, "rho": 24.849, "req_pct": 1.005, "ohw_req_pct": 0.112, "ohw_byte_pct": 7.932, "byte_pct": 4.86}, {"bin": 25, "label": "32MiB", "size_lo": 33554432, "N_b": 214226, "m_b": 1463, "r": 0.211, "rho": 38.882, "req_pct": 2.749, "ohw_req_pct": 0.081, "ohw_byte_pct": 13.426, "byte_pct": 31.164}, {"bin": 26, "label": "64MiB", "size_lo": 67108864, "N_b": 42835, "m_b": 88, "r": 0.1803, "rho": 106.868, "req_pct": 0.55, "ohw_req_pct": 0.005, "ohw_byte_pct": 1.466, "byte_pct": 11.312}, {"bin": 27, "label": "128MiB", "size_lo": 134217728, "N_b": 26336, "m_b": 36, "r": 0.1379, "rho": 116.889, "req_pct": 0.338, "ohw_req_pct": 0.002, "ohw_byte_pct": 1.208, "byte_pct": 14.015}, {"bin": 28, "label": "256MiB", "size_lo": 268435456, "N_b": 20031, "m_b": 22, "r": 0.163, "rho": 177.071, "req_pct": 0.257, "ohw_req_pct": 0.001, "ohw_byte_pct": 1.449, "byte_pct": 20.919}], "vdips": [19]}, "metaKV": {"bins": [{"bin": 3, "label": "8B", "size_lo": 8, "N_b": 56859476, "m_b": 895320, "r": 0.4563, "rho": 52.465, "req_pct": 42.489, "ohw_req_pct": 37.665, "ohw_byte_pct": 0.14, "byte_pct": 0.68}, {"bin": 4, "label": "16B", "size_lo": 16, "N_b": 9479636, "m_b": 159988, "r": 0.5266, "rho": 64.786, "req_pct": 7.084, "ohw_req_pct": 6.73, "ohw_byte_pct": 0.056, "byte_pct": 0.254}, {"bin": 5, "label": "32B", "size_lo": 32, "N_b": 21663757, "m_b": 429339, "r": 0.4625, "rho": 42.552, "req_pct": 16.188, "ohw_req_pct": 18.062, "ohw_byte_pct": 0.359, "byte_pct": 1.39}, {"bin": 6, "label": "64B", "size_lo": 64, "N_b": 18924064, "m_b": 318725, "r": 0.5287, "rho": 65.472, "req_pct": 14.141, "ohw_req_pct": 13.408, "ohw_byte_pct": 0.497, "byte_pct": 2.263}, {"bin": 7, "label": "128B", "size_lo": 128, "N_b": 7320738, "m_b": 147309, "r": 0.5604, "rho": 62.069, "req_pct": 5.47, "ohw_req_pct": 6.197, "ohw_byte_pct": 0.458, "byte_pct": 1.745}, {"bin": 8, "label": "256B", "size_lo": 256, "N_b": 5543619, "m_b": 122135, "r": 0.559, "rho": 56.259, "req_pct": 4.143, "ohw_req_pct": 5.138, "ohw_byte_pct": 0.773, "byte_pct": 2.689}, {"bin": 9, "label": "512B", "size_lo": 512, "N_b": 6828354, "m_b": 54606, "r": 0.5719, "rho": 165.715, "req_pct": 5.103, "ohw_req_pct": 2.297, "ohw_byte_pct": 0.643, "byte_pct": 6.167}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 3104809, "m_b": 29773, "r": 0.5465, "rho": 124.46, "req_pct": 2.32, "ohw_req_pct": 1.253, "ohw_byte_pct": 0.735, "byte_pct": 5.879}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 1260732, "m_b": 73434, "r": 0.6189, "rho": 26.251, "req_pct": 0.942, "ohw_req_pct": 3.089, "ohw_byte_pct": 3.808, "byte_pct": 5.014}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 918218, "m_b": 27354, "r": 0.7109, "rho": 80.099, "req_pct": 0.686, "ohw_req_pct": 1.151, "ohw_byte_pct": 2.504, "byte_pct": 6.446}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 1427311, "m_b": 12702, "r": 0.3751, "rho": 66.837, "req_pct": 1.067, "ohw_req_pct": 0.534, "ohw_byte_pct": 2.465, "byte_pct": 21.246}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 263970, "m_b": 83637, "r": 0.9499, "rho": 40.864, "req_pct": 0.197, "ohw_req_pct": 3.518, "ohw_byte_pct": 37.375, "byte_pct": 9.048}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 123043, "m_b": 15432, "r": 0.856, "rho": 41.437, "req_pct": 0.092, "ohw_req_pct": 0.649, "ohw_byte_pct": 10.081, "byte_pct": 6.165}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 47681, "m_b": 1796, "r": 0.5104, "rho": 26.631, "req_pct": 0.036, "ohw_req_pct": 0.076, "ohw_byte_pct": 2.823, "byte_pct": 5.747}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 26666, "m_b": 1530, "r": 0.5138, "rho": 17.359, "req_pct": 0.02, "ohw_req_pct": 0.064, "ohw_byte_pct": 4.824, "byte_pct": 6.448}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 30167, "m_b": 3991, "r": 0.5115, "rho": 6.869, "req_pct": 0.023, "ohw_req_pct": 0.168, "ohw_byte_pct": 32.462, "byte_pct": 18.82}], "vdips": [13]}, "msrBlk": {"bins": [{"bin": 9, "label": "512B", "size_lo": 512, "N_b": 6200, "m_b": 5551, "r": 0.9691, "rho": 3.667, "req_pct": 0.138, "ohw_req_pct": 0.473, "ohw_byte_pct": 0.004, "byte_pct": 0.002}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 37547, "m_b": 27119, "r": 0.9272, "rho": 4.898, "req_pct": 0.835, "ohw_req_pct": 2.312, "ohw_byte_pct": 0.052, "byte_pct": 0.029}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 32036, "m_b": 25982, "r": 0.9572, "rho": 5.206, "req_pct": 0.713, "ohw_req_pct": 2.215, "ohw_byte_pct": 0.107, "byte_pct": 0.052}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 1963917, "m_b": 74141, "r": 0.5022, "rho": 25.719, "req_pct": 43.681, "ohw_req_pct": 6.321, "ohw_byte_pct": 0.502, "byte_pct": 5.271}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 88011, "m_b": 43949, "r": 0.802, "rho": 4.06, "req_pct": 1.958, "ohw_req_pct": 3.747, "ohw_byte_pct": 0.698, "byte_pct": 0.554}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 50149, "m_b": 34650, "r": 0.9088, "rho": 4.455, "req_pct": 1.115, "ohw_req_pct": 2.954, "ohw_byte_pct": 1.266, "byte_pct": 0.726}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 73550, "m_b": 41286, "r": 0.8111, "rho": 3.356, "req_pct": 1.636, "ohw_req_pct": 3.52, "ohw_byte_pct": 3.086, "byte_pct": 2.179}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 2244396, "m_b": 920234, "r": 0.8816, "rho": 10.713, "req_pct": 49.919, "ohw_req_pct": 78.455, "ohw_byte_pct": 94.267, "byte_pct": 91.127}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 98, "m_b": 10, "r": 0.4167, "rho": 6.286, "req_pct": 0.002, "ohw_req_pct": 0.001, "ohw_byte_pct": 0.003, "byte_pct": 0.012}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 73, "m_b": 4, "r": 0.2105, "rho": 4.6, "req_pct": 0.002, "ohw_req_pct": 0.0, "ohw_byte_pct": 0.002, "byte_pct": 0.017}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 94, "m_b": 14, "r": 0.35, "rho": 3.077, "req_pct": 0.002, "ohw_req_pct": 0.001, "ohw_byte_pct": 0.011, "byte_pct": 0.031}], "vdips": [12]}, "tncntBlk": {"bins": [{"bin": 9, "label": "512B", "size_lo": 512, "N_b": 504539, "m_b": 62, "r": 0.0005, "rho": 3.762, "req_pct": 9.949, "ohw_req_pct": 0.214, "ohw_byte_pct": 0.004, "byte_pct": 0.236}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 37163, "m_b": 195, "r": 0.0982, "rho": 20.641, "req_pct": 0.733, "ohw_req_pct": 0.673, "ohw_byte_pct": 0.031, "byte_pct": 0.042}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 30541, "m_b": 464, "r": 0.2767, "rho": 24.796, "req_pct": 0.602, "ohw_req_pct": 1.6, "ohw_byte_pct": 0.165, "byte_pct": 0.077}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 2145661, "m_b": 8996, "r": 0.1475, "rho": 41.087, "req_pct": 42.312, "ohw_req_pct": 31.026, "ohw_byte_pct": 4.752, "byte_pct": 8.064}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 775852, "m_b": 6700, "r": 0.1958, "rho": 27.946, "req_pct": 15.299, "ohw_req_pct": 23.107, "ohw_byte_pct": 8.028, "byte_pct": 6.614}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 568613, "m_b": 4749, "r": 0.2298, "rho": 35.416, "req_pct": 11.213, "ohw_req_pct": 16.379, "ohw_byte_pct": 12.785, "byte_pct": 10.891}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 705230, "m_b": 5396, "r": 0.2476, "rho": 42.681, "req_pct": 13.907, "ohw_req_pct": 18.61, "ohw_byte_pct": 26.806, "byte_pct": 24.924}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 159804, "m_b": 1459, "r": 0.2605, "rho": 38.229, "req_pct": 3.151, "ohw_req_pct": 5.032, "ohw_byte_pct": 15.628, "byte_pct": 12.178}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 74619, "m_b": 634, "r": 0.2613, "rho": 41.286, "req_pct": 1.471, "ohw_req_pct": 2.187, "ohw_byte_pct": 13.969, "byte_pct": 11.696}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 50336, "m_b": 232, "r": 0.206, "rho": 56.045, "req_pct": 0.993, "ohw_req_pct": 0.8, "ohw_byte_pct": 10.566, "byte_pct": 16.309}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 18743, "m_b": 108, "r": 0.1953, "rho": 41.876, "req_pct": 0.37, "ohw_req_pct": 0.372, "ohw_byte_pct": 7.266, "byte_pct": 8.971}], "vdips": []}, "tncntCDN": {"bins": [{"bin": 9, "label": "512B", "size_lo": 512, "N_b": 274717, "m_b": 18944, "r": 0.5169, "rho": 14.448, "req_pct": 0.094, "ohw_req_pct": 0.065, "ohw_byte_pct": 0.002, "byte_pct": 0.003}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 1545037, "m_b": 164113, "r": 0.5269, "rho": 9.371, "req_pct": 0.529, "ohw_req_pct": 0.564, "ohw_byte_pct": 0.038, "byte_pct": 0.032}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 13002586, "m_b": 1633408, "r": 0.5363, "rho": 8.05, "req_pct": 4.45, "ohw_req_pct": 5.614, "ohw_byte_pct": 0.734, "byte_pct": 0.518}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 43126469, "m_b": 3665401, "r": 0.5286, "rho": 12.073, "req_pct": 14.76, "ohw_req_pct": 12.599, "ohw_byte_pct": 3.2, "byte_pct": 3.336}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 107782895, "m_b": 11761918, "r": 0.5655, "rho": 10.626, "req_pct": 36.887, "ohw_req_pct": 40.429, "ohw_byte_pct": 19.846, "byte_pct": 16.114}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 62415621, "m_b": 6145403, "r": 0.5508, "rho": 11.229, "req_pct": 21.361, "ohw_req_pct": 21.123, "ohw_byte_pct": 18.686, "byte_pct": 16.816}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 41250428, "m_b": 3499688, "r": 0.5315, "rho": 12.237, "req_pct": 14.117, "ohw_req_pct": 12.029, "ohw_byte_pct": 22.758, "byte_pct": 23.768}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 18115630, "m_b": 1763630, "r": 0.5419, "rho": 10.967, "req_pct": 6.2, "ohw_req_pct": 6.062, "ohw_byte_pct": 21.516, "byte_pct": 19.582}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 3383550, "m_b": 372879, "r": 0.5454, "rho": 9.686, "req_pct": 1.158, "ohw_req_pct": 1.282, "ohw_byte_pct": 8.784, "byte_pct": 7.062}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 786010, "m_b": 48358, "r": 0.5476, "rho": 18.468, "req_pct": 0.269, "ohw_req_pct": 0.166, "ohw_byte_pct": 2.28, "byte_pct": 3.284}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 159171, "m_b": 9413, "r": 0.5253, "rho": 17.606, "req_pct": 0.054, "ohw_req_pct": 0.032, "ohw_byte_pct": 0.936, "byte_pct": 1.402}, {"bin": 20, "label": "1MiB", "size_lo": 1048576, "N_b": 155639, "m_b": 2947, "r": 0.4295, "rho": 39.012, "req_pct": 0.053, "ohw_req_pct": 0.01, "ohw_byte_pct": 0.625, "byte_pct": 2.924}, {"bin": 21, "label": "2MiB", "size_lo": 2097152, "N_b": 99163, "m_b": 1021, "r": 0.3603, "rho": 54.132, "req_pct": 0.034, "ohw_req_pct": 0.004, "ohw_byte_pct": 0.42, "byte_pct": 3.615}, {"bin": 22, "label": "4MiB", "size_lo": 4194304, "N_b": 24843, "m_b": 249, "r": 0.3903, "rho": 63.224, "req_pct": 0.009, "ohw_req_pct": 0.001, "ohw_byte_pct": 0.175, "byte_pct": 1.545}], "vdips": []}, "twiKV": {"bins": [{"bin": 5, "label": "32B", "size_lo": 32, "N_b": 4229516, "m_b": 231, "r": 0.0001, "rho": 2.724, "req_pct": 51.236, "ohw_req_pct": 0.007, "ohw_byte_pct": 0.0, "byte_pct": 1.037}, {"bin": 7, "label": "128B", "size_lo": 128, "N_b": 3067688, "m_b": 2634606, "r": 0.9363, "rho": 2.415, "req_pct": 37.161, "ohw_req_pct": 78.524, "ohw_byte_pct": 3.277, "byte_pct": 2.793}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 12651, "m_b": 10211, "r": 0.9121, "rho": 2.48, "req_pct": 0.153, "ohw_req_pct": 0.304, "ohw_byte_pct": 0.143, "byte_pct": 0.129}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 148786, "m_b": 123724, "r": 0.9258, "rho": 2.526, "req_pct": 1.802, "ohw_req_pct": 3.688, "ohw_byte_pct": 2.816, "byte_pct": 2.478}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 262438, "m_b": 196889, "r": 0.8796, "rho": 2.433, "req_pct": 3.179, "ohw_req_pct": 5.868, "ohw_byte_pct": 8.576, "byte_pct": 8.365}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 209686, "m_b": 154798, "r": 0.8727, "rho": 2.43, "req_pct": 2.54, "ohw_req_pct": 4.614, "ohw_byte_pct": 13.907, "byte_pct": 13.787}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 168226, "m_b": 120036, "r": 0.8581, "rho": 2.427, "req_pct": 2.038, "ohw_req_pct": 3.578, "ohw_byte_pct": 21.681, "byte_pct": 22.237}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 119509, "m_b": 87639, "r": 0.8687, "rho": 2.407, "req_pct": 1.448, "ohw_req_pct": 2.612, "ohw_byte_pct": 30.261, "byte_pct": 30.199}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 31954, "m_b": 23401, "r": 0.8671, "rho": 2.384, "req_pct": 0.387, "ohw_req_pct": 0.697, "ohw_byte_pct": 15.096, "byte_pct": 15.086}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 4428, "m_b": 3536, "r": 0.9016, "rho": 2.311, "req_pct": 0.054, "ohw_req_pct": 0.105, "ohw_byte_pct": 4.243, "byte_pct": 3.889}], "vdips": []}, "wikiCDN": {"bins": [{"bin": 6, "label": "64B", "size_lo": 64, "N_b": 1716988, "m_b": 104, "r": 0.211, "rho": 4413.584, "req_pct": 0.644, "ohw_req_pct": 0.005, "ohw_byte_pct": 0.0, "byte_pct": 0.002}, {"bin": 7, "label": "128B", "size_lo": 128, "N_b": 868355, "m_b": 940, "r": 0.2658, "rho": 334.135, "req_pct": 0.326, "ohw_req_pct": 0.046, "ohw_byte_pct": 0.0, "byte_pct": 0.002}, {"bin": 8, "label": "256B", "size_lo": 256, "N_b": 22978796, "m_b": 5805, "r": 0.2332, "rho": 1203.404, "req_pct": 8.619, "ohw_req_pct": 0.282, "ohw_byte_pct": 0.001, "byte_pct": 0.079}, {"bin": 9, "label": "512B", "size_lo": 512, "N_b": 24639232, "m_b": 12860, "r": 0.2987, "rho": 815.713, "req_pct": 9.242, "ohw_req_pct": 0.625, "ohw_byte_pct": 0.002, "byte_pct": 0.168}, {"bin": 10, "label": "1KiB", "size_lo": 1024, "N_b": 17894631, "m_b": 43101, "r": 0.3683, "rho": 241.439, "req_pct": 6.712, "ohw_req_pct": 2.094, "ohw_byte_pct": 0.016, "byte_pct": 0.255}, {"bin": 11, "label": "2KiB", "size_lo": 2048, "N_b": 22376686, "m_b": 206339, "r": 0.4573, "rho": 90.551, "req_pct": 8.393, "ohw_req_pct": 10.024, "ohw_byte_pct": 0.15, "byte_pct": 0.633}, {"bin": 12, "label": "4KiB", "size_lo": 4096, "N_b": 41081626, "m_b": 390458, "r": 0.4543, "rho": 86.769, "req_pct": 15.409, "ohw_req_pct": 18.969, "ohw_byte_pct": 0.522, "byte_pct": 2.136}, {"bin": 13, "label": "8KiB", "size_lo": 8192, "N_b": 52836864, "m_b": 333034, "r": 0.3808, "rho": 96.937, "req_pct": 19.818, "ohw_req_pct": 16.179, "ohw_byte_pct": 0.914, "byte_pct": 5.64}, {"bin": 14, "label": "16KiB", "size_lo": 16384, "N_b": 43553613, "m_b": 300573, "r": 0.3452, "rho": 75.851, "req_pct": 16.336, "ohw_req_pct": 14.602, "ohw_byte_pct": 1.607, "byte_pct": 9.062}, {"bin": 15, "label": "32KiB", "size_lo": 32768, "N_b": 20348067, "m_b": 218443, "r": 0.3626, "rho": 52.431, "req_pct": 7.632, "ohw_req_pct": 10.612, "ohw_byte_pct": 2.317, "byte_pct": 8.398}, {"bin": 16, "label": "64KiB", "size_lo": 65536, "N_b": 9603031, "m_b": 182683, "r": 0.4468, "rho": 41.653, "req_pct": 3.602, "ohw_req_pct": 8.875, "ohw_byte_pct": 3.889, "byte_pct": 7.957}, {"bin": 17, "label": "128KiB", "size_lo": 131072, "N_b": 4240212, "m_b": 146881, "r": 0.4889, "rho": 26.66, "req_pct": 1.59, "ohw_req_pct": 7.136, "ohw_byte_pct": 6.29, "byte_pct": 7.066}, {"bin": 18, "label": "256KiB", "size_lo": 262144, "N_b": 2096587, "m_b": 91382, "r": 0.4987, "rho": 21.825, "req_pct": 0.786, "ohw_req_pct": 4.439, "ohw_byte_pct": 7.6, "byte_pct": 6.786}, {"bin": 19, "label": "512KiB", "size_lo": 524288, "N_b": 913680, "m_b": 46354, "r": 0.5182, "rho": 20.122, "req_pct": 0.343, "ohw_req_pct": 2.252, "ohw_byte_pct": 7.73, "byte_pct": 5.929}, {"bin": 20, "label": "1MiB", "size_lo": 1048576, "N_b": 547797, "m_b": 29178, "r": 0.5279, "rho": 19.874, "req_pct": 0.205, "ohw_req_pct": 1.417, "ohw_byte_pct": 9.992, "byte_pct": 7.3}, {"bin": 21, "label": "2MiB", "size_lo": 2097152, "N_b": 539808, "m_b": 28142, "r": 0.5622, "rho": 23.347, "req_pct": 0.202, "ohw_req_pct": 1.367, "ohw_byte_pct": 19.082, "byte_pct": 14.244}, {"bin": 22, "label": "4MiB", "size_lo": 4194304, "N_b": 282823, "m_b": 16350, "r": 0.5671, "rho": 21.354, "req_pct": 0.106, "ohw_req_pct": 0.794, "ohw_byte_pct": 21.715, "byte_pct": 14.618}, {"bin": 23, "label": "8MiB", "size_lo": 8388608, "N_b": 75099, "m_b": 4855, "r": 0.6003, "rho": 21.727, "req_pct": 0.028, "ohw_req_pct": 0.236, "ohw_byte_pct": 12.328, "byte_pct": 7.421}, {"bin": 24, "label": "16MiB", "size_lo": 16777216, "N_b": 7539, "m_b": 785, "r": 0.597, "rho": 12.743, "req_pct": 0.003, "ohw_req_pct": 0.038, "ohw_byte_pct": 3.851, "byte_pct": 1.439}], "vdips": []}};
+
+const VDIP_INFO = {
+  metaCDN: { bin:19, label:'512KiB', reason:'N_b=998k (前後比3.7x), r=0.391 (前後比-0.19)', opt_T:'512KiB', bmr_note:'T=1MiB超でBMR急増 (+0.32pt/ステップ)' },
+  metaKV:  { bin:13, label:'8KiB',   reason:'N_b=1.43M (前後比1.6x), r=0.375 (前後比-0.34)', opt_T:'16KiB',  bmr_note:'OHWジャンプ型と重複 (Path A対応済み)' },
+  msrBlk:  { bin:12, label:'4KiB',   reason:'N_b=1.96M (前後比22.3x), r=0.502 (前後比-0.30)', opt_T:'8KiB',   bmr_note:'最大リクエスト集中点、Path AのT=8KiBと一致' },
+  metaBlk: { bin:10, label:'1KiB',   reason:'N_b=16k (前後比1.7x), r=0.444 (前後比-0.12)', opt_T:'?',       bmr_note:'LRUと同等のため性能差未確認' },
+};
+
+const TRACE_DESC = {
+  cldphyBlk:'ブロックキャッシュ: 1〜4KiBに集中、64KiB以上でOHW上昇 (OHWジャンプ型)',
+  metaBlk:  'Metaブロック: V字谷あり (1KiB)、ただしLRUと性能差なし',
+  metaCDN:  'Meta CDN: 512KiBに巨大V字谷 (r急落+要求集中) → T=512KiBが最良',
+  metaKV:   'Meta KV: 8KiBにV字谷 + 16KiBでOHW急上昇 (Path A対応済み)',
+  msrBlk:   'MSR Block: 4KiBに極端なV字谷 (前後比22x) → Path AのT=8KiBと一致',
+  tncntBlk: 'Tencent Block: 均一低OHW、V字谷なし (CDF交差型)',
+  tncntCDN: 'Tencent CDN: 均一OHW、V字谷なし、改善効果なし',
+  twiKV:    'Twitter KV: 全ビン高OHW、V字谷なし、LRUと同等',
+  wikiCDN:  'Wiki CDN: OHW単調増加、V字谷なし (CDF交差型)',
+};
+
+let charts = {};
+let current = 'metaCDN';
+
+function buildSidebar() {
+  const el = document.getElementById('traceList');
+  const order = ['metaCDN','metaKV','msrBlk','metaBlk','cldphyBlk','tncntBlk','wikiCDN','tncntCDN','twiKV'];
+  order.forEach(name => {
+    if (!TRACES[name]) return;
+    const t = TRACES[name];
+    const hasVdip = t.vdips.length > 0;
+    const btn = document.createElement('div');
+    btn.className = 'trace-btn' + (name === current ? ' active' : '');
+    btn.dataset.name = name;
+    const badge = hasVdip
+      ? `<span class="badge badge-vdip">V字谷</span>`
+      : `<span class="badge badge-none">なし</span>`;
+    btn.innerHTML = `<div class="tname">${badge}${name}</div><div class="tmeta">${t.bins.length}ビン</div>`;
+    btn.addEventListener('click', () => select(name));
+    el.appendChild(btn);
+  });
+}
+
+function select(name) {
+  current = name;
+  document.querySelectorAll('.trace-btn').forEach(b => b.classList.toggle('active', b.dataset.name === name));
+  render();
+}
+
+function render() {
+  Object.values(charts).forEach(c => c.destroy());
+  charts = {};
+
+  const t = TRACES[current];
+  const info = VDIP_INFO[current];
+  const labels = t.bins.map(b => b.label);
+  const vdipBins = t.vdips;
+
+  const vdipLabel = vdipBins.length
+    ? vdipBins.map(b => { const bd = t.bins.find(x=>x.bin===b); return bd ? bd.label : `bin${b}`; }).join(', ')
+    : 'なし';
+
+  const main = document.getElementById('mainArea');
+  main.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">${current}</div>
+          <div class="card-sub">${TRACE_DESC[current]||''}</div>
+        </div>
+        ${vdipBins.length ? `<div class="vdip-badge">⚡ V字谷検出: ${vdipLabel}</div>` : ''}
+      </div>
+      <div class="summary-grid" id="statsGrid"></div>
+      <div class="chart-grid">
+        <div class="chart-wrap"><div class="chart-label">OHW個数分布 &amp; OHWバイト量分布</div><canvas id="cvDist" height="220"></canvas></div>
+        <div class="chart-wrap"><div class="chart-label">OHW率 r &amp; 再利用回数 rho</div><canvas id="cvOhw" height="220"></canvas></div>
+      </div>
+      <div class="insight ${vdipBins.length ? 'insight-vdip' : 'insight-none'}" id="insightBox"></div>
+    </div>
+  `;
+
+  // Stats
+  const maxOhwBin = [...t.bins].sort((a,b)=>b.ohw_byte_pct-a.ohw_byte_pct)[0];
+  const minR = [...t.bins].filter(b=>b.req_pct>=0.3||b.ohw_byte_pct>=0.5).sort((a,b)=>a.r-b.r)[0];
+  const totalOhwByte = t.bins.reduce((s,b)=>s+b.ohw_byte_pct,0);
+  document.getElementById('statsGrid').innerHTML = `
+    <div class="stat"><div class="stat-val">${t.bins.length}</div><div class="stat-label">有効ビン数</div></div>
+    <div class="stat"><div class="stat-val">${maxOhwBin.label}</div><div class="stat-label">最大OHWバイトビン (${maxOhwBin.ohw_byte_pct.toFixed(1)}%)</div></div>
+    <div class="stat"><div class="stat-val">${minR ? minR.r.toFixed(3) : '—'}</div><div class="stat-label">有意ビン中の最小r (${minR ? minR.label : ''})</div></div>
+    <div class="stat"><div class="stat-val">${vdipBins.length ? vdipLabel : 'なし'}</div><div class="stat-label">V字谷ビン</div></div>
+  `;
+
+  // Insight text
+  let insightHtml = '';
+  if (info) {
+    insightHtml = `<strong>V字谷 bin${info.bin} (${info.label})</strong>: ${info.reason}<br>
+    推奨閾値: <span class="mono">T = ${info.opt_T}</span> — ${info.bmr_note}`;
+  } else if (vdipBins.length === 0) {
+    insightHtml = `<strong>V字谷なし</strong> — OHW率が単調または均一のため、特定ビンへの局所的な要求集中が確認されない。RegionSplitの最適閾値はOHWジャンプまたはCDF交差点から決定する。`;
+  } else {
+    const vb = t.bins.find(x=>x.bin===vdipBins[0]);
+    insightHtml = `<strong>V字谷 bin${vdipBins[0]} (${vb?.label})</strong>: r=${vb?.r}, N_b=${vb?.N_b?.toLocaleString()} — 詳細な閾値影響は要計測。`;
+  }
+  document.getElementById('insightBox').innerHTML = insightHtml;
+
+  // Annotation for vdip
+  const annDist = {};
+  const annOhw = {};
+  vdipBins.forEach((b,i) => {
+    const bd = t.bins.find(x=>x.bin===b);
+    if (!bd) return;
+    const lbl = bd.label;
+    annDist[`vdip${i}`] = {
+      type:'line', scaleID:'x', value:lbl,
+      borderColor:'rgba(249,115,22,0.9)', borderWidth:2.5, borderDash:[5,3],
+      label:{display:true,content:`V字谷 ${lbl}`,position:'start',
+             color:'#f97316',backgroundColor:'rgba(249,115,22,0.12)',
+             font:{size:10,weight:'bold'},padding:4,yAdjust:-10}
+    };
+    annOhw[`vdip${i}`] = {
+      type:'line', scaleID:'x', value:lbl,
+      borderColor:'rgba(249,115,22,0.9)', borderWidth:2.5, borderDash:[5,3],
+      label:{display:true,content:`V字谷 ${lbl}`,position:'end',
+             color:'#f97316',backgroundColor:'rgba(249,115,22,0.12)',
+             font:{size:10,weight:'bold'},padding:4,yAdjust:10}
+    };
+  });
+
+  // Chart 1: Distribution bars
+  charts.dist = new Chart(document.getElementById('cvDist').getContext('2d'), {
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        { label:'OHW個数分布 (m_b%)', data:t.bins.map(b=>b.ohw_req_pct),
+          backgroundColor:'rgba(79,142,247,0.75)', order:2 },
+        { label:'OHWバイト量分布 (m_b×size%)', data:t.bins.map(b=>b.ohw_byte_pct),
+          backgroundColor:'rgba(249,115,22,0.75)', order:2 },
+      ]
+    },
+    options:{
+      responsive:true, animation:false,
+      scales:{
+        x:{ticks:{color:'#6b7399',font:{size:9},maxRotation:45},grid:{color:'#1e2335'}},
+        y:{ticks:{color:'#6b7399',font:{size:10},callback:v=>v+'%'},grid:{color:'#1e2335'},
+           title:{display:true,text:'分布割合 (%)',color:'#6b7399',font:{size:10}}}
+      },
+      plugins:{
+        legend:{labels:{color:'#d4d8f0',font:{size:11},boxWidth:10}},
+        annotation:{annotations:annDist}
+      }
+    }
+  });
+
+  // Chart 2: r + rho line
+  const rhoMax = Math.max(...t.bins.map(b=>b.rho));
+  const rhoScale = rhoMax > 20 ? 'log' : 'linear';
+  charts.ohw = new Chart(document.getElementById('cvOhw').getContext('2d'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        { label:'OHW率 r', data:t.bins.map(b=>+(b.r*100).toFixed(2)),
+          borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,0.08)',
+          tension:.3, fill:true, pointRadius:3, pointHoverRadius:5,
+          yAxisID:'y', order:1 },
+        { label:'再利用回数 rho', data:t.bins.map(b=>b.rho),
+          borderColor:'#a78bfa', backgroundColor:'transparent',
+          tension:.3, fill:false, pointRadius:2, borderDash:[4,3],
+          yAxisID:'y2', order:2 },
+      ]
+    },
+    options:{
+      responsive:true, animation:false,
+      scales:{
+        x:{ticks:{color:'#6b7399',font:{size:9},maxRotation:45},grid:{color:'#1e2335'}},
+        y:{position:'left',min:0,max:100,
+           ticks:{color:'#ef8888',font:{size:10},callback:v=>v+'%'},
+           grid:{color:'#1e2335'},
+           title:{display:true,text:'OHW率 r (%)',color:'#ef8888',font:{size:10}}},
+        y2:{position:'right',type:rhoScale,
+            ticks:{color:'#a78bfa',font:{size:10}},
+            grid:{drawOnChartArea:false},
+            title:{display:true,text:'rho (再利用回数)',color:'#a78bfa',font:{size:10}}}
+      },
+      plugins:{
+        legend:{labels:{color:'#d4d8f0',font:{size:11},boxWidth:10}},
+        annotation:{annotations:{
+          ...annOhw,
+          r75:{type:'line',scaleID:'y',value:75,borderColor:'rgba(239,68,68,0.3)',
+               borderWidth:1,borderDash:[3,3],
+               label:{display:true,content:'r=75%',position:'end',color:'#ef4444',
+                      backgroundColor:'transparent',font:{size:9}}},
+        }}
+      }
+    }
+  });
+}
+
+buildSidebar();
+render();
+</script>
+</body>
+</html>

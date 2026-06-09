@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>RegionSplit 閾値判定 Path 模式図</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"></script>
+<style>
+:root{
+  --bg:#0f1117;--bg2:#181c28;--bg3:#1e2335;--border:#2a3050;
+  --text:#d4d8f0;--muted:#6b7399;
+  --blue:#4f8ef7;--orange:#f97316;--red:#ef4444;--green:#22c55e;
+  --purple:#a78bfa;--yellow:#facc15;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}
+
+.page-header{padding:20px 28px 16px;border-bottom:1px solid var(--border)}
+.page-header h1{font-size:20px;font-weight:700;margin-bottom:4px}
+.page-header p{color:var(--muted);font-size:12px}
+
+.legend-bar{display:flex;gap:20px;padding:10px 28px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.leg{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+.leg-box{width:14px;height:14px;border-radius:2px}
+.leg-line{width:20px;height:3px;border-radius:2px}
+
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}
+.panel{background:var(--bg);padding:22px 24px 20px}
+.panel-head{display:flex;align-items:flex-start;gap:14px;margin-bottom:14px}
+.path-badge{
+  font-size:13px;font-weight:800;padding:4px 10px;border-radius:6px;
+  white-space:nowrap;flex-shrink:0;margin-top:2px;
+}
+.badge-a{background:#1a3a5e;color:#60a5fa;border:1px solid #2563eb}
+.badge-b{background:#3a1a1a;color:#f87171;border:1px solid #dc2626}
+.badge-d{background:#2d1a00;color:#fb923c;border:1px solid #ea580c}
+.badge-c{background:#1a2a1a;color:#4ade80;border:1px solid #16a34a}
+.panel-title{font-size:14px;font-weight:700;line-height:1.4}
+.panel-sub{font-size:11px;color:var(--muted);margin-top:3px}
+.chart-wrap{position:relative;height:200px}
+.condition{
+  margin-top:12px;padding:10px 12px;border-radius:7px;
+  font-size:11px;line-height:1.7;border-left:3px solid;
+}
+.cond-a{background:rgba(37,99,235,.08);border-color:#3b82f6}
+.cond-b{background:rgba(220,38,38,.08);border-color:#ef4444}
+.cond-d{background:rgba(234,88,12,.08);border-color:#f97316}
+.cond-c{background:rgba(22,163,74,.08);border-color:#22c55e}
+.condition code{
+  font-family:monospace;font-size:10px;font-weight:700;
+  background:rgba(255,255,255,.06);padding:1px 4px;border-radius:3px;
+}
+.tag{display:inline-block;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-right:3px;vertical-align:middle}
+.tag-req{background:#1e3a5e;color:#60a5fa}
+.tag-byte{background:#3a2010;color:#fb923c}
+.tag-r{background:#3a1010;color:#f87171}
+.tag-t{background:#1a3a1a;color:#4ade80}
+
+.arrow{display:inline-block;margin:0 4px}
+
+.bottom-section{padding:20px 28px;border-top:1px solid var(--border)}
+.bottom-section h2{font-size:14px;font-weight:700;margin-bottom:12px}
+.priority-flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
+.pf-step{padding:6px 14px;border-radius:20px;font-weight:700}
+.pf-a{background:#1a3a5e;color:#60a5fa;border:1px solid #2563eb}
+.pf-b{background:#3a1a1a;color:#f87171;border:1px solid #dc2626}
+.pf-d{background:#2d1a00;color:#fb923c;border:1px solid #ea580c}
+.pf-c{background:#1a2a1a;color:#4ade80;border:1px solid #16a34a}
+.pf-n{background:#1e2335;color:#6b7399;border:1px solid #2a3050}
+.pf-arr{color:var(--muted);font-size:16px}
+.trace-table{margin-top:14px;width:100%;border-collapse:collapse;font-size:11px}
+.trace-table th{text-align:left;padding:5px 10px;color:var(--muted);border-bottom:1px solid var(--border);font-weight:600}
+.trace-table td{padding:5px 10px;border-bottom:1px solid #1e2335}
+.trace-table tr:last-child td{border-bottom:none}
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>RegionSplit 閾値判定 — 4 経路 Path 模式図</h1>
+  <p>各 Path がどのようなリクエスト量分布・バイト量分布・OHW 率分布に対して閾値 T を決定するかを示す</p>
+</div>
+
+<div class="legend-bar">
+  <div class="leg"><div class="leg-box" style="background:rgba(79,142,247,.8)"></div>リクエスト量分布 (req%)</div>
+  <div class="leg"><div class="leg-box" style="background:rgba(249,115,22,.8)"></div>バイト量分布 (byte%)</div>
+  <div class="leg"><div class="leg-line" style="background:#ef4444"></div>OHW率 r</div>
+  <div class="leg"><div class="leg-line" style="background:#22c55e;height:2px;border-style:dashed"></div>閾値 T (設定位置)</div>
+</div>
+
+<div class="grid">
+
+  <!-- Path A -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="path-badge badge-a">Path A</div>
+      <div>
+        <div class="panel-title">OHWジャンプ検出</div>
+        <div class="panel-sub">代表: mrsBlk, metaKV, cldphyBlk</div>
+      </div>
+    </div>
+    <div class="chart-wrap"><canvas id="cvA"></canvas></div>
+    <div class="condition cond-a">
+      <strong>検出条件</strong><br>
+      有意ビンを小→大の順に走査し、<code>r &lt; 0.70</code> の「低 OHW ゾーン」確認後、
+      <code>r ≥ 0.75</code> に急上昇するビンを検出<br>
+      <span class="arrow">→</span> <strong>T = 急上昇ビンの下端</strong><br><br>
+      <strong>分布の特徴</strong><br>
+      小サイズ: リクエスト集中 + 低 OHW (r &lt; 0.70) ← 宝庫ゾーン<br>
+      大サイズ: リクエスト分散 + 高 OHW (r ≥ 0.75) ← 汚染ゾーン<br><br>
+      <strong>なぜ有効か</strong><br>
+      大サイズ高 OHW オブジェクトが GC-Region を占拠し、小サイズ低 OHW を排出する干渉を遮断する。
+    </div>
+  </div>
+
+  <!-- Path B -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="path-badge badge-b">Path B</div>
+      <div>
+        <div class="panel-title">バルク隔離</div>
+        <div class="panel-sub">代表: metaCDN (bin28/29 含む)</div>
+      </div>
+    </div>
+    <div class="chart-wrap"><canvas id="cvB"></canvas></div>
+    <div class="condition cond-b">
+      <strong>検出条件</strong><br>
+      全ビン中の最大バイト占有ビンの byte_share が <code>&gt; 80%</code><br>
+      <span class="arrow">→</span> <strong>T = そのビンの下端</strong><br><br>
+      <strong>分布の特徴</strong><br>
+      単一の巨大サイズビンがバイトの 80% 超を独占。リクエストは少ないが、
+      容量配分でほぼ全プールを支配する<br><br>
+      <strong>注意</strong><br>
+      スコープ外サイズ (例: 256MiB 以上) がバルクを占有している場合、
+      <code>--max-bin N</code> で除外してから再判定が必要。
+      除外後はPath D や Path C が適用される。
+    </div>
+  </div>
+
+  <!-- Path D -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="path-badge badge-d">Path D</div>
+      <div>
+        <div class="panel-title">OHW V字谷検出</div>
+        <div class="panel-sub">代表: metaCDN (bin28/29 除外後, bin19)</div>
+      </div>
+    </div>
+    <div class="chart-wrap"><canvas id="cvD"></canvas></div>
+    <div class="condition cond-d">
+      <strong>検出条件</strong><br>
+      有意ビン i で <code>r[i-1] - r[i] ≥ 0.05</code> かつ <code>r[i+1] - r[i] ≥ 0.05</code> (V字形)<br>
+      かつ <code>N_b[i] ≥ 前後平均 N_b × 1.5</code> (リクエスト異常集中)<br>
+      <span class="arrow">→</span> <strong>T = ビン i の下端 (V字谷ビンを大プールへ保護)</strong><br><br>
+      <strong>分布の特徴</strong><br>
+      OHW 率の谷 + そのビンへのリクエスト集中が同時に出現する。<br>
+      谷ビンは非 OHW 再利用も高く、大量の OHW バイトを抱えている<br><br>
+      <strong>なぜ有効か</strong><br>
+      V字谷ビンを小プールへ入れると OHW バイトが大量流入し BMR が悪化する。
+      T をそのビン下端に設定し大プールへ残すことで BMR 悪化を防ぐ。
+    </div>
+  </div>
+
+  <!-- Path C -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="path-badge badge-c">Path C</div>
+      <div>
+        <div class="panel-title">CDF 交差点</div>
+        <div class="panel-sub">代表: tncntBlk, wikiCDN</div>
+      </div>
+    </div>
+    <div class="chart-wrap"><canvas id="cvC"></canvas></div>
+    <div class="condition cond-c">
+      <strong>検出条件</strong><br>
+      小→大の順に累積し、<code>F_req + F_byte ≥ 1.0</code> を最初に超えるビン<br>
+      <span class="arrow">→</span> <strong>T = そのビンの下端</strong><br><br>
+      <strong>分布の特徴</strong><br>
+      OHW 率は全サイズで均一低値 (OHWジャンプなし)。<br>
+      リクエストは小サイズ集中、バイトは大サイズ集中 → 重心が乖離<br><br>
+      <strong>なぜ有効か</strong><br>
+      リクエスト重心 (≈ 小サイズ) とバイト重心 (≈ 大サイズ) の交差点が
+      「高頻度コンテンツと低頻度大コンテンツ」の自然な境界となる。
+      OHW 汚染ではなく GC-Region 競合による干渉を解消する。
+    </div>
+  </div>
+
+</div>
+
+<div class="bottom-section">
+  <h2>判定優先順位と代表トレース</h2>
+  <div class="priority-flow">
+    <div class="pf-step pf-a">Path A: OHWジャンプ</div>
+    <div class="pf-arr">→</div>
+    <div class="pf-step pf-b">Path B: バルク隔離</div>
+    <div class="pf-arr">→</div>
+    <div class="pf-step pf-d">Path D: V字谷</div>
+    <div class="pf-arr">→</div>
+    <div class="pf-step pf-c">Path C: CDF交差点</div>
+    <div class="pf-arr">→</div>
+    <div class="pf-step pf-n">Neutral (分割不要)</div>
+  </div>
+
+  <table class="trace-table" style="margin-top:16px">
+    <thead>
+      <tr>
+        <th>トレース</th><th>検出 Path</th><th>推奨 T</th><th>主な分布特徴</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>mrsBlk</td><td><span class="tag tag-req" style="background:#1a3a5e;color:#60a5fa">Path A</span></td><td>8KiB</td><td>bin12 (4KiB) 低OHW後、bin13 (8KiB) でr=0.80に急上昇</td></tr>
+      <tr><td>metaKV</td><td><span class="tag tag-req" style="background:#1a3a5e;color:#60a5fa">Path A</span></td><td>16KiB</td><td>bin13 (8KiB) V字谷後、bin14 (16KiB) でr=0.95に急上昇</td></tr>
+      <tr><td>cldphyBlk</td><td><span class="tag tag-req" style="background:#1a3a5e;color:#60a5fa">Path A</span></td><td>64KiB</td><td>4KiB低OHW後、64KiB以上でr上昇</td></tr>
+      <tr><td>metaCDN (スコープ込み)</td><td><span class="tag" style="background:#3a1a1a;color:#f87171">Path B</span></td><td>512MiB</td><td>bin29 (512MiB) がバイトの95%を独占 → スコープ外のため除外必要</td></tr>
+      <tr><td>metaCDN (--max-bin 27)</td><td><span class="tag" style="background:#2d1a00;color:#fb923c">Path D</span></td><td>512KiB</td><td>bin19 (512KiB) でr谷かつN_b前後比3.0x → V字谷検出</td></tr>
+      <tr><td>tncntBlk</td><td><span class="tag" style="background:#1a2a1a;color:#4ade80">Path C</span></td><td>16KiB</td><td>全域均一低OHW、リクエスト重心<バイト重心の交差点=bin14</td></tr>
+      <tr><td>wikiCDN</td><td><span class="tag" style="background:#1a2a1a;color:#4ade80">Path C</span></td><td>16KiB</td><td>均一低OHW (単調増加)、CDF交差=bin14</td></tr>
+      <tr><td>tncntCDN / twiKV</td><td><span class="tag" style="background:#1e2335;color:#6b7399">Neutral</span></td><td>—</td><td>改善効果なし (均一高OHW or 単一サイズ集中)</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+const BINS = ['512B','1K','2K','4K','8K','16K','32K','64K','128K','256K','512K','1M','2M','4M','8M'];
+const N = BINS.length;
+
+function makeAnnotation(binIdx, label, color) {
+  return {
+    type:'line', scaleID:'x', value:BINS[binIdx],
+    borderColor: color || '#22c55e',
+    borderWidth:2.5, borderDash:[6,4],
+    label:{display:true, content: label||'T', position:'start',
+           color: color||'#22c55e', backgroundColor:'transparent',
+           font:{size:10,weight:'bold'}, padding:4, yAdjust:-14}
+  };
+}
+
+const baseOpts = (annotations) => ({
+  responsive:true, maintainAspectRatio:false, animation:false,
+  scales:{
+    x:{ticks:{color:'#6b7399',font:{size:9},maxRotation:45}, grid:{color:'#1e2335'}},
+    y:{position:'left', min:0, max:55,
+       ticks:{color:'#6b7399',font:{size:9},callback:v=>v+'%'}, grid:{color:'#1e2335'},
+       title:{display:true,text:'分布割合 (%)',color:'#6b7399',font:{size:9}}},
+    y2:{position:'right', min:0, max:110,
+        ticks:{color:'#ef9999',font:{size:9},callback:v=>v+'%'},
+        grid:{drawOnChartArea:false},
+        title:{display:true,text:'OHW率 r (%)',color:'#ef9999',font:{size:9}}}
+  },
+  plugins:{
+    legend:{display:false},
+    annotation:{annotations: annotations||{}}
+  }
+});
+
+// ── Path A ─────────────────────────────────────────────────────
+// 小サイズ: req集中, byte少, r低 → 大サイズ: req減, byte増, r急上昇
+const reqA = [2,28,22,16, 7, 4, 4, 4, 3, 2, 1, 1, 1, 1, 1];
+const byteA= [0, 1, 2, 6, 5, 5, 5, 6, 8,10, 8, 9, 8, 7, 6];
+const rA   = [65,50,48,46,45,44,42,78,82,84,86,88,89,90,91];  // jump at index 7 (64K)
+new Chart(document.getElementById('cvA').getContext('2d'), {
+  type:'bar', data:{labels:BINS,
+    datasets:[
+      {label:'req%', data:reqA, backgroundColor:'rgba(79,142,247,.75)', yAxisID:'y', order:2},
+      {label:'byte%', data:byteA, backgroundColor:'rgba(249,115,22,.70)', yAxisID:'y', order:2},
+      {type:'line', label:'r', data:rA, borderColor:'#ef4444', backgroundColor:'transparent',
+       tension:.3, pointRadius:2.5, yAxisID:'y2', order:1},
+    ]
+  },
+  options: baseOpts({
+    lowZone:{type:'box',xMin:'512B',xMax:'32K',yMin:0,yMax:55,
+             backgroundColor:'rgba(79,142,247,.05)',borderColor:'transparent',
+             label:{display:true,content:'低OHWゾーン',color:'#4f8ef7',font:{size:9},position:{x:'center',y:'end'}}},
+    highZone:{type:'box',xMin:'64K',xMax:'8M',yMin:0,yMax:55,
+              backgroundColor:'rgba(239,68,68,.05)',borderColor:'transparent',
+              label:{display:true,content:'高OHWゾーン',color:'#ef4444',font:{size:9},position:{x:'center',y:'end'}}},
+    t: makeAnnotation(7, 'T = 64KiB', '#22c55e'),
+    r70:{type:'line',scaleID:'y2',value:70,borderColor:'rgba(239,68,68,.4)',borderWidth:1,borderDash:[3,3],
+         label:{display:true,content:'r=70%',position:'end',color:'#ef4444',backgroundColor:'transparent',font:{size:9}}},
+    r75:{type:'line',scaleID:'y2',value:75,borderColor:'rgba(239,68,68,.4)',borderWidth:1,borderDash:[3,3],
+         label:{display:true,content:'r=75%',position:'start',color:'#ef4444',backgroundColor:'transparent',font:{size:9}}},
+  })
+});
+
+// ── Path B ─────────────────────────────────────────────────────
+// 一つの巨大ビンがバイトの90%を独占
+const reqB = [5,10,8, 7, 6, 5, 5, 4, 4, 3, 2, 2, 2, 1, 1];
+const byteB= [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2,93];
+const rB   = [65,60,58,56,54,52,50,68,70,72,74,74,73,72,38];
+new Chart(document.getElementById('cvB').getContext('2d'), {
+  type:'bar', data:{labels:BINS,
+    datasets:[
+      {label:'req%', data:reqB, backgroundColor:'rgba(79,142,247,.75)', yAxisID:'y', order:2},
+      {label:'byte%', data:byteB, backgroundColor:'rgba(249,115,22,.70)', yAxisID:'y', order:2},
+      {type:'line', label:'r', data:rB, borderColor:'#ef4444', backgroundColor:'transparent',
+       tension:.3, pointRadius:2.5, yAxisID:'y2', order:1},
+    ]
+  },
+  options: baseOpts({
+    bulk:{type:'box',xMin:'8M',xMax:'8M',yMin:0,yMax:55,
+          backgroundColor:'rgba(239,68,68,.10)',borderColor:'rgba(239,68,68,.4)',
+          label:{display:true,content:'byte>80% (バルク)',color:'#ef4444',font:{size:9},position:{x:'center',y:'end'}}},
+    t: makeAnnotation(14, 'T = 8MiB', '#ef4444'),
+  })
+});
+
+// ── Path D ─────────────────────────────────────────────────────
+// V字谷: 特定ビンでr局所最小 + N_b異常集中
+const reqD = [3,6,6,5,6,7,8,8,8,7,30,4,4,3,2];  // bin10 (512K index) が突出
+const byteD= [0,0,0,0,0,1,1,1,2,2,12,7,9,11,18]; // そのビンのバイトも大きい
+const rD   = [62,60,59,58,57,56,55,58,60,58,39,49,44,41,37]; // bin10でV字谷
+new Chart(document.getElementById('cvD').getContext('2d'), {
+  type:'bar', data:{labels:BINS,
+    datasets:[
+      {label:'req%', data:reqD, backgroundColor:'rgba(79,142,247,.75)', yAxisID:'y', order:2},
+      {label:'byte%', data:byteD, backgroundColor:'rgba(249,115,22,.70)', yAxisID:'y', order:2},
+      {type:'line', label:'r', data:rD, borderColor:'#ef4444', backgroundColor:'transparent',
+       tension:.3, pointRadius:2.5, yAxisID:'y2', order:1},
+    ]
+  },
+  options: baseOpts({
+    vdip:{type:'box',xMin:'512K',xMax:'512K',yMin:0,yMax:55,
+          backgroundColor:'rgba(249,115,22,.12)',borderColor:'rgba(249,115,22,.5)',
+          label:{display:true,content:'V字谷: r局所最小\nN_b異常集中',color:'#f97316',font:{size:9},position:{x:'center',y:'end'}}},
+    t: makeAnnotation(10, 'T = 512KiB', '#f97316'),
+    note:{type:'label',xValue:'512K',yValue:42,content:['r = 0.39'],color:'#f97316',
+          backgroundColor:'rgba(249,115,22,.12)',borderRadius:4,font:{size:9,weight:'bold'},padding:4}
+  })
+});
+
+// ── Path C ─────────────────────────────────────────────────────
+// 均一低OHW、req小サイズ集中・byte大サイズ集中
+const reqC = [2,20,18,16,12,10, 7, 5, 4, 2, 1, 1, 1, 1, 1];
+const byteC= [0, 0, 0, 1, 1, 2, 3, 4, 6, 7, 8, 9,12,13,14];
+const rC   = [30,28,27,27,28,27,28,28,27,27,28,29,28,30,31]; // 均一
+// CDF: F_req cumsum and F_byte cumsum cross at ~16K (index 5)
+new Chart(document.getElementById('cvC').getContext('2d'), {
+  type:'bar', data:{labels:BINS,
+    datasets:[
+      {label:'req%', data:reqC, backgroundColor:'rgba(79,142,247,.75)', yAxisID:'y', order:2},
+      {label:'byte%', data:byteC, backgroundColor:'rgba(249,115,22,.70)', yAxisID:'y', order:2},
+      {type:'line', label:'r', data:rC, borderColor:'#ef4444', backgroundColor:'transparent',
+       tension:.3, pointRadius:2.5, yAxisID:'y2', order:1},
+    ]
+  },
+  options: baseOpts({
+    reqZone:{type:'box',xMin:'512B',xMax:'4K',yMin:0,yMax:55,
+             backgroundColor:'rgba(79,142,247,.06)',borderColor:'transparent',
+             label:{display:true,content:'req重心',color:'#4f8ef7',font:{size:9},position:{x:'center',y:'end'}}},
+    byteZone:{type:'box',xMin:'2M',xMax:'8M',yMin:0,yMax:55,
+              backgroundColor:'rgba(249,115,22,.06)',borderColor:'transparent',
+              label:{display:true,content:'byte重心',color:'#f97316',font:{size:9},position:{x:'center',y:'end'}}},
+    t: makeAnnotation(5, 'T = 16KiB\n(CDF交差点)', '#22c55e'),
+  })
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>RegionSplit 閾値決定ガイド</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117; --bg2: #181c28; --bg3: #1e2335;
+  --border: #2a3050; --text: #d4d8f0; --muted: #6b7399;
+  --blue: #4f8ef7; --orange: #f97316; --green: #22c55e;
+  --red: #ef4444; --purple: #a78bfa; --yellow: #facc15;
+  --path-a: #f97316; --path-b: #a78bfa; --path-c: #22c55e;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+h1 { font-size: 20px; font-weight: 700; }
+h2 { font-size: 15px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+h3 { font-size: 14px; font-weight: 600; }
+
+.layout { display: grid; grid-template-columns: 340px 1fr; gap: 0; min-height: 100vh; }
+.sidebar { background: var(--bg2); border-right: 1px solid var(--border); padding: 20px 16px; display: flex; flex-direction: column; gap: 20px; }
+.main { padding: 24px; display: flex; flex-direction: column; gap: 24px; overflow-y: auto; }
+
+/* ─── Header ─────────────────────── */
+.page-header { padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.page-header .subtitle { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* ─── Decision flowchart ─────────── */
+.flow { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.flow-title { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 12px; }
+.flow-node {
+  border-radius: 7px; padding: 9px 12px; margin-bottom: 6px; font-size: 12px; line-height: 1.45;
+  border: 1px solid transparent; cursor: pointer; transition: border-color .15s;
+}
+.flow-node:hover { border-color: var(--blue); }
+.flow-node.start  { background: #1e2d44; border-color: #3a6ba8; color: #90c0f8; }
+.flow-node.path-a { background: #2b1f0d; border-color: var(--path-a); }
+.flow-node.path-b { background: #231a38; border-color: var(--path-b); }
+.flow-node.path-c { background: #0f2a1a; border-color: var(--path-c); }
+.flow-node.neutral{ background: #1e2030; border-color: var(--muted); color: var(--muted); }
+.flow-arrow { text-align: center; font-size: 16px; color: var(--muted); margin: 2px 0; line-height: 1; }
+.tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; margin-right: 4px; }
+.tag-a { background: var(--path-a); color: #000; }
+.tag-b { background: var(--path-b); color: #000; }
+.tag-c { background: var(--path-c); color: #000; }
+.flow-node .cond { font-size: 10px; color: var(--muted); font-family: monospace; margin-top: 3px; }
+
+/* ─── Trace selector ─────────────── */
+.trace-list { display: flex; flex-direction: column; gap: 6px; }
+.trace-btn {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border-radius: 7px; border: 1px solid var(--border); background: var(--bg3);
+  cursor: pointer; transition: all .15s; text-align: left;
+}
+.trace-btn:hover { border-color: var(--blue); background: #1a2038; }
+.trace-btn.active { border-color: var(--blue); background: #1a2a44; }
+.trace-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.trace-btn .name { font-size: 12px; font-weight: 600; }
+.trace-btn .type { font-size: 10px; color: var(--muted); }
+
+/* ─── Chart section ──────────────── */
+.chart-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.chart-header { padding: 14px 18px 10px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; gap: 12px; }
+.chart-header .trace-name { font-size: 16px; font-weight: 700; }
+.chart-header .mode-badge {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 12px; border: 1px solid; white-space: nowrap; align-self: center;
+}
+.chart-header .desc { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.chart-body { padding: 16px 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.chart-box canvas { width: 100% !important; }
+.chart-box-title { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; }
+
+/* ─── Finding box ────────────────── */
+.finding {
+  border-radius: 8px; padding: 12px 14px; font-size: 12px; line-height: 1.6;
+  border-left: 3px solid; margin: 0 18px 16px;
+}
+.finding strong { font-weight: 700; }
+.finding .threshold { font-family: monospace; font-size: 13px; font-weight: 700; }
+.finding-a { background: #2b1f0d; border-color: var(--path-a); }
+.finding-b { background: #231a38; border-color: var(--path-b); }
+.finding-c { background: #0f2a1a; border-color: var(--path-c); }
+
+/* ─── Prediction summary table ────── */
+.summary-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.summary-table th { padding: 6px 10px; text-align: left; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+.summary-table td { padding: 6px 10px; border-bottom: 1px solid #1e2335; }
+.summary-table tr:last-child td { border-bottom: none; }
+.match-ok  { color: var(--green); font-weight: 700; }
+.match-ok2 { color: var(--yellow); font-weight: 700; }
+.match-ng  { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ─── LEFT SIDEBAR ─────────────────────────────────── -->
+<div class="sidebar">
+  <div class="page-header">
+    <h1>RegionSplit 閾値決定ガイド</h1>
+    <div class="subtitle">サイズ分布 → 最適閾値 の3経路アルゴリズム</div>
+  </div>
+
+  <!-- Decision flowchart -->
+  <div class="flow">
+    <div class="flow-title">判定フロー（v3）</div>
+
+    <div class="flow-node start">
+      <strong>入力</strong>: ビン別サイズ分布<br>
+      <span style="font-size:11px;color:#7aa8dd">req_share, byte_share, r (OHW率), rho</span>
+    </div>
+    <div class="flow-arrow">↓</div>
+
+    <div class="flow-node path-a" onclick="selectTrace('mrsBlk')">
+      <span class="tag tag-a">Path A</span><strong>OHWジャンプ検出</strong><br>
+      <div class="cond">∃ bin: r &lt; 0.70 を見た後、r ≥ 0.75 のビン出現</div>
+      <div style="font-size:11px;margin-top:4px">→ そのビンの下端を閾値 T に設定</div>
+    </div>
+    <div class="flow-arrow">↓ (Path A 不成立)</div>
+
+    <div class="flow-node path-b" onclick="selectTrace('metaCDN')">
+      <span class="tag tag-b">Path B</span><strong>バルク隔離</strong><br>
+      <div class="cond">max(byte_share) &gt; 80%</div>
+      <div style="font-size:11px;margin-top:4px">→ 支配ビンの下端を閾値 T に設定</div>
+    </div>
+    <div class="flow-arrow">↓ (Path B 不成立)</div>
+
+    <div class="flow-node path-c" onclick="selectTrace('tncntBlk')">
+      <span class="tag tag-c">Path C</span><strong>CDF 交差点</strong><br>
+      <div class="cond">F_req(T) + F_byte(T) ≥ 1.0 の最初のビン</div>
+      <div style="font-size:11px;margin-top:4px">→ 交差ビンの下端を閾値 T に設定</div>
+    </div>
+    <div class="flow-arrow">↓ (全経路不成立)</div>
+
+    <div class="flow-node neutral">
+      <strong>neutral</strong> — RegionSplit 効果薄 (均一OHW/無分離)<br>
+      <div class="cond">例: tncntCDN (r_range ≈ 0.20)</div>
+    </div>
+  </div>
+
+  <!-- Trace selector -->
+  <div>
+    <h2 style="margin-bottom:8px">トレース選択</h2>
+    <div class="trace-list" id="traceList"></div>
+  </div>
+
+  <!-- Summary table -->
+  <div>
+    <h2 style="margin-bottom:8px">予測精度サマリー (30%キャッシュ)</h2>
+    <table class="summary-table">
+      <tr><th>トレース</th><th>経路</th><th>予測</th><th>実際</th><th>誤差</th></tr>
+      <tr><td>metaKV</td><td><span class="tag tag-a" style="font-size:9px">A</span></td><td>16KiB</td><td>16KiB</td><td class="match-ok">±0b ✓</td></tr>
+      <tr><td>tncntBlk</td><td><span class="tag tag-c" style="font-size:9px">C</span></td><td>16KiB</td><td>16KiB</td><td class="match-ok">±0b ✓</td></tr>
+      <tr><td>mrsBlk</td><td><span class="tag tag-a" style="font-size:9px">A</span></td><td>8KiB</td><td>16KiB</td><td class="match-ok2">±1b ✓</td></tr>
+      <tr><td>cldphyBlk</td><td><span class="tag tag-a" style="font-size:9px">A</span></td><td>64KiB</td><td>256KiB</td><td class="match-ok2">±2b ✓</td></tr>
+      <tr><td>wikiCDN</td><td><span class="tag tag-c" style="font-size:9px">C</span></td><td>16KiB</td><td>64KiB</td><td class="match-ok2">±2b ✓</td></tr>
+      <tr><td>metaCDN</td><td><span class="tag tag-b" style="font-size:9px">B</span></td><td>512MiB*</td><td>128KiB</td><td class="match-ng">範囲外*</td></tr>
+      <tr><td>tncntCDN</td><td><span class="tag tag-c" style="font-size:9px">C</span></td><td>16KiB</td><td>1KiB†</td><td class="match-ng">改善≈0†</td></tr>
+    </table>
+    <div style="font-size:10px;color:var(--muted);margin-top:6px">
+      * 実験範囲上限1MiB、概念的には正しい<br>
+      † tncntCDN: どの閾値でもΔMR≈0
+    </div>
+  </div>
+</div>
+
+<!-- ─── MAIN CONTENT ──────────────────────────────────── -->
+<div class="main">
+  <div id="chartSection"></div>
+
+  <!-- Algorithm explanation -->
+  <div class="chart-panel">
+    <div class="chart-header">
+      <div>
+        <div class="trace-name">なぜ旧スコア (v2) は失敗したか</div>
+        <div class="desc">score_v2 = separation × protect_value × D_size の3つの問題</div>
+      </div>
+    </div>
+    <div style="padding:16px 18px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <div style="background:var(--bg3);border-radius:8px;padding:12px;border:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:700;color:var(--red);margin-bottom:6px">❶ D_size が単調増加</div>
+        <div style="font-size:12px;color:var(--text)">D_size = mean_sz<sub>large</sub>/mean_sz<sub>small</sub> は閾値 T を大きくするほど増大 → スコアが常に最大 T で最大値を取る</div>
+      </div>
+      <div style="background:var(--bg3);border-radius:8px;padding:12px;border:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:700;color:var(--red);margin-bottom:6px">❷ joint_score が誤方向を指す</div>
+        <div style="font-size:12px;color:var(--text)">joint = req × byte × (1-r) は「宝庫ビン」を指す。閾値は宝庫 <em>以上</em> に設定すべきで、宝庫ビンの上端ではない</div>
+      </div>
+      <div style="background:var(--bg3);border-radius:8px;padding:12px;border:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:700;color:var(--red);margin-bottom:6px">❸ 3メカニズムを1スコアで表現不可</div>
+        <div style="font-size:12px;color:var(--text)">OHWジャンプ・サイズ密度差・バルク占有は根本的に異なる現象。単一スコアでは原理的に全カバーできない</div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+// ─── Real trace data ────────────────────────────────────────────
+const TRACES = {
+  mrsBlk: {
+    name: 'mrsBlk', label: 'mrsBlk (OHWジャンプ型)', mode: 'ohw_jump',
+    color: '#f97316', pathClass: 'a',
+    desc: '4KiBビン (r=0.50) の直後、8KiB以上で r≥0.80 に急上昇。bin12が唯一の高価値ビン。',
+    pred_T: 8192, actual_T: 16384,
+    finding: 'r=0.50 の4KiBビンを見た後、8KiBビンでr=0.80 に急上昇 → <span class="threshold">T = 8KiB</span> (最近傍の測定値: 16KiB)',
+    bins: [
+      {lbl:'512B', req:0.14, byte:0.00, ohw:0.97},
+      {lbl:'1KiB', req:0.84, byte:0.03, ohw:0.93},
+      {lbl:'2KiB', req:0.71, byte:0.05, ohw:0.96},
+      {lbl:'4KiB', req:43.68, byte:5.27, ohw:0.50},
+      {lbl:'8KiB', req:1.96, byte:0.55, ohw:0.80},
+      {lbl:'16KiB',req:1.12, byte:0.73, ohw:0.91},
+      {lbl:'32KiB',req:1.64, byte:2.18, ohw:0.81},
+      {lbl:'64KiB',req:49.92,byte:91.13,ohw:0.88},
+    ],
+    jumpBin: 4, // index into bins[] where OHW jumps (after seeing low-OHW at index 3)
+  },
+  metaKV: {
+    name: 'metaKV', label: 'metaKV (OHWジャンプ型・急峻)', mode: 'ohw_jump',
+    color: '#f97316', pathClass: 'a',
+    desc: '8KiBビンまで r≤0.71。16KiBビンで突然 r=0.95 に急上昇する典型的なOHWジャンプ。',
+    pred_T: 16384, actual_T: 16384,
+    finding: '8KiBまで r<0.71 → 16KiBで r=0.95 に急上昇 → <span class="threshold">T = 16KiB</span> (実際と完全一致)',
+    bins: [
+      {lbl:'8B',  req:41.75,byte:0.68,ohw:0.46},
+      {lbl:'16B', req:6.96, byte:0.25,ohw:0.53},
+      {lbl:'32B', req:15.91,byte:1.39,ohw:0.46},
+      {lbl:'64B', req:13.90,byte:2.26,ohw:0.53},
+      {lbl:'128B',req:5.38, byte:1.74,ohw:0.56},
+      {lbl:'256B',req:4.07, byte:2.69,ohw:0.56},
+      {lbl:'512B',req:5.01, byte:6.17,ohw:0.57},
+      {lbl:'1KiB',req:2.28, byte:5.88,ohw:0.55},
+      {lbl:'2KiB',req:0.93, byte:5.01,ohw:0.62},
+      {lbl:'4KiB',req:0.67, byte:6.45,ohw:0.71},
+      {lbl:'8KiB',req:1.05, byte:21.25,ohw:0.38},
+      {lbl:'16KiB',req:0.19,byte:9.05,ohw:0.95},
+      {lbl:'32KiB',req:0.09,byte:6.16,ohw:0.86},
+    ],
+    jumpBin: 11,
+  },
+  cldphyBlk: {
+    name: 'cldphyBlk', label: 'cldphyBlk (OHWジャンプ型・段階的)', mode: 'ohw_jump',
+    color: '#f97316', pathClass: 'a',
+    desc: '1〜4KiBで r≈0.53 の低OHWゾーン後、64KiB以上で r≥0.80 に段階的に上昇。',
+    pred_T: 65536, actual_T: 262144,
+    finding: '1〜4KiBビン群 (r≈0.53) の後、64KiBで r=0.80 → <span class="threshold">T = 64KiB</span> (実際256KiBと±2ビン内)',
+    bins: [
+      {lbl:'512B', req:0.35, byte:0.03,ohw:0.86},
+      {lbl:'1KiB', req:33.83,byte:9.11,ohw:0.56},
+      {lbl:'2KiB', req:20.97,byte:9.81,ohw:0.51},
+      {lbl:'4KiB', req:43.50,byte:34.29,ohw:0.53},
+      {lbl:'8KiB', req:0.61, byte:1.09,ohw:0.51},
+      {lbl:'16KiB',req:0.20, byte:0.65,ohw:0.49},
+      {lbl:'32KiB',req:0.08, byte:0.63,ohw:0.55},
+      {lbl:'64KiB',req:0.07, byte:1.10,ohw:0.80},
+      {lbl:'128KiB',req:0.07,byte:2.31,ohw:0.75},
+      {lbl:'256KiB',req:0.16,byte:10.82,ohw:0.73},
+      {lbl:'512KiB',req:0.02,byte:3.25,ohw:0.93},
+      {lbl:'1MiB', req:0.14,byte:26.91,ohw:0.95},
+    ],
+    jumpBin: 7,
+  },
+  tncntBlk: {
+    name: 'tncntBlk', label: 'tncntBlk (CDF交差型)', mode: 'cdf_cross',
+    color: '#22c55e', pathClass: 'c',
+    desc: '全ビンで r<0.28 (OHWジャンプなし)。リクエストは小サイズ集中、バイトは大サイズ集中。',
+    pred_T: 16384, actual_T: 16384,
+    finding: '均一低OHW → Path A不成立。F_req+F_byte が bin14 (16KiB)で1.0超過 → <span class="threshold">T = 16KiB</span> (実際と完全一致)',
+    bins: [
+      {lbl:'512B', req:9.95, byte:0.24,ohw:0.00},
+      {lbl:'1KiB', req:0.73, byte:0.04,ohw:0.10},
+      {lbl:'2KiB', req:0.60, byte:0.08,ohw:0.28},
+      {lbl:'4KiB', req:42.31,byte:8.06,ohw:0.15},
+      {lbl:'8KiB', req:15.30,byte:6.61,ohw:0.20},
+      {lbl:'16KiB',req:11.21,byte:10.89,ohw:0.23},
+      {lbl:'32KiB',req:13.91,byte:24.92,ohw:0.25},
+      {lbl:'64KiB',req:3.15, byte:12.18,ohw:0.26},
+      {lbl:'128KiB',req:1.47,byte:11.70,ohw:0.26},
+      {lbl:'256KiB',req:0.99,byte:16.31,ohw:0.21},
+      {lbl:'512KiB',req:0.37,byte:8.97,ohw:0.20},
+    ],
+    crossBin: 5, // index where CDF first crosses 1.0
+  },
+  wikiCDN: {
+    name: 'wikiCDN', label: 'wikiCDN (CDF交差型・大サイズ分布)', mode: 'cdf_cross',
+    color: '#22c55e', pathClass: 'c',
+    desc: 'リクエストは8KiB付近に集中、バイトは1MiB〜4MiBに分散。均一OHWでCDF交差が閾値を指す。',
+    pred_T: 16384, actual_T: 65536,
+    finding: '全ビン r=0.21〜0.60 (OHWジャンプなし)。F_req+F_byte が bin14 (16KiB) 付近で1.0超過 → <span class="threshold">T = 16KiB</span> (実際64KiBと±2ビン内)',
+    bins: [
+      {lbl:'256B', req:8.62, byte:0.08,ohw:0.23},
+      {lbl:'512B', req:9.24, byte:0.17,ohw:0.30},
+      {lbl:'1KiB', req:6.71, byte:0.26,ohw:0.37},
+      {lbl:'2KiB', req:8.39, byte:0.63,ohw:0.46},
+      {lbl:'4KiB', req:15.41,byte:2.14,ohw:0.45},
+      {lbl:'8KiB', req:19.82,byte:5.64,ohw:0.38},
+      {lbl:'16KiB',req:16.34,byte:9.06,ohw:0.35},
+      {lbl:'32KiB',req:7.63, byte:8.40,ohw:0.36},
+      {lbl:'64KiB',req:3.60, byte:7.95,ohw:0.45},
+      {lbl:'128KiB',req:1.59,byte:7.06,ohw:0.49},
+      {lbl:'256KiB',req:0.79,byte:6.78,ohw:0.50},
+      {lbl:'512KiB',req:0.34,byte:5.93,ohw:0.52},
+      {lbl:'1MiB', req:0.21,byte:7.30,ohw:0.53},
+      {lbl:'2MiB', req:0.20,byte:14.24,ohw:0.56},
+      {lbl:'4MiB', req:0.11,byte:14.61,ohw:0.57},
+      {lbl:'8MiB', req:0.03,byte:7.42,ohw:0.60},
+    ],
+    crossBin: 6,
+  },
+  metaCDN: {
+    name: 'metaCDN', label: 'metaCDN (バルク隔離型)', mode: 'bulk',
+    color: '#a78bfa', pathClass: 'b',
+    desc: '512MiBビンが全バイトの95%を占有。この巨大ビンを大プールへ隔離することが本質。',
+    pred_T: 536870912, actual_T: 131072,
+    finding: '512MiBビンが byte の95%を占有 → <span class="threshold">T = 512MiB</span> で大プール隔離<br>(実験範囲上限1MiB。T=128KiB〜1MiBでも同効果)',
+    bins: [
+      {lbl:'512B', req:1.07, byte:0.00,ohw:0.62},
+      {lbl:'1KiB', req:4.46, byte:0.00,ohw:0.60},
+      {lbl:'2KiB', req:4.52, byte:0.00,ohw:0.63},
+      {lbl:'4KiB', req:5.52, byte:0.00,ohw:0.72},
+      {lbl:'8KiB', req:8.77, byte:0.00,ohw:0.69},
+      {lbl:'16KiB',req:10.69,byte:0.00,ohw:0.70},
+      {lbl:'32KiB',req:11.16,byte:0.01,ohw:0.68},
+      {lbl:'64KiB',req:9.58, byte:0.01,ohw:0.62},
+      {lbl:'128KiB',req:7.31,byte:0.01,ohw:0.56},
+      {lbl:'256KiB',req:5.02,byte:0.02,ohw:0.58},
+      {lbl:'512KiB',req:12.55,byte:0.12,ohw:0.39},
+      {lbl:'1MiB', req:3.39, byte:0.05,ohw:0.48},
+      {lbl:'32MiB',req:2.69, byte:1.47,ohw:0.21},
+      {lbl:'512MiB',req:2.06,byte:95.27,ohw:0.39},
+    ],
+    bulkBin: 13,
+  },
+};
+
+const MODE_COLORS = { ohw_jump:'#f97316', cdf_cross:'#22c55e', bulk:'#a78bfa' };
+const MODE_LABELS = {
+  ohw_jump: 'Path A: OHWジャンプ',
+  cdf_cross: 'Path C: CDF交差点',
+  bulk: 'Path B: バルク隔離',
+};
+
+let currentTrace = 'mrsBlk';
+let chartReq = null, chartOhw = null;
+
+function buildTraceList() {
+  const el = document.getElementById('traceList');
+  Object.values(TRACES).forEach(t => {
+    const btn = document.createElement('div');
+    btn.className = 'trace-btn' + (t.name === currentTrace ? ' active' : '');
+    btn.dataset.name = t.name;
+    const dot = `<div class="trace-dot" style="background:${MODE_COLORS[t.mode]}"></div>`;
+    const modeTag = `<span class="tag tag-${t.pathClass}" style="font-size:9px">${t.pathClass.toUpperCase()}</span>`;
+    btn.innerHTML = `${dot}<div><div class="name">${modeTag} ${t.name}</div><div class="type">${MODE_LABELS[t.mode]}</div></div>`;
+    btn.addEventListener('click', () => selectTrace(t.name));
+    el.appendChild(btn);
+  });
+}
+
+function selectTrace(name) {
+  currentTrace = name;
+  document.querySelectorAll('.trace-btn').forEach(b => b.classList.toggle('active', b.dataset.name === name));
+  renderCharts();
+}
+
+function renderCharts() {
+  const t = TRACES[currentTrace];
+  const labels = t.bins.map(b => b.lbl);
+  const colors = {
+    req:  'rgba(79,142,247,0.8)',
+    byte: 'rgba(249,115,22,0.8)',
+    ohw:  'rgba(239,68,68,1)',
+    cdf:  'rgba(34,197,94,0.9)',
+    threshold: MODE_COLORS[t.mode],
+  };
+
+  // Compute CDF
+  let cr=0,cb=0;
+  const cdf = t.bins.map(b => { cr+=b.req; cb+=b.byte; return +(cr+cb).toFixed(1); });
+
+  const section = document.getElementById('chartSection');
+  section.innerHTML = `
+    <div class="chart-panel">
+      <div class="chart-header">
+        <div>
+          <div class="trace-name">${t.label}</div>
+          <div>
+            <span class="mode-badge" style="color:${colors.threshold};border-color:${colors.threshold}">${MODE_LABELS[t.mode]}</span>
+          </div>
+          <div class="desc">${t.desc}</div>
+        </div>
+      </div>
+      <div class="chart-body">
+        <div class="chart-box">
+          <div class="chart-box-title">リクエスト分布 &amp; バイト分布</div>
+          <canvas id="cvReq" height="200"></canvas>
+        </div>
+        <div class="chart-box">
+          <div class="chart-box-title">OHW率 &amp; 累積 F_req+F_byte</div>
+          <canvas id="cvOhw" height="200"></canvas>
+        </div>
+      </div>
+      <div class="finding finding-${t.pathClass}">
+        <strong>判定根拠:</strong> ${t.finding}
+        &nbsp;|&nbsp; 予測: <span class="threshold">${fmtBytes(t.pred_T)}</span>
+        &nbsp;→&nbsp; 実際: <span class="threshold">${fmtBytes(t.actual_T)}</span>
+      </div>
+    </div>`;
+
+  // ─ Chart 1: req + byte bars with threshold annotation
+  if (chartReq) chartReq.destroy();
+  const annReq = [];
+  const threshLabel = getThreshLabel(t, labels);
+  if (threshLabel) {
+    annReq.push({
+      type:'line', scaleID:'x', value: threshLabel,
+      borderColor: colors.threshold, borderWidth:2, borderDash:[4,3],
+      label:{ display:true, content:'T', position:'start', color:colors.threshold,
+              backgroundColor:'transparent', font:{size:11,weight:'bold'} }
+    });
+  }
+  chartReq = new Chart(document.getElementById('cvReq').getContext('2d'), {
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        { label:'Req%', data:t.bins.map(b=>b.req), backgroundColor:colors.req, order:2 },
+        { label:'Byte%', data:t.bins.map(b=>b.byte), backgroundColor:colors.byte, order:2 },
+      ]
+    },
+    options:{
+      responsive:true, animation:false,
+      scales:{
+        x:{ stacked:false, ticks:{color:'#6b7399',font:{size:9}}, grid:{color:'#1e2335'} },
+        y:{ ticks:{color:'#6b7399',font:{size:10},callback:v=>v+'%'}, grid:{color:'#1e2335'}, max:100 }
+      },
+      plugins:{
+        legend:{ labels:{color:'#d4d8f0',font:{size:11},boxWidth:10} },
+        annotation:{ annotations: annReq }
+      }
+    }
+  });
+
+  // ─ Chart 2: OHW rate + CDF line + threshold
+  if (chartOhw) chartOhw.destroy();
+  const annOhw = [
+    { type:'line', scaleID:'y', value:75, borderColor:'rgba(239,68,68,0.4)', borderWidth:1, borderDash:[3,3],
+      label:{display:true,content:'r=0.75',position:'end',color:'#ef4444',backgroundColor:'transparent',font:{size:9}} },
+    { type:'line', scaleID:'y2', value:100, borderColor:'rgba(34,197,94,0.4)', borderWidth:1, borderDash:[3,3],
+      label:{display:true,content:'CDF=1',position:'start',color:'#22c55e',backgroundColor:'transparent',font:{size:9}} },
+  ];
+  if (threshLabel) {
+    annOhw.push({
+      type:'line', scaleID:'x', value:threshLabel,
+      borderColor:colors.threshold, borderWidth:2, borderDash:[4,3],
+      label:{display:true,content:'T',position:'start',color:colors.threshold,
+             backgroundColor:'transparent',font:{size:11,weight:'bold'}}
+    });
+  }
+  chartOhw = new Chart(document.getElementById('cvOhw').getContext('2d'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        { label:'OHW率(%)', data:t.bins.map(b=>+(b.ohw*100).toFixed(1)),
+          borderColor:colors.ohw, backgroundColor:'rgba(239,68,68,0.1)',
+          tension:.3, fill:true, pointRadius:3, yAxisID:'y', order:1 },
+        { label:'F_req+F_byte(%)', data:cdf,
+          borderColor:colors.cdf, backgroundColor:'rgba(34,197,94,0.05)',
+          tension:.2, fill:false, pointRadius:2, borderDash:[4,3], yAxisID:'y2', order:2 },
+      ]
+    },
+    options:{
+      responsive:true, animation:false,
+      scales:{
+        x:{ ticks:{color:'#6b7399',font:{size:9}}, grid:{color:'#1e2335'} },
+        y:{ position:'left', min:0, max:100, ticks:{color:'#ef8888',font:{size:10},callback:v=>v+'%'}, grid:{color:'#1e2335'},
+            title:{display:true,text:'OHW率',color:'#ef8888',font:{size:10}} },
+        y2:{ position:'right', min:0, max:210, ticks:{color:'#6bcf8a',font:{size:10},callback:v=>v+'%'},
+             grid:{drawOnChartArea:false},
+             title:{display:true,text:'CDF合計',color:'#6bcf8a',font:{size:10}} },
+      },
+      plugins:{
+        legend:{ labels:{color:'#d4d8f0',font:{size:11},boxWidth:10} },
+        annotation:{ annotations: annOhw }
+      }
+    }
+  });
+}
+
+function getThreshLabel(t, labels) {
+  if (t.mode === 'ohw_jump' && t.jumpBin !== undefined) {
+    return labels[t.jumpBin] ?? null;
+  }
+  if (t.mode === 'cdf_cross' && t.crossBin !== undefined) {
+    return labels[t.crossBin] ?? null;
+  }
+  if (t.mode === 'bulk' && t.bulkBin !== undefined) {
+    return labels[t.bulkBin] ?? null;
+  }
+  return null;
+}
+
+function fmtBytes(b) {
+  if (b >= 1<<30) return (b>>30)+'GiB';
+  if (b >= 1<<20) return (b>>20)+'MiB';
+  if (b >= 1<<10) return (b>>10)+'KiB';
+  return b+'B';
+}
+
+// Chart.js annotation plugin inline
+(function() {
+  const ann = Chart.registry.plugins.get('annotation');
+  if (!ann) {
+    console.warn('annotation plugin not loaded from CDN — threshold lines disabled');
+  }
+})();
+
+buildTraceList();
+renderCharts();
+</script>
+
+<!-- Load annotation plugin -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"></script>
+<script>
+// Re-render after annotation plugin loads
+setTimeout(() => {
+  if (chartReq) chartReq.destroy();
+  if (chartOhw) chartOhw.destroy();
+  chartReq = null; chartOhw = null;
+  renderCharts();
+}, 50);
+</script>
+</body>
+</html>

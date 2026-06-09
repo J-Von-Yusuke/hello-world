@@ -1,0 +1,443 @@
+
+<h2 class="sr-only">RegionSplit性能条件マップ：サイズ分布・OHW率・Zipf slope・ビン内局所性から性能改善/悪化を判定する6ケースの図解</h2>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);font-size:13px;color:var(--color-text-primary);background:transparent;padding:8px 4px}
+.page-title{font-size:15px;font-weight:500;margin-bottom:2px}
+.page-sub{font-size:12px;color:var(--color-text-secondary);margin-bottom:14px}
+.section-label{font-size:11px;font-weight:500;color:var(--color-text-secondary);letter-spacing:.04em;text-transform:uppercase;margin:18px 0 8px}
+.grid{display:grid;gap:10px}
+.g2{grid-template-columns:1fr 1fr}
+.g1{grid-template-columns:1fr}
+.card{border:.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);background:var(--color-background-primary);padding:10px 12px}
+.card-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+.card-title{font-size:12px;font-weight:500}
+.badge{font-size:10px;font-weight:500;padding:2px 8px;border-radius:var(--border-radius-md);white-space:nowrap}
+.bg-good{background:#EAF3DE;color:#3B6D11}
+.bg-warn{background:#FAEEDA;color:#854F0B}
+.bg-bad{background:#FCEBEB;color:#A32D2D}
+.bg-info{background:#E6F1FB;color:#185FA5}
+.bg-mixed{background:#EEEDFE;color:#3C3489}
+.desc{font-size:11px;color:var(--color-text-secondary);line-height:1.45;margin-bottom:7px}
+.metrics{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.metric{font-size:10.5px;padding:2px 7px;border-radius:var(--border-radius-md);border:.5px solid var(--color-border-tertiary);background:var(--color-background-secondary)}
+.metric.g{border-color:#97C459;background:#EAF3DE;color:#3B6D11}
+.metric.b{border-color:#F09595;background:#FCEBEB;color:#A32D2D}
+.metric.w{border-color:#FAC775;background:#FAEEDA;color:#854F0B}
+.metric.p{border-color:#AFA9EC;background:#EEEDFE;color:#3C3489}
+.rule{border:none;border-top:.5px solid var(--color-border-tertiary);margin:6px 0}
+.note{font-size:10px;color:var(--color-text-secondary);line-height:1.4}
+.formula-box{background:var(--color-background-secondary);border-left:2px solid var(--color-border-secondary);border-radius:0 var(--border-radius-md) var(--border-radius-md) 0;padding:6px 10px;font-size:11px;font-family:var(--font-mono);margin:6px 0}
+.fw-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.fw-box{border:.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:7px;text-align:center;font-size:11px}
+.fw-box .fw-t{font-size:12px;font-weight:500;margin-bottom:3px}
+.cond-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:8px}
+.cond-col{border:.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:6px;font-size:10px;text-align:center}
+.cond-col .cond-head{font-weight:500;font-size:10.5px;margin-bottom:4px;padding-bottom:4px;border-bottom:.5px solid var(--color-border-tertiary)}
+svg text{font-family:var(--font-sans)}
+</style>
+
+<div class="page-title">RegionSplit 性能条件マップ（改訂版）</div>
+<div class="page-sub">サイズ分布・OHW率・Zipf slope・ビン内局所性（a）から判定する7ケース。WL7/WL8の知見を反映。</div>
+
+<div class="card g1" style="margin-bottom:10px">
+  <div class="card-head"><span class="badge bg-info">判定フレームワーク</span></div>
+  <div class="formula-box">ΔBMR ≈ B_protect × (1−OHW_protect) × D_size × C_partition × f(global_α, local_a)</div>
+  <div class="fw-grid">
+    <div class="fw-box" style="border-color:#97C459;background:#EAF3DE">
+      <div class="fw-t" style="color:#3B6D11">BMR改善</div>
+      <div style="color:#3B6D11;font-size:10px">B×(1−r) 大<br>D_size 大（サイズ差）<br>C_partition ≥ 1<br>local_a 低〜中</div>
+    </div>
+    <div class="fw-box" style="border-color:#FAC775;background:#FAEEDA">
+      <div class="fw-t" style="color:#854F0B">中立</div>
+      <div style="color:#854F0B;font-size:10px">B×(1−r) 小<br>またはD_size≈1<br>またはlocal_a 高でLRU最適</div>
+    </div>
+    <div class="fw-box" style="border-color:#F09595;background:#FCEBEB">
+      <div class="fw-t" style="color:#A32D2D">BMR悪化</div>
+      <div style="color:#A32D2D;font-size:10px">C_partition＜1<br>（大プール過負荷）<br>またはglobal_α 高</div>
+    </div>
+  </div>
+  <div style="margin-top:8px;font-size:10.5px;color:var(--color-text-secondary)">
+    <strong style="color:var(--color-text-primary)">「汚染源」の再定義（WL7の知見）：</strong>OHWが高い必要はない。GC単位あたりの価値密度 = (1−OHW) / mean_size が低い大サイズコンテンツであれば干渉が発生する。
+  </div>
+</div>
+
+<div class="section-label">ケース別図解</div>
+
+<div class="grid g2">
+
+<!-- ===== CASE 1 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース1</span>
+    <span class="card-title">Block Cache型（強OHW勾配）</span>
+    <span class="badge bg-good">BMR大幅改善</span>
+  </div>
+  <div class="desc">大サイズほどOHW急上昇。保護対象（中サイズ・中OHW・高バイト）と汚染源（大サイズ・高OHW）が明確に分離できる。<br>代表: DS3実トレース / WL-01b / WL-06</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <rect x="0" y="0" width="175" height="118" fill="#EAF3DE" rx="3"/>
+    <rect x="175" y="0" width="165" height="118" fill="#FCEBEB" rx="3"/>
+    <text x="55"  y="12" font-size="8" fill="#3B6D11" font-weight="500" text-anchor="middle">小プール（保護対象）</text>
+    <text x="258" y="12" font-size="8" fill="#A32D2D" font-weight="500" text-anchor="middle">大プール（汚染源）</text>
+    <line x1="175" y1="0" x2="175" y2="118" stroke="#888" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="175" y="128" font-size="8" fill="#444" text-anchor="middle">閾値 512KB</text>
+    <text x="175" y="138" font-size="7.5" fill="#666" text-anchor="middle">OHW急上昇点</text>
+    <g transform="translate(4,18)">
+      <rect x="5"   y="95" width="22" height="1"  fill="#378ADD" opacity=".85"/>
+      <rect x="38"  y="40" width="55" height="56" fill="#378ADD" opacity=".85"/>
+      <rect x="178" y="50" width="42" height="46" fill="#E24B4A" opacity=".8"/>
+      <rect x="246" y="14" width="50" height="82" fill="#E24B4A" opacity=".8"/>
+      <polyline points="16,84 65,46 199,20 271,14" fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="16"  cy="84" r="3" fill="#BA7517"/>
+      <circle cx="65"  cy="46" r="3" fill="#BA7517"/>
+      <circle cx="199" cy="20" r="3" fill="#BA7517"/>
+      <circle cx="271" cy="14" r="3" fill="#BA7517"/>
+      <text x="16"  y="79" font-size="7.5" fill="#854F0B" text-anchor="middle">15%</text>
+      <text x="65"  y="41" font-size="7.5" fill="#854F0B" text-anchor="middle">65%</text>
+      <text x="199" y="15" font-size="7.5" fill="#854F0B" text-anchor="middle">94%</text>
+      <text x="271" y="10" font-size="7.5" fill="#854F0B" text-anchor="middle">98%</text>
+      <text x="16"  y="110" font-size="7" fill="#444" text-anchor="middle">&lt;8KB</text>
+      <text x="65"  y="110" font-size="7" fill="#444" text-anchor="middle">256K-512K</text>
+      <text x="199" y="110" font-size="7" fill="#444" text-anchor="middle">512K-1M</text>
+      <text x="271" y="110" font-size="7" fill="#444" text-anchor="middle">1M-2M</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric g">B×(1-r) = 9〜11</span>
+    <span class="metric g">D_size = 4〜5倍</span>
+    <span class="metric">global_α = 0.47〜0.56</span>
+    <span class="metric">local_a = 低〜中</span>
+    <span class="metric g">ΔBMR = −0.70〜−0.99%pt</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> OHW急上昇境界が閾値候補。保護対象byte% ≥ 10% かつ OHW中程度（50〜80%）が必要。</div>
+</div>
+
+<!-- ===== CASE 2 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース2</span>
+    <span class="card-title">サイズ差のみ型（OHW均一・WL7）</span>
+    <span class="badge bg-good">BMR改善（新発見）</span>
+  </div>
+  <div class="desc">OHWが全帯域で均一低（20〜26%）でも、GC単位あたり価値密度の差（大サイズ＝密度低）が干渉を生み出す。<br>代表: WL7（256KB帯byte=43%）</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <rect x="0" y="0" width="195" height="118" fill="#EAF3DE" rx="3"/>
+    <rect x="195" y="0" width="145" height="118" fill="#FAEEDA" rx="3"/>
+    <text x="75"  y="12" font-size="8" fill="#3B6D11" font-weight="500" text-anchor="middle">小プール（高密度保護）</text>
+    <text x="268" y="12" font-size="8" fill="#854F0B" font-weight="500" text-anchor="middle">大プール（低密度）</text>
+    <line x1="195" y1="0" x2="195" y2="118" stroke="#888" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="195" y="128" font-size="8" fill="#444" text-anchor="middle">閾値 512KB</text>
+    <text x="195" y="138" font-size="7.5" fill="#666" text-anchor="middle">サイズ差 D_size≈4倍</text>
+    <g transform="translate(4,18)">
+      <rect x="5"   y="97" width="22" height="1"  fill="#378ADD" opacity=".85"/>
+      <rect x="50"  y="38" width="65" height="59" fill="#378ADD" opacity=".85"/>
+      <rect x="196" y="68" width="36" height="29" fill="#63991A" opacity=".8"/>
+      <rect x="255" y="48" width="40" height="49" fill="#63991A" opacity=".8"/>
+      <polyline points="16,80 82,76 214,77 275,79" fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="16"  cy="80" r="3" fill="#BA7517"/>
+      <circle cx="82"  cy="76" r="3" fill="#BA7517"/>
+      <circle cx="214" cy="77" r="3" fill="#BA7517"/>
+      <circle cx="275" cy="79" r="3" fill="#BA7517"/>
+      <text x="16"  y="75" font-size="7.5" fill="#854F0B" text-anchor="middle">24%</text>
+      <text x="82"  y="71" font-size="7.5" fill="#854F0B" text-anchor="middle">24%</text>
+      <text x="214" y="72" font-size="7.5" fill="#854F0B" text-anchor="middle">22%</text>
+      <text x="275" y="74" font-size="7.5" fill="#854F0B" text-anchor="middle">20%</text>
+      <text x="16"  y="110" font-size="7" fill="#444" text-anchor="middle">&lt;64KB</text>
+      <text x="82"  y="110" font-size="7" fill="#444" text-anchor="middle">256K-512K</text>
+      <text x="214" y="110" font-size="7" fill="#444" text-anchor="middle">512K-1M</text>
+      <text x="275" y="110" font-size="7" fill="#444" text-anchor="middle">1M-2M</text>
+      <text x="82"  y="35" font-size="7.5" fill="#3B6D11" text-anchor="middle">byte=43%↑</text>
+      <text x="275" y="45" font-size="7.5" fill="#854F0B" text-anchor="middle">byte=24%</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric g">B×(1-r) = 32.8（最大）</span>
+    <span class="metric g">D_size = 4倍</span>
+    <span class="metric w">OHW均一（20〜26%）</span>
+    <span class="metric">大プール負荷率=1.28倍</span>
+    <span class="metric g">ΔBMR = −1.08〜−1.23%pt</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> OHW高不要。保護対象のbyte%が大きく（43%）、大プールの過負荷率が低い（≤1.3倍）ときに成立。</div>
+</div>
+
+<!-- ===== CASE 3 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース3</span>
+    <span class="card-title">大プール過負荷型（WL8）</span>
+    <span class="badge bg-warn">中立（過負荷で相殺）</span>
+  </div>
+  <div class="desc">ケース2と同じOHW均一型だが、大サイズ帯のbyte%が増えて大プールが過負荷（負荷率≥1.6倍）。C_partitionが低下し改善が相殺される。<br>代表: WL8（1MB-2MB byte=30%）</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <rect x="0" y="0" width="190" height="118" fill="#EAF3DE" rx="3"/>
+    <rect x="190" y="0" width="150" height="118" fill="#FCEBEB" rx="3" opacity=".6"/>
+    <line x1="190" y1="0" x2="190" y2="118" stroke="#888" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="95"  y="12" font-size="8" fill="#3B6D11" font-weight="500" text-anchor="middle">小プール</text>
+    <text x="265" y="12" font-size="8" fill="#A32D2D" font-weight="500" text-anchor="middle">大プール（過負荷）</text>
+    <text x="190" y="128" font-size="8" fill="#444" text-anchor="middle">閾値 512KB</text>
+    <text x="190" y="138" font-size="7.5" fill="#c00" text-anchor="middle">負荷率 1.61倍 ← 過大</text>
+    <g transform="translate(4,18)">
+      <rect x="5"   y="97" width="20" height="1"  fill="#378ADD" opacity=".85"/>
+      <rect x="45"  y="54" width="52" height="43" fill="#378ADD" opacity=".85"/>
+      <rect x="196" y="60" width="37" height="37" fill="#E24B4A" opacity=".7"/>
+      <rect x="258" y="30" width="44" height="67" fill="#E24B4A" opacity=".7"/>
+      <polyline points="15,78 71,77 215,77 280,79" fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="15"  cy="78" r="3" fill="#BA7517"/>
+      <circle cx="71"  cy="77" r="3" fill="#BA7517"/>
+      <circle cx="215" cy="77" r="3" fill="#BA7517"/>
+      <circle cx="280" cy="79" r="3" fill="#BA7517"/>
+      <text x="15"  y="73" font-size="7.5" fill="#854F0B" text-anchor="middle">24%</text>
+      <text x="71"  y="72" font-size="7.5" fill="#854F0B" text-anchor="middle">24%</text>
+      <text x="215" y="72" font-size="7.5" fill="#854F0B" text-anchor="middle">22%</text>
+      <text x="280" y="74" font-size="7.5" fill="#854F0B" text-anchor="middle">20%</text>
+      <text x="15"  y="110" font-size="7" fill="#444" text-anchor="middle">&lt;64KB</text>
+      <text x="71"  y="110" font-size="7" fill="#444" text-anchor="middle">256K-512K</text>
+      <text x="215" y="110" font-size="7" fill="#444" text-anchor="middle">512K-1M</text>
+      <text x="280" y="110" font-size="7" fill="#444" text-anchor="middle">1M-2M</text>
+      <text x="71"  y="51" font-size="7.5" fill="#3B6D11" text-anchor="middle">byte=33%</text>
+      <text x="280" y="27" font-size="7.5" fill="#A32D2D" text-anchor="middle">byte=30%↑</text>
+      <rect x="186" y="2" width="148" height="14" fill="none" stroke="#E24B4A" stroke-width="1" stroke-dasharray="2,2" rx="2"/>
+      <text x="260" y="12" font-size="7.5" fill="#A32D2D" text-anchor="middle">48%bytes / 30%cache</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric w">B×(1-r) = 25.2（大）</span>
+    <span class="metric w">大プール負荷率 = 1.61倍</span>
+    <span class="metric b">C_partition低下</span>
+    <span class="metric">global_α = 0.45</span>
+    <span class="metric w">ΔBMR ≈ +0.01〜+0.11%pt</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> 大プール負荷率 = 大プールbyte% / pool_ratio。1.5倍超で競合激化。C_partition = max(0.1, 1 − 0.5×(負荷率−1))</div>
+</div>
+
+<!-- ===== CASE 4 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース4</span>
+    <span class="card-title">均一低OHW型（Tencent Block）</span>
+    <span class="badge bg-bad">BMR悪化（大プール内競合）</span>
+  </div>
+  <div class="desc">全帯域OHW均一低（15〜25%）かつ各帯域がほぼ同規模のバイト量。大プール内で異なるサイズが競合し、大サイズが中サイズを排出。<br>代表: Tencent Block / WL-03</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <rect x="0" y="0" width="340" height="118" fill="#FCEBEB" rx="3" opacity=".35"/>
+    <text x="170" y="12" font-size="8" fill="#A32D2D" font-weight="500" text-anchor="middle">全域: 均一低OHW → 分離境界なし → 大プール内競合が発生</text>
+    <g transform="translate(4,18)">
+      <rect x="5"   y="96" width="30" height="2"  fill="#378ADD" opacity=".8"/>
+      <rect x="47"  y="93" width="30" height="5"  fill="#378ADD" opacity=".8"/>
+      <rect x="89"  y="90" width="30" height="8"  fill="#378ADD" opacity=".8"/>
+      <rect x="131" y="83" width="30" height="15" fill="#378ADD" opacity=".8"/>
+      <rect x="173" y="74" width="30" height="24" fill="#378ADD" opacity=".8"/>
+      <rect x="215" y="53" width="30" height="45" fill="#378ADD" opacity=".8"/>
+      <rect x="257" y="18" width="34" height="80" fill="#378ADD" opacity=".8"/>
+      <polyline points="20,82 62,82 104,82 146,82 188,81 230,81 274,80" fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="20"  cy="82" r="2.5" fill="#BA7517"/>
+      <circle cx="62"  cy="82" r="2.5" fill="#BA7517"/>
+      <circle cx="104" cy="82" r="2.5" fill="#BA7517"/>
+      <circle cx="146" cy="82" r="2.5" fill="#BA7517"/>
+      <circle cx="188" cy="81" r="2.5" fill="#BA7517"/>
+      <circle cx="230" cy="81" r="2.5" fill="#BA7517"/>
+      <circle cx="274" cy="80" r="2.5" fill="#BA7517"/>
+      <rect x="0" y="76" width="330" height="10" fill="none" stroke="#BA7517" stroke-dasharray="3,2" stroke-width="1" opacity=".5"/>
+      <text x="305" y="85" font-size="7.5" fill="#854F0B">≈20%</text>
+      <text x="120" y="65" font-size="7.5" fill="#A32D2D" font-weight="500">OHWフラット → 閾値どこでも「廃棄コンテンツ」なし</text>
+      <text x="20"  y="110" font-size="6.5" fill="#444" text-anchor="middle">4K-8K</text>
+      <text x="62"  y="110" font-size="6.5" fill="#444" text-anchor="middle">8K-16K</text>
+      <text x="104" y="110" font-size="6.5" fill="#444" text-anchor="middle">16K-32K</text>
+      <text x="146" y="110" font-size="6.5" fill="#444" text-anchor="middle">32K-64K</text>
+      <text x="188" y="110" font-size="6.5" fill="#444" text-anchor="middle">64K-128K</text>
+      <text x="230" y="110" font-size="6.5" fill="#444" text-anchor="middle">128K-256K</text>
+      <text x="274" y="110" font-size="6.5" fill="#444" text-anchor="middle">256K-512K</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric b">OHW変動幅 &lt; 15%pt</span>
+    <span class="metric b">C_partition 負</span>
+    <span class="metric">global_α = 0.47〜1.2</span>
+    <span class="metric b">ΔBMR = +0.1〜+0.43%pt</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> 大プール内で均一低OHWの異サイズが競合。大サイズが中サイズを排出しBMR悪化。Zipf alphaが高いほど悪化が激しい。</div>
+</div>
+
+<!-- ===== CASE 5 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース5</span>
+    <span class="card-title">高local_a型（LRU最適・WL8-like）</span>
+    <span class="badge bg-warn">中立（LRU済み最適化）</span>
+  </div>
+  <div class="desc">ビン内局所性（local_a）が高く、LRUが各サイズ帯内でホットオブジェクトを自然保持。RegionSplitが追加できる価値が薄い。global_αが低くても高性能。<br>代表: WL8（a↑, global_α=0.45）</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <g transform="translate(4,8)">
+      <rect x="4" y="2" width="154" height="110" fill="#E6F1FB" rx="3"/>
+      <rect x="172" y="2" width="160" height="110" fill="#EAF3DE" rx="3"/>
+      <text x="81"  y="14" font-size="8" fill="#185FA5" font-weight="500" text-anchor="middle">global Zipf slope（横断）</text>
+      <text x="252" y="14" font-size="8" fill="#3B6D11" font-weight="500" text-anchor="middle">ビン内 local_a（縦断）</text>
+      <line x1="162" y1="2" x2="162" y2="112" stroke="#aaa" stroke-width=".5"/>
+      <polyline points="15,95 55,85 95,70 135,50" fill="none" stroke="#378ADD" stroke-width="2" stroke-linejoin="round" stroke-dasharray="0"/>
+      <text x="15"  y="103" font-size="7" fill="#185FA5" text-anchor="middle">obj1</text>
+      <text x="55"  y="103" font-size="7" fill="#185FA5" text-anchor="middle">obj2</text>
+      <text x="95"  y="103" font-size="7" fill="#185FA5" text-anchor="middle">obj3</text>
+      <text x="135" y="103" font-size="7" fill="#185FA5" text-anchor="middle">obj4</text>
+      <text x="75" y="45" font-size="7.5" fill="#185FA5">global_α=0.45 → 比較的均一</text>
+      <rect x="182" y="26" width="20" height="80" fill="#639922" opacity=".7" rx="2"/>
+      <rect x="212" y="56" width="20" height="50" fill="#639922" opacity=".7" rx="2"/>
+      <rect x="242" y="76" width="20" height="30" fill="#639922" opacity=".7" rx="2"/>
+      <rect x="272" y="86" width="20" height="20" fill="#639922" opacity=".7" rx="2"/>
+      <text x="192" y="113" font-size="7" fill="#3B6D11" text-anchor="middle">A1</text>
+      <text x="222" y="113" font-size="7" fill="#3B6D11" text-anchor="middle">A2</text>
+      <text x="252" y="113" font-size="7" fill="#3B6D11" text-anchor="middle">A3</text>
+      <text x="282" y="113" font-size="7" fill="#3B6D11" text-anchor="middle">A4</text>
+      <text x="237" y="20" font-size="7.5" fill="#3B6D11">ビン内 local_a 高 → A1が超人気</text>
+      <text x="237" y="30" font-size="7.5" fill="#3B6D11">→ LRUがA1を自然保持</text>
+      <text x="75" y="125" font-size="7.5" fill="#555">各ビンの「A1」がグローバルに見ると均等</text>
+      <text x="75" y="135" font-size="7.5" fill="#555">→ global_αが下がるが、キャッシュ性能は高い</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric p">local_a 高（ビン内集中）</span>
+    <span class="metric w">global_α 低（0.45）</span>
+    <span class="metric g">LRU MR = 24%（高性能）</span>
+    <span class="metric w">RegionSplit追加価値なし</span>
+    <span class="metric w">ΔBMR ≈ 0〜+0.11%pt</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> global_α ≠ LRU最適性の指標。ビン内 local_a が高いとLRUが局所最適化 → RegionSplitの追加価値が消える。</div>
+</div>
+
+<!-- ===== CASE 6 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース6</span>
+    <span class="card-title">CDN型（逆転OHW）</span>
+    <span class="badge bg-warn">中立〜有害</span>
+  </div>
+  <div class="desc">大サイズほどOHW低い（価値ある）。LRUが自然に大サイズを保持。分割しても「汚染源」と「保護対象」が入れ替わり効果なし。<br>代表: Meta CDN / WL-02</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <rect x="0" y="0" width="340" height="118" fill="#FAEEDA" rx="3" opacity=".4"/>
+    <text x="170" y="12" font-size="8" fill="#854F0B" font-weight="500" text-anchor="middle">全域: 大サイズほどOHW低い → 大サイズが最も価値ある → 分割無意味</text>
+    <g transform="translate(4,18)">
+      <rect x="10"  y="97" width="32" height="1"  fill="#378ADD" opacity=".8"/>
+      <rect x="70"  y="93" width="32" height="5"  fill="#378ADD" opacity=".8"/>
+      <rect x="130" y="79" width="38" height="19" fill="#378ADD" opacity=".8"/>
+      <rect x="192" y="50" width="42" height="48" fill="#378ADD" opacity=".8"/>
+      <rect x="260" y="14" width="50" height="84" fill="#378ADD" opacity=".8"/>
+      <polyline points="26,35 86,50 149,75 213,87 285,91" fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="26"  cy="35" r="3" fill="#BA7517"/>
+      <circle cx="86"  cy="50" r="3" fill="#BA7517"/>
+      <circle cx="149" cy="75" r="3" fill="#BA7517"/>
+      <circle cx="213" cy="87" r="3" fill="#BA7517"/>
+      <circle cx="285" cy="91" r="3" fill="#BA7517"/>
+      <text x="26"  y="31" font-size="7.5" fill="#854F0B" text-anchor="middle">80%</text>
+      <text x="86"  y="46" font-size="7.5" fill="#854F0B" text-anchor="middle">60%</text>
+      <text x="149" y="71" font-size="7.5" fill="#854F0B" text-anchor="middle">20%</text>
+      <text x="213" y="83" font-size="7.5" fill="#854F0B" text-anchor="middle">15%</text>
+      <text x="285" y="87" font-size="7.5" fill="#854F0B" text-anchor="middle">12%</text>
+      <text x="26"  y="110" font-size="7" fill="#444" text-anchor="middle">16M-32M</text>
+      <text x="86"  y="110" font-size="7" fill="#444" text-anchor="middle">32M-64M</text>
+      <text x="149" y="110" font-size="7" fill="#444" text-anchor="middle">64M-128M</text>
+      <text x="213" y="110" font-size="7" fill="#444" text-anchor="middle">128M-256M</text>
+      <text x="285" y="110" font-size="7" fill="#444" text-anchor="middle">256M-512M</text>
+      <path d="M60,42 L160,74" stroke="#BA7517" stroke-dasharray="3,2" stroke-width="1" opacity=".6"/>
+      <text x="115" y="52" font-size="7.5" fill="#854F0B" transform="rotate(18,115,52)">OHW↓ 大サイズほど価値高</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric b">保護すべき「廃棄コンテンツ」なし</span>
+    <span class="metric w">global_α = 0.7〜0.8</span>
+    <span class="metric w">ΔBMR ≈ 0（全閾値）</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> OHW勾配が逆向き。大サイズコンテンツはキャッシュに留まるべき価値あるコンテンツ。隔離すると逆効果。</div>
+</div>
+
+<!-- ===== CASE 7 ===== -->
+<div class="card">
+  <div class="card-head">
+    <span style="font-size:11px;font-weight:500;color:var(--color-text-secondary)">ケース7</span>
+    <span class="card-title">二峰性汚染型（MR改善・BMR中立）</span>
+    <span class="badge bg-mixed">MR↓ / BMR 中立</span>
+  </div>
+  <div class="desc">小サイズ低OHW（リクエスト多・byte≈0）と大サイズ超高OHW（byte大）の二峰分布。MRとBMRの改善条件が独立していることを示す典型例。<br>代表: WL-05</div>
+  <svg width="100%" height="148" viewBox="0 0 340 148">
+    <rect x="0" y="0" width="130" height="118" fill="#E6F1FB" rx="3"/>
+    <rect x="130" y="0" width="210" height="118" fill="#FCEBEB" rx="3"/>
+    <line x1="130" y1="0" x2="130" y2="118" stroke="#888" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="65"  y="12" font-size="8" fill="#185FA5" font-weight="500" text-anchor="middle">小プール</text>
+    <text x="235" y="12" font-size="8" fill="#A32D2D" font-weight="500" text-anchor="middle">大プール（汚染源・超高OHW）</text>
+    <text x="130" y="128" font-size="8" fill="#444" text-anchor="middle">閾値 8KB</text>
+    <g transform="translate(4,18)">
+      <rect x="20"  y="97" width="80" height="1"  fill="#378ADD" opacity=".85"/>
+      <rect x="138" y="85" width="35" height="13" fill="#E24B4A" opacity=".8"/>
+      <rect x="188" y="58" width="37" height="40" fill="#E24B4A" opacity=".8"/>
+      <rect x="242" y="20" width="44" height="78" fill="#E24B4A" opacity=".8"/>
+      <polyline points="60,72 156,18 207,17 264,16" fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="60"  cy="72" r="3" fill="#BA7517"/>
+      <circle cx="156" cy="18" r="3" fill="#BA7517"/>
+      <circle cx="207" cy="17" r="3" fill="#BA7517"/>
+      <circle cx="264" cy="16" r="3" fill="#BA7517"/>
+      <text x="60"  y="67" font-size="7.5" fill="#854F0B" text-anchor="middle">25%</text>
+      <text x="156" y="14" font-size="7.5" fill="#854F0B" text-anchor="middle">95%</text>
+      <text x="207" y="13" font-size="7.5" fill="#854F0B" text-anchor="middle">97%</text>
+      <text x="264" y="12" font-size="7.5" fill="#854F0B" text-anchor="middle">98%</text>
+      <text x="60"  y="110" font-size="7" fill="#444" text-anchor="middle">1KB-8KB</text>
+      <text x="156" y="110" font-size="7" fill="#444" text-anchor="middle">32M-64M</text>
+      <text x="207" y="110" font-size="7" fill="#444" text-anchor="middle">64M-128M</text>
+      <text x="264" y="110" font-size="7" fill="#444" text-anchor="middle">256M-512M</text>
+      <text x="60"  y="94" font-size="7.5" fill="#185FA5" text-anchor="middle">byte≈0%</text>
+      <text x="60"  y="84" font-size="7.5" fill="#185FA5" text-anchor="middle">req=47%↑</text>
+    </g>
+  </svg>
+  <div class="metrics">
+    <span class="metric g">ΔMR = −3.0%pt（大）</span>
+    <span class="metric w">B_protect×(1-r) ≈ 0（byte≈0）</span>
+    <span class="metric w">ΔBMR ≈ −0.002%pt（≈0）</span>
+  </div>
+  <hr class="rule">
+  <div class="note"><strong style="color:var(--color-text-primary)">鍵:</strong> MRはリクエスト量依存、BMRはbyte量依存。保護対象のbyte%≈0のためBMRは改善しない。MR改善はbyte改善を保証しない。</div>
+</div>
+
+</div>
+
+<!-- ===== 判定条件まとめ ===== -->
+<div class="section-label" style="margin-top:14px">判定条件まとめ（新旧対比）</div>
+<div class="card g1">
+  <div class="cond-grid" style="grid-template-columns:repeat(6,1fr)">
+    <div class="cond-col">
+      <div class="cond-head">指標</div>
+      OHW勾配方向<br><br>OHW変動幅<br><br>B×(1-r)<br><br>D_size<br><br>大プール負荷率<br><br>local_a（ビン内）<br><br>global_α
+    </div>
+    <div class="cond-col" style="border-color:#97C459;background:#EAF3DE">
+      <div class="cond-head" style="color:#3B6D11">ケース1（改善）</div>
+      <span style="color:#3B6D11">大サイズ↑</span><br><br>≥30%pt<br><br>≥8<br><br>≥4倍<br><br>≤1.3倍<br><br>低〜中<br><br>0.4〜0.6
+    </div>
+    <div class="cond-col" style="border-color:#97C459;background:#EAF3DE">
+      <div class="cond-head" style="color:#3B6D11">ケース2（改善）</div>
+      <span style="color:#3B6D11">均一低OK</span><br><br>制約なし<br><br>≥20（大）<br><br>≥4倍<br><br>≤1.3倍<br><br>低〜中<br><br>0.5〜0.7
+    </div>
+    <div class="cond-col" style="border-color:#FAC775;background:#FAEEDA">
+      <div class="cond-head" style="color:#854F0B">ケース3（中立）</div>
+      均一低<br><br>制約なし<br><br>大でも無効<br><br>≥4倍<br><br><span style="color:#A32D2D">≥1.5倍</span><br><br>低〜中<br><br>0.4〜0.5
+    </div>
+    <div class="cond-col" style="border-color:#F09595;background:#FCEBEB">
+      <div class="cond-head" style="color:#A32D2D">ケース4（悪化）</div>
+      均一低<br><br><span style="color:#A32D2D">&lt;15%pt</span><br><br>—<br><br>—<br><br>—<br><br>低〜中<br><br>0.4〜1.2
+    </div>
+    <div class="cond-col" style="border-color:#AFA9EC;background:#EEEDFE">
+      <div class="cond-head" style="color:#3C3489">ケース5（中立）</div>
+      任意<br><br>任意<br><br>任意<br><br>任意<br><br>任意<br><br><span style="color:#3C3489">高（LRU最適）</span><br><br>低（≤0.5）
+    </div>
+  </div>
+  <div style="margin-top:10px;padding:7px 10px;background:var(--color-background-secondary);border-radius:var(--border-radius-md);font-size:11px;color:var(--color-text-secondary)">
+    <strong style="color:var(--color-text-primary)">ケース2の新判定基準（WL7から導出）：</strong>
+    OHW勾配がなくても <em>B×(1−r) ≥ 20 かつ D_size ≥ 4 かつ 大プール負荷率 ≤ 1.3</em> が揃えばBMR改善が起きる。
+    「汚染源」はOHW高でなく「GC単位あたり価値密度 = (1−OHW)/mean_size が低い」コンテンツで十分。
+    <br>
+    <strong style="color:var(--color-text-primary)">global_αとlocal_aの使い分け：</strong>
+    global_αはワークロード全体の集中度（LRU有効性の粗い指標）。local_aはビン内集中度（LRU局所最適性の精緻な指標）。local_a高 → ビン内LRU最適 → RegionSplit追加価値小。
+  </div>
+</div>
