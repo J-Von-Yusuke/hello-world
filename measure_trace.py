@@ -21,6 +21,20 @@ zstd 圧縮された OracleGeneral 形式トレースから、Cache Temperature 
     a_b   ... ビン内 Zipf 指数
     rho_b ... 非OHWオブジェクト1個あたりの平均参照回数（= (N_b - m_b)/np_b）
 
+【時間窓安定性計測 (E7)】 --windows W を指定すると、トレースを走査順に W 個の
+時間窓に分割し、窓ごとに以下を計測して出力へ追加する:
+    窓ローカル統計  ... ビン別 N/bytes/distinct/once → β_local = 1 − distinct/N
+                       (履歴なしの窓だけを見た場合の β。窓を跨ぐ再利用を OHW と
+                        誤認する分だけ β を過小評価する = オンライン推定の悲観側)
+    ウォーム統計    ... 初出 (first-ever) ベース → β_warm = 1 − first_ever/N
+                       (全履歴を持つ推定器が漸近的に見る β = 楽観側)
+    窓ごとの予測 T  ... βクラッシュ → CDF 交差の簡易判定 (threshold_predictor_v4 の
+                       A'/C 経路サブセット)。窓ローカル / EWMA ブレンドの両方
+    ドリフト指標    ... 隣接窓間の β プロファイル平均絶対差 (L1)、リクエスト占有率の
+                       全変動距離 (TV)、予測 T の切替回数
+  → AutoSplit のヒステリシス幅 (δ, k窓) と EWMA ブレンド比の較正データになる。
+  出力: <out>.measurement.json の _measurement.window_stability、<out>.windows.csv
+
 OracleGeneral レコード形式（24 バイト/レコード, リトルエンディアン）:
     uint32 timestamp | uint64 obj_id | uint32 obj_size | int64 next_access_vtime
     （オフセット 0, 4, 12, 16; itemsize=24, パック）
@@ -35,6 +49,7 @@ OracleGeneral レコード形式（24 バイト/レコード, リトルエンデ
           採用オブジェクトの全アクセスを保持するため、各オブジェクトの
           参照回数・OHW・再利用強度が「無偏」に測れる（SHARDS と同種の空間サンプリング）。
           ストリーム全体を走査する。サイズ長指定時は rate = 目標 / 全体推定サイズ。
+          ※時間窓計測も空間サンプリングと併用可能（窓内の β も不偏側で測れる）
       prefix（既定: サイズ長指定時）
           展開後の先頭 N バイト（または先頭割合）だけを処理して打ち切る。
           走査量自体が減るため高速。時間窓サンプルとなる（定常なら代表性あり）。
@@ -43,6 +58,7 @@ OracleGeneral レコード形式（24 バイト/レコード, リトルエンデ
     <out>.config.json      ... 生成器/ C版ツール互換（workload セクション）
     <out>.measurement.json ... 詳細レポート（再利用距離ヒストグラム, R², サンプリング情報など）
     <out>.bins.csv         ... ビン別サマリ（表計算用）
+    <out>.windows.csv      ... 時間窓別サマリ（--windows 指定時のみ）
 
 依存:
     pip install numpy zstandard
@@ -54,8 +70,11 @@ OracleGeneral レコード形式（24 バイト/レコード, リトルエンデ
     # 全体の 10% を空間サンプリング（無偏・代表性重視）で計測
     python measure_trace.py trace.oracleGeneral.zst -o myresult --sample 0.1
 
-    # サイズ長指定でも空間サンプリングしたい場合（全走査・要総サイズ推定）
-    python measure_trace.py trace.zst -o r --sample 3GiB --method spatial --total-size 30GiB
+    # 10% 空間サンプリング + 20 窓の時間安定性計測 (E7)
+    python measure_trace.py trace.zst -o r --sample 0.1 --windows 20 --total-size 30GiB
+
+    # 窓長をレコード数で直接指定 (全体サイズ推定が不要・正確)
+    python measure_trace.py trace.zst -o r --sample 0.1 --window-records 50000000
 """
 
 import argparse
@@ -76,6 +95,13 @@ except ImportError:
 RECORD_SIZE = 24
 N_BINS = 30                     # ビン i = [2^i, 2^(i+1)) , i=0..29（生成器と一致）
 READ_CHUNK = 32 * 1024 * 1024  # 展開後 32MiB ずつ処理
+
+# 窓別予測 (E7) 用の簡易判定パラメータ — threshold_predictor_v4.py と同値
+W_BETA_HIGH   = 0.85   # 宝庫ゾーン認定の β 下限
+W_BETA_DROP   = 0.25   # ピーク β からの崩落幅
+W_SIG_REQ_MIN = 0.005  # 有意ビン: 最低リクエスト割合
+W_SIG_BYTE_MIN = 0.005
+W_EWMA_ALPHA  = 0.3    # AutoSplit 短期 EWMA のブレンド比 (report §9.2)
 
 # OracleGeneral レコードの numpy 構造化 dtype（パック・LE）
 REC_DTYPE = np.dtype({
@@ -107,7 +133,6 @@ def parse_size_or_fraction(spec):
         if su.endswith(u):
             num = float(su[:-len(u)])
             return ('bytes', int(num * units[u]))
-    # 単位なし
     val = float(s)
     if val <= 1.0:
         return ('fraction', val)
@@ -167,6 +192,224 @@ def ols_zipf_alpha(counts, max_pts=2000):
 
 
 # ----------------------------------------------------------------------
+# 時間窓安定性 (E7)
+# ----------------------------------------------------------------------
+class WindowTracker:
+    """走査順を window_records 件ごとの時間窓に区切り、窓別のビン統計を集める。
+
+    窓ごとに保持:
+      N[b], B[b]      ... リクエスト数 / リクエストバイト
+      cold[b]         ... 窓内で「トレース全体で初出」だったオブジェクト数 (warm 視点)
+      wobjs           ... 窓ローカルの oid -> [count, bin] (distinct/once 算出用)
+    """
+
+    def __init__(self, window_records):
+        self.window_records = max(1, int(window_records))
+        self.cur = 0
+        self.windows = []          # closed window summaries (raw)
+        self._reset()
+
+    def _reset(self):
+        self.N = np.zeros(N_BINS, dtype=np.int64)
+        self.B = np.zeros(N_BINS, dtype=np.float64)
+        self.cold = np.zeros(N_BINS, dtype=np.int64)
+        self.wobjs = {}
+        self.kept = 0
+        self.lo_gidx = self.cur * self.window_records
+
+    def maybe_roll(self, gidx):
+        """gidx が現窓を超えていたら窓を閉じる (空窓もそのまま閉じる)。"""
+        while gidx >= (self.cur + 1) * self.window_records:
+            self._close()
+
+    def _close(self):
+        distinct = np.zeros(N_BINS, dtype=np.int64)
+        once = np.zeros(N_BINS, dtype=np.int64)
+        for cnt_bin in self.wobjs.values():
+            b = cnt_bin[1]
+            distinct[b] += 1
+            if cnt_bin[0] == 1:
+                once[b] += 1
+        self.windows.append(dict(
+            win=self.cur,
+            scanned_lo=self.lo_gidx,
+            scanned_hi=(self.cur + 1) * self.window_records,
+            kept=self.kept,
+            N=self.N.copy(), B=self.B.copy(),
+            distinct=distinct, once=once, cold=self.cold.copy(),
+        ))
+        self.cur += 1
+        self._reset()
+
+    def add(self, oid, b, sz, is_cold):
+        self.N[b] += 1
+        self.B[b] += sz
+        self.kept += 1
+        if is_cold:
+            self.cold[b] += 1
+        e = self.wobjs.get(oid)
+        if e is None:
+            self.wobjs[oid] = [1, b]
+        else:
+            e[0] += 1
+
+    def finish(self):
+        if self.kept > 0 or not self.windows:
+            self._close()
+        return self.windows
+
+
+def _predict_T_simple(bins):
+    """窓統計からの簡易閾値予測 (threshold_predictor_v4 の A'→C サブセット)。
+    bins: list of dict(idx, N, bytes, beta)。戻り値 (T_bytes or None, path)。"""
+    bins = [b for b in bins if b["N"] > 0]
+    if not bins:
+        return None, "empty"
+    tot_n = sum(b["N"] for b in bins) or 1
+    tot_b = sum(b["bytes"] for b in bins) or 1
+    sig = [b for b in bins
+           if b["N"] / tot_n >= W_SIG_REQ_MIN or b["bytes"] / tot_b >= W_SIG_BYTE_MIN] or bins
+    # A': β クラッシュ
+    peak = None
+    for b in sig:
+        if b["beta"] >= W_BETA_HIGH:
+            peak = max(peak or 0.0, b["beta"])
+        elif peak is not None and b["beta"] <= peak - W_BETA_DROP:
+            return 1 << b["idx"], "beta_crash"
+    # C: CDF 交差
+    cr = cb = 0.0
+    for b in bins:
+        cr += b["N"] / tot_n
+        cb += b["bytes"] / tot_b
+        if cr + cb >= 1.0:
+            return 1 << b["idx"], "cdf_cross"
+    return None, "neutral"
+
+
+def _p50_bin(values):
+    tot = values.sum()
+    if tot <= 0:
+        return None
+    c = 0
+    for i, v in enumerate(values):
+        c += v
+        if c >= 0.5 * tot:
+            return i
+    return None
+
+
+def summarize_windows(raw_windows):
+    """窓 raw 統計 → 派生指標 + 安定性サマリ。"""
+    win_out = []
+    prev_beta = None
+    prev_share = None
+    ewma_beta = None          # per-bin EWMA β (窓ローカル)
+    ewma_N = None
+    ewma_B = None
+    l1_list = []
+    tv_list = []
+    t_local_list, t_ewma_list = [], []
+
+    for w in raw_windows:
+        N, B, distinct, once, cold = w["N"], w["B"], w["distinct"], w["once"], w["cold"]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            beta_local = np.where(N > 0, 1.0 - distinct / np.maximum(N, 1), np.nan)
+            beta_warm = np.where(N > 0, 1.0 - cold / np.maximum(N, 1), np.nan)
+            r_local = np.where(distinct > 0, once / np.maximum(distinct, 1), np.nan)
+
+        # EWMA ブレンド (AutoSplit §9.2 の短期成分を模擬)
+        if ewma_beta is None:
+            ewma_beta = np.where(np.isnan(beta_local), np.nan, beta_local)
+            ewma_N = N.astype(np.float64)
+            ewma_B = B.copy()
+        else:
+            mask = ~np.isnan(beta_local)
+            ewma_beta = np.where(
+                mask & ~np.isnan(ewma_beta),
+                W_EWMA_ALPHA * beta_local + (1 - W_EWMA_ALPHA) * ewma_beta,
+                np.where(mask, beta_local, ewma_beta))
+            ewma_N = W_EWMA_ALPHA * N + (1 - W_EWMA_ALPHA) * ewma_N
+            ewma_B = W_EWMA_ALPHA * B + (1 - W_EWMA_ALPHA) * ewma_B
+
+        mk = lambda nn, bb, beta: [
+            dict(idx=i, N=float(nn[i]), bytes=float(bb[i]),
+                 beta=float(beta[i]) if not np.isnan(beta[i]) else 0.0)
+            for i in range(N_BINS) if nn[i] > 0]
+        t_local, path_local = _predict_T_simple(mk(N, B, beta_local))
+        t_ewma, path_ewma = _predict_T_simple(mk(ewma_N, ewma_B, ewma_beta))
+        t_local_list.append(t_local)
+        t_ewma_list.append(t_ewma)
+
+        # 隣接窓との β プロファイル距離 (共通有効ビンの平均絶対差)
+        # 注意: β-L1 は「同じビンの再利用度変化」を測る。リクエストがビン間を
+        # 移動するドリフト (サイズ分布シフト) は捉えないため、リクエスト占有率の
+        # 全変動距離 (TV) を併せて出力する。
+        l1 = None
+        tv = None
+        share = N / max(1, N.sum())
+        if prev_beta is not None:
+            common = (~np.isnan(beta_local)) & (~np.isnan(prev_beta))
+            if common.any():
+                l1 = float(np.mean(np.abs(beta_local[common] - prev_beta[common])))
+                l1_list.append(l1)
+            tv = float(0.5 * np.abs(share - prev_share).sum())
+            tv_list.append(tv)
+        prev_beta = beta_local
+        prev_share = share
+
+        win_out.append(dict(
+            win=int(w["win"]),
+            scanned_records=[int(w["scanned_lo"]), int(w["scanned_hi"])],
+            kept_records=int(w["kept"]),
+            requests=int(N.sum()),
+            request_bytes=float(B.sum()),
+            p50_count_bin=_p50_bin(N),
+            p50_byte_bin=_p50_bin(B),
+            predicted_T_local=t_local, predicted_path_local=path_local,
+            predicted_T_ewma=t_ewma, predicted_path_ewma=path_ewma,
+            beta_l1_to_prev=l1,
+            req_share_tv_to_prev=(round(tv, 4) if tv is not None else None),
+            bins=[dict(bin=i, N=int(N[i]), bytes=float(B[i]),
+                       distinct=int(distinct[i]), once=int(once[i]), cold=int(cold[i]),
+                       beta_local=(round(float(beta_local[i]), 4)
+                                   if not np.isnan(beta_local[i]) else None),
+                       beta_warm=(round(float(beta_warm[i]), 4)
+                                  if not np.isnan(beta_warm[i]) else None),
+                       r_local=(round(float(r_local[i]), 4)
+                                if not np.isnan(r_local[i]) else None))
+                  for i in range(N_BINS) if N[i] > 0],
+        ))
+
+    def switches(ts):
+        ts = [t for t in ts if t is not None]
+        return sum(1 for a, b in zip(ts, ts[1:]) if a != b)
+
+    def mode(ts):
+        ts = [t for t in ts if t is not None]
+        return max(set(ts), key=ts.count) if ts else None
+
+    summary = dict(
+        n_windows=len(win_out),
+        predicted_T_local_series=t_local_list,
+        predicted_T_ewma_series=t_ewma_list,
+        predicted_T_local_mode=mode(t_local_list),
+        predicted_T_ewma_mode=mode(t_ewma_list),
+        switches_local=switches(t_local_list),
+        switches_ewma=switches(t_ewma_list),
+        beta_l1_mean=(round(float(np.mean(l1_list)), 4) if l1_list else None),
+        beta_l1_max=(round(float(np.max(l1_list)), 4) if l1_list else None),
+        req_share_tv_mean=(round(float(np.mean(tv_list)), 4) if tv_list else None),
+        req_share_tv_max=(round(float(np.max(tv_list)), 4) if tv_list else None),
+        note=("predicted_T_*_series の切替頻度と beta_l1 / req_share_tv がドリフト量。"
+              "switches_ewma << switches_local なら EWMA ブレンドで振動が抑えられている。"
+              "AutoSplit のヒステリシス幅 δ と窓数 k はこの系列から較正する (E7)。"
+              "beta_local は窓を跨ぐ再利用を OHW と誤認するため悲観側、"
+              "beta_warm は全履歴ベースで楽観側。両者の差が「窓長不足」の指標。"),
+    )
+    return dict(summary=summary, windows=win_out)
+
+
+# ----------------------------------------------------------------------
 # ストリーム供給（zstd / raw）
 # ----------------------------------------------------------------------
 def iter_decompressed_chunks(path, is_zstd):
@@ -206,46 +449,60 @@ def measure(path, args):
     prefix_byte_limit = None   # prefix: 展開後バイト上限
     sample_rate = 1.0          # 実効サンプリング率（推定 true 値への外挿に使用）
 
+    def est_total_bytes():
+        if args.total_size:
+            tk, tv = parse_size_or_fraction(args.total_size)
+            if tk == 'bytes':
+                return tv
+        comp = os.path.getsize(path)
+        return int(comp * (args.est_ratio if is_zstd else 1.0))
+
     if sample is None:
         method = 'full'
     else:
         kind, val = sample
-        # 既定メソッド: 割合→spatial, サイズ→prefix
         if method == 'auto':
             method = 'spatial' if kind == 'fraction' else 'prefix'
 
         if method == 'spatial':
             if kind == 'fraction':
                 sample_rate = val
-            else:  # bytes 目標 → rate = 目標 / 全体サイズ推定
-                total = None
-                if args.total_size:
-                    tk, tv = parse_size_or_fraction(args.total_size)
-                    total = tv if tk == 'bytes' else None
-                if total is None:
-                    comp = os.path.getsize(path)
-                    total = int(comp * (args.est_ratio if is_zstd else 1.0))
+            else:
+                total = est_total_bytes()
+                if not args.total_size:
                     print(f"[警告] spatial+サイズ指定: 全展開サイズ不明のため "
-                          f"圧縮 {human_bytes(comp)} ×{args.est_ratio} ≈ {human_bytes(total)} と推定。"
+                          f"圧縮サイズ ×{args.est_ratio} ≈ {human_bytes(total)} と推定。"
                           f" 正確を期すなら --total-size を指定してください。", file=sys.stderr)
                 sample_rate = max(1e-9, min(1.0, val / total))
             keep_threshold = hash_keep_threshold(sample_rate)
         elif method == 'prefix':
             if kind == 'bytes':
                 prefix_byte_limit = val
-            else:  # fraction → 全展開サイズ推定が必要
-                total = None
-                if args.total_size:
-                    tk, tv = parse_size_or_fraction(args.total_size)
-                    total = tv if tk == 'bytes' else None
-                if total is None:
-                    comp = os.path.getsize(path)
-                    total = int(comp * (args.est_ratio if is_zstd else 1.0))
+            else:
+                total = est_total_bytes()
+                if not args.total_size:
                     print(f"[警告] prefix+割合指定: 全展開サイズを "
                           f"{human_bytes(total)} と推定して先頭 {val*100:.1f}% を処理。",
                           file=sys.stderr)
                 prefix_byte_limit = int(total * val)
             sample_rate = 1.0  # prefix は窓内のフル情報（外挿しない）
+
+    # --- 時間窓設定 (E7) ---
+    wt = None
+    if args.window_records:
+        wt = WindowTracker(args.window_records)
+    elif args.windows and args.windows > 0:
+        if prefix_byte_limit is not None:
+            total_recs = prefix_byte_limit // RECORD_SIZE
+        else:
+            total_recs = est_total_bytes() // RECORD_SIZE
+            if not args.total_size and not (method == 'full' and not is_zstd):
+                print(f"[警告] --windows: 総レコード数を {total_recs:,} と推定して窓割り。"
+                      f" 窓数を正確にしたい場合は --total-size か --window-records を指定。",
+                      file=sys.stderr)
+        wt = WindowTracker(max(1, total_recs // args.windows))
+    if wt is not None:
+        print(f"[info] 時間窓計測: window_records={wt.window_records:,}", file=sys.stderr)
 
     print(f"[info] file={path}  zstd={is_zstd}  method={method}  "
           f"rate={sample_rate:.4g}  prefix_limit="
@@ -331,6 +588,9 @@ def measure(path, args):
             gidx = base + sel_list[k]
             oid = ids_list[k]
             e = objs.get(oid)
+            if wt is not None:
+                wt.maybe_roll(gidx)
+                wt.add(oid, bins_list[k], szs_list[k], e is None)
             if e is None:
                 objs[oid] = [1, gidx, szs_list[k], bins_list[k]]
             else:
@@ -372,9 +632,24 @@ def measure(path, args):
     if not objs:
         sys.exit("エラー: 採用レコードが 0 件。サンプリング率や入力を確認してください。")
 
-    return aggregate(objs, ird_hist, sum_log2_ird, reuse_events,
-                     kept_records, global_idx, sample_rate, method,
-                     (ia_sum, ia_sqsum, ia_cnt), args)
+    result = aggregate(objs, ird_hist, sum_log2_ird, reuse_events,
+                       kept_records, global_idx, sample_rate, method,
+                       (ia_sum, ia_sqsum, ia_cnt), args)
+
+    # --- 時間窓安定性 (E7) ---
+    if wt is not None:
+        raw_windows = wt.finish()
+        ws = summarize_windows(raw_windows)
+        ws["config"] = dict(window_records=wt.window_records,
+                            ewma_alpha=W_EWMA_ALPHA,
+                            beta_high=W_BETA_HIGH, beta_drop=W_BETA_DROP)
+        result['_measurement']['window_stability'] = ws
+        s = ws["summary"]
+        print(f"[info] 時間窓: {s['n_windows']} 窓  予測T切替 local={s['switches_local']} "
+              f"/ ewma={s['switches_ewma']}  βドリフト L1 mean={s['beta_l1_mean']} "
+              f"max={s['beta_l1_max']}  req-TV mean={s['req_share_tv_mean']}", file=sys.stderr)
+
+    return result
 
 
 # ----------------------------------------------------------------------
@@ -575,6 +850,26 @@ def write_outputs(result, out_prefix):
     print(f"[出力] {out_prefix}.measurement.json  (詳細レポート)", file=sys.stderr)
     print(f"[出力] {out_prefix}.bins.csv  (ビン別サマリ)", file=sys.stderr)
 
+    # 4) 時間窓別 CSV (E7)
+    ws = result['_measurement'].get('window_stability')
+    if ws:
+        with open(out_prefix + '.windows.csv', 'w', encoding='utf-8') as f:
+            f.write("win,scanned_lo,scanned_hi,kept,requests,request_bytes,"
+                    "p50_count_bin,p50_byte_bin,predicted_T_local,predicted_path_local,"
+                    "predicted_T_ewma,predicted_path_ewma,beta_l1_to_prev,req_share_tv_to_prev\n")
+            for w in ws['windows']:
+                l1 = w['beta_l1_to_prev']
+                l1s = '' if l1 is None else f"{l1:.4f}"
+                tv = w.get('req_share_tv_to_prev')
+                tvs = '' if tv is None else f"{tv:.4f}"
+                f.write(f"{w['win']},{w['scanned_records'][0]},{w['scanned_records'][1]},"
+                        f"{w['kept_records']},{w['requests']},{w['request_bytes']:.0f},"
+                        f"{w['p50_count_bin']},{w['p50_byte_bin']},"
+                        f"{w['predicted_T_local'] or ''},{w['predicted_path_local']},"
+                        f"{w['predicted_T_ewma'] or ''},{w['predicted_path_ewma']},"
+                        f"{l1s},{tvs}\n")
+        print(f"[出力] {out_prefix}.windows.csv  (時間窓別サマリ, E7)", file=sys.stderr)
+
 
 def print_summary(result):
     w = result['workload']
@@ -587,6 +882,12 @@ def print_summary(result):
     print(f"  全体 Zipf α:    {w['zipf_alpha']:.3f}  (R²={g['zipf_r2']})", file=sys.stderr)
     print(f"  時間的局所性 L: {w['locality']:.3f}  (窓幅 w≈{loc['window_fraction_w']}, 中央IRD≈{loc['median_log2_ird']})", file=sys.stderr)
     print(f"  到着過程:       {w['arrival']}  (η={w['hawkes_eta']})", file=sys.stderr)
+    ws = result['_measurement'].get('window_stability')
+    if ws:
+        s = ws['summary']
+        print(f"  時間窓安定性:   {s['n_windows']} 窓, 予測T切替 local={s['switches_local']}"
+              f"/ewma={s['switches_ewma']}, βドリフトL1 mean={s['beta_l1_mean']}, "
+              f"req-TV mean={s['req_share_tv_mean']}", file=sys.stderr)
     print("====================================\n", file=sys.stderr)
 
 
@@ -606,9 +907,13 @@ def main():
                     default='auto',
                     help='サンプリング法（auto: 割合→spatial, サイズ→prefix）')
     ap.add_argument('--total-size', default=None,
-                    help='全展開サイズ（spatial+サイズ / prefix+割合 の換算用, 例 30GiB）')
+                    help='全展開サイズ（spatial+サイズ / prefix+割合 / --windows の換算用, 例 30GiB）')
     ap.add_argument('--est-ratio', type=float, default=3.5,
                     help='zstd 展開倍率の推定値（--total-size 未指定時, 既定 3.5）')
+    ap.add_argument('--windows', type=int, default=0, metavar='W',
+                    help='時間窓安定性計測 (E7): トレースを W 窓に分割して窓別統計を出力')
+    ap.add_argument('--window-records', type=int, default=None, metavar='N',
+                    help='窓長を走査レコード数で直接指定（--windows より優先・サイズ推定不要）')
     ap.add_argument('--zstd', dest='zstd', action='store_true', default=None,
                     help='zstd として扱う（既定は拡張子 .zst で自動判定）')
     ap.add_argument('--raw', dest='zstd', action='store_false',
