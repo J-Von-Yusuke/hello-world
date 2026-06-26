@@ -10,20 +10,21 @@
  *   全トレース最適の 0.01–0.05pt 以内)。k は限界利得停止で自動決定。
  *
  * 使い方(LRU.c / region-split キャッシュへの組込み):
- *   // 閾値は「ホスト側の構造体」が所有する。そのポインタを init で渡す:
- *   uint64_t threshold[RSEG_KMAX - 1];   // ホスト構造体のメンバ(容量 >= RSEG_KMAX-1)
- *   int      threshold_num;              // 同上(=k-1, 0 なら無分割)
+ *   // 閾値配列は rseg が必要数だけ確保する。ホストはポインタ(NULL初期化)と個数を用意し、
+ *   // その「アドレス」を渡す:
+ *   uint64_t *threshold = NULL;          // rseg が malloc/realloc(無分割なら NULL)
+ *   int       threshold_num = 0;         // 確保した閾値数(=k-1, 0 なら無分割)
  *   rseg_t R;
  *   rseg_init(&R, cache_capacity_bytes, physical_region_bytes, 0.02,
  *             RSEG_OBJ_PARETO, 0.5,         // 目的と重み(両立なら PARETO+w。w:1=BMR寄り,0=MR寄り)
- *             threshold, &threshold_num);   // ★ 外部バッファを登録(以後ここへ書かれる)
+ *             &threshold, &threshold_num);  // ★ ポインタのアドレスを渡す(以後 rseg が確保・更新)
  *   //   physical_region_bytes = 実機の消去ブロック(例 256MiB)。影シミュはこれに
  *   //   sample_rate を掛けた region サイズで「region 個数(=cache/region)を保存」する。
  *   // 各リクエストで(ヒット/ミス問わず):
- *   rseg_on_request(&R, obj_id, obj_size);     // 標本採取 + 周期再計算(→ threshold[]/num を更新)
- *   // 挿入時の配置(ホストが threshold[]/threshold_num を直接見てもよい):
+ *   rseg_on_request(&R, obj_id, obj_size);     // 標本採取 + 周期再計算(→ threshold/num を更新)
+ *   // 挿入時の配置(ホストが threshold[0..threshold_num-1] を直接見てもよい):
  *   int pool = rseg_pool_of(&R, obj_size);     // 0..k-1。-1 は region 超(非キャッシュ)
- *   // 終了時: rseg_free(&R);
+ *   // 終了時: rseg_free(&R);   // threshold も解放され NULL に戻る
  *
  * 計算量: 採取 O(1)。再計算は RSEG_RECALC_OBS 観測ごと、標本(<=RSEG_BUF_CAP)を
  *   候補分割数(<=~1500)だけ再生 → 周期的バースト。メモリ ~数 MB(下記 #define で調整)。
@@ -79,11 +80,12 @@ typedef struct {
   uint64_t  n_sampled;          /* 累積採取数(再計算トリガ) */
   uint64_t  last_recompute_at;  /* 直近に再計算した時の n_sampled(周期判定用) */
 
-  /* 現在の決定は「外部(ホスト)構造体」に書き込む。init で登録したポインタを保持。
-   *   out_thr  : 昇順の閾値バッファ(ホスト所有, 容量 >= RSEG_KMAX-1)
-   *   out_nthr : 閾値数(=k-1, 0 なら無分割)。再計算ごとに上書き。 */
-  uint64_t *out_thr;
-  int      *out_nthr;
+  /* 現在の決定は「外部(ホスト)のポインタ」に書き込む。配列は rseg が必要数だけ確保する。
+   *   out_pthr : ホストの uint64_t* を指す二重ポインタ。再計算ごとに realloc し、
+   *              昇順の閾値を kstar-1 個だけ格納(無分割なら free して NULL)。rseg_free で解放。
+   *   out_nthr : 確保した閾値数(=k-1, 0 なら無分割)を書く。 */
+  uint64_t **out_pthr;
+  int       *out_nthr;
   uint64_t  n_recompute;
   /* 内省(ログ用): 直近再計算での実効 region 数と平均 obj サイズ。
    * last_eff_nreg < RSEG_NREG_MIN なら影が粗すぎ(=object≳region) → 判定の信頼が低い。 */
@@ -113,17 +115,18 @@ static inline int rseg__bucket(uint64_t sz) {             /* floor(log2(sz)) */
   int b = 0; while (sz > 1 && b < RSEG_NBUCKET - 1) { sz >>= 1; b++; } return b;
 }
 
-/* threshold      : ホスト所有の閾値バッファ(uint64_t*, 容量 >= RSEG_KMAX-1)。決定はここへ書く。
+/* threshold      : ホストの「uint64_t* のアドレス」(=uint64_t**)。rseg が必要数だけ malloc/realloc
+ *                  して *threshold に格納(無分割なら NULL)。ホストは NULL 初期化のポインタを渡すだけ。
+ *                  確保配列は rseg_free で解放(ホストは free 不要・してはいけない)。
  * threshold_num  : ホスト所有の閾値数(int*)。再計算ごとに *threshold_num = k-1 が書かれる。
- * いずれも NULL 不可(外部保存が本 init の目的)。 */
-/* objective    : RSEG_OBJ_MR / _BMR / _PARETO / _MR_CAPPED_BMR
- * bmr_weight   : PARETO        → BMR重み w∈[0,1](0=MR最優先,1=BMR最優先,0.5=均衡)
- *                MR_CAPPED_BMR → BMR許容増加率 tol(0=書込を一切増やさず MR最小化, 0.02=2%まで許容)
- *                MR / BMR      → 未使用 */
+ * objective      : RSEG_OBJ_MR / _BMR / _PARETO / _MR_CAPPED_BMR
+ * bmr_weight     : PARETO        → BMR重み w∈[0,1](0=MR最優先,1=BMR最優先,0.5=均衡)
+ *                  MR_CAPPED_BMR → BMR許容増加率 tol(0=書込を増やさず MR最小化, 0.02=2%許容)
+ *                  MR / BMR      → 未使用 */
 static inline void rseg_init(rseg_t *R, uint64_t cache_capacity,
                              uint64_t physical_region_bytes,
                              double sample_rate, int objective, double bmr_weight,
-                             uint64_t *threshold, int *threshold_num) {
+                             uint64_t **threshold, int *threshold_num) {
   uint64_t nreg;
   memset(R, 0, sizeof(*R));
   R->sample_rate = sample_rate;
@@ -139,9 +142,10 @@ static inline void rseg_init(rseg_t *R, uint64_t cache_capacity,
   if (nreg < RSEG_NREG_MIN) nreg = RSEG_NREG_MIN;
   if (nreg > RSEG_NREG_MAX) nreg = RSEG_NREG_MAX;
   R->nreg = (int)nreg;
-  /* 外部の閾値保存先を登録。初期状態=無分割。 */
-  R->out_thr = threshold;
+  /* 外部の閾値保存先(ポインタのアドレス)を登録。配列は rseg が確保。初期状態=無分割。 */
+  R->out_pthr = threshold;
   R->out_nthr = threshold_num;
+  if (R->out_pthr) *R->out_pthr = NULL;   /* rseg が以後 malloc/realloc して所有 */
   if (R->out_nthr) *R->out_nthr = 0;
   R->buf_id = (uint64_t*)malloc(sizeof(uint64_t) * RSEG_BUF_CAP);
   R->buf_sz = (uint32_t*)malloc(sizeof(uint32_t) * RSEG_BUF_CAP);
@@ -168,6 +172,9 @@ static inline void rseg_init(rseg_t *R, uint64_t cache_capacity,
 }
 
 static inline void rseg_free(rseg_t *R) {
+  /* rseg が確保した閾値配列を解放し、ホストのポインタを NULL に戻す */
+  if (R->out_pthr && *R->out_pthr) { free(*R->out_pthr); *R->out_pthr = NULL; }
+  if (R->out_nthr) *R->out_nthr = 0;
   free(R->buf_id); free(R->buf_sz); free(R->ht_key); free(R->ht_val);
   free(R->dsize); free(R->reqd); free(R->slot_obj); free(R->slot_next);
   free(R->in_cache); free(R->obj_region); free(R->loc_slot);
@@ -375,10 +382,18 @@ static inline void rseg_recompute(rseg_t *R) {
     gain = bestval[k - 1] - bestval[k];
     if (gain >= RSEG_EPS_PT && gain >= RSEG_EPS_REL * bestval[1]) kstar = k; else break;
   }
-  /* 決定を外部(ホスト)構造体へ書き込む */
-  if (R->out_nthr && R->out_thr) {
-    *R->out_nthr = kstar - 1;
-    for (k = 0; k < kstar - 1; k++) R->out_thr[k] = (uint64_t)bestthr[kstar][k];
+  /* 決定を外部へ書き込む。配列は必要数(kstar-1)だけ realloc して確保(無分割なら free)。 */
+  if (R->out_pthr && R->out_nthr) {
+    int n = kstar - 1;
+    if (n <= 0) {
+      free(*R->out_pthr); *R->out_pthr = NULL; *R->out_nthr = 0;
+    } else {
+      uint64_t *p = (uint64_t *)realloc(*R->out_pthr, sizeof(uint64_t) * (size_t)n);
+      if (p) {                                  /* realloc 失敗時は前回の閾値を維持 */
+        for (k = 0; k < n; k++) p[k] = (uint64_t)bestthr[kstar][k];
+        *R->out_pthr = p; *R->out_nthr = n;
+      }
+    }
   }
   R->n_recompute++;
 }
@@ -406,11 +421,13 @@ static inline void rseg_on_request(rseg_t *R, uint64_t obj_id, uint32_t obj_size
 
 /* 配置: size>thr[j] の個数 = プール番号(0..k-1)。無分割なら 0。閾値は外部構造体から読む。
  * region 超の巨大オブジェクトは -1(=非キャッシュ/バイパス)。呼び出し側で別処理すること。
- * ※ ホストは out_thr/out_nthr を直接見て自前で配置してもよい(本関数は等価な補助)。 */
+ * ※ ホストは threshold[0..threshold_num-1] を直接見て自前で配置してもよい(本関数は等価な補助)。 */
 static inline int rseg_pool_of(const rseg_t *R, uint32_t obj_size) {
   int c = 0, j, nthr = R->out_nthr ? *R->out_nthr : 0;
+  const uint64_t *thr = (R->out_pthr) ? *R->out_pthr : (const uint64_t *)0;
   if (R->reject_oversize && (uint64_t)obj_size > R->physical_region_bytes) return -1;
-  for (j = 0; j < nthr; j++) { if ((uint64_t)obj_size > R->out_thr[j]) c++; else break; }
+  if (!thr) return 0;
+  for (j = 0; j < nthr; j++) { if ((uint64_t)obj_size > thr[j]) c++; else break; }
   return c;
 }
 
