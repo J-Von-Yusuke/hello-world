@@ -77,6 +77,7 @@ typedef struct {
   uint32_t  buf_head;           /* 次に書く位置 */
   uint32_t  buf_count;          /* 充填数(<=RSEG_BUF_CAP) */
   uint64_t  n_sampled;          /* 累積採取数(再計算トリガ) */
+  uint64_t  last_recompute_at;  /* 直近に再計算した時の n_sampled(周期判定用) */
 
   /* 現在の決定は「外部(ホスト)構造体」に書き込む。init で登録したポインタを保持。
    *   out_thr  : 昇順の閾値バッファ(ホスト所有, 容量 >= RSEG_KMAX-1)
@@ -393,7 +394,14 @@ static inline void rseg_on_request(rseg_t *R, uint64_t obj_id, uint32_t obj_size
   R->buf_head = (R->buf_head + 1) & (RSEG_BUF_CAP - 1);
   if (R->buf_count < RSEG_BUF_CAP) R->buf_count++;
   R->n_sampled++;
-  if (R->n_sampled % RSEG_RECALC_OBS == 0) rseg_recompute(R);
+  /* 初回は標本が RSEG_MIN_OBS たまった時点で1回、以後は RSEG_RECALC_OBS 採取ごとに再計算。
+   * (旧 "n_sampled % RECALC==0" は短いトレースで一度も発火しない/modulo一致依存で脆かった) */
+  if (R->buf_count >= RSEG_MIN_OBS &&
+      (R->n_recompute == 0 ||
+       R->n_sampled - R->last_recompute_at >= RSEG_RECALC_OBS)) {
+    rseg_recompute(R);
+    R->last_recompute_at = R->n_sampled;
+  }
 }
 
 /* 配置: size>thr[j] の個数 = プール番号(0..k-1)。無分割なら 0。閾値は外部構造体から読む。
