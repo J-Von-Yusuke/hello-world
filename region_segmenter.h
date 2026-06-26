@@ -14,7 +14,8 @@
  *   uint64_t threshold[RSEG_KMAX - 1];   // ホスト構造体のメンバ(容量 >= RSEG_KMAX-1)
  *   int      threshold_num;              // 同上(=k-1, 0 なら無分割)
  *   rseg_t R;
- *   rseg_init(&R, cache_capacity_bytes, physical_region_bytes, 0.02, RSEG_OBJ_MR,
+ *   rseg_init(&R, cache_capacity_bytes, physical_region_bytes, 0.02,
+ *             RSEG_OBJ_PARETO, 0.5,         // 目的と重み(両立なら PARETO+w。w:1=BMR寄り,0=MR寄り)
  *             threshold, &threshold_num);   // ★ 外部バッファを登録(以後ここへ書かれる)
  *   //   physical_region_bytes = 実機の消去ブロック(例 256MiB)。影シミュはこれに
  *   //   sample_rate を掛けた region サイズで「region 個数(=cache/region)を保存」する。
@@ -52,8 +53,11 @@
 #define RSEG_MIN_OBS      20000u             /* 標本がこれ未満なら再計算を見送る */
 #define RSEG_EPS_PT       0.003              /* 限界利得停止: 目的の絶対改善閾(pt) */
 #define RSEG_EPS_REL      0.01               /* 同: 相対改善閾(base 比) */
-#define RSEG_OBJ_MR       0                  /* 目的: ミス率 */
-#define RSEG_OBJ_BMR      1                  /* 目的: バイトミス率(=WAF=1 の SSD書込/req) */
+#define RSEG_OBJ_MR       0                  /* 目的: ミス率のみ最小化 */
+#define RSEG_OBJ_BMR      1                  /* 目的: バイトミス率のみ(=WAF=1 の SSD書込/req) */
+#define RSEG_OBJ_PARETO   2                  /* 目的: 正規化ブレンド w*BMR+(1-w)*MR で両立(Pareto) */
+#define RSEG_OBJ_MR_CAPPED_BMR 3             /* 目的: BMR<=無分割BMR*(1+tol) の制約下で MR 最小
+                                              *       =SSD書込を増やさず命中率を上げる(WAF=1整合) */
 
 typedef struct {
   /* 設定 */
@@ -62,7 +66,9 @@ typedef struct {
   uint64_t  physical_region_bytes; /* 実機の消去ブロック(region)サイズ[byte] 例:256MiB */
   int       nreg;                  /* 実機 region 数 = cache_capacity/physical_region_bytes */
   uint8_t   reject_oversize;       /* 1: region 超のオブジェクトは非キャッシュ(既定1) */
-  int       objective;             /* RSEG_OBJ_MR / RSEG_OBJ_BMR */
+  int       objective;             /* RSEG_OBJ_MR / _BMR / _PARETO / _MR_CAPPED_BMR */
+  double    bmr_weight;            /* PARETO: BMR重み w∈[0,1](1=BMR寄り,0=MR寄り,0.5=均衡)。
+                                    * MR_CAPPED_BMR: BMR 許容増加率 tol(0=厳密に書込を増やさない)。 */
   uint64_t  shards_thresh;         /* hash(id) < これ なら採取 */
 
   /* 標本リングバッファ(生 id+size) */
@@ -109,9 +115,13 @@ static inline int rseg__bucket(uint64_t sz) {             /* floor(log2(sz)) */
 /* threshold      : ホスト所有の閾値バッファ(uint64_t*, 容量 >= RSEG_KMAX-1)。決定はここへ書く。
  * threshold_num  : ホスト所有の閾値数(int*)。再計算ごとに *threshold_num = k-1 が書かれる。
  * いずれも NULL 不可(外部保存が本 init の目的)。 */
+/* objective    : RSEG_OBJ_MR / _BMR / _PARETO / _MR_CAPPED_BMR
+ * bmr_weight   : PARETO        → BMR重み w∈[0,1](0=MR最優先,1=BMR最優先,0.5=均衡)
+ *                MR_CAPPED_BMR → BMR許容増加率 tol(0=書込を一切増やさず MR最小化, 0.02=2%まで許容)
+ *                MR / BMR      → 未使用 */
 static inline void rseg_init(rseg_t *R, uint64_t cache_capacity,
                              uint64_t physical_region_bytes,
-                             double sample_rate, int objective,
+                             double sample_rate, int objective, double bmr_weight,
                              uint64_t *threshold, int *threshold_num) {
   uint64_t nreg;
   memset(R, 0, sizeof(*R));
@@ -120,6 +130,7 @@ static inline void rseg_init(rseg_t *R, uint64_t cache_capacity,
   R->physical_region_bytes = physical_region_bytes ? physical_region_bytes : 1;
   R->reject_oversize = 1;
   R->objective = objective;
+  R->bmr_weight = (bmr_weight < 0.0) ? 0.0 : (bmr_weight > 1.0 ? 1.0 : bmr_weight);
   R->shards_thresh = (sample_rate >= 1.0) ? UINT64_MAX
                      : (uint64_t)(sample_rate * 1.8446744073709552e19); /* rate*2^64 */
   /* 実機 region 数。影シミュは region サイズ=physical*rate で「region 個数を保存」する。 */
@@ -260,12 +271,33 @@ static inline void rseg__sim(rseg_t *R, const int64_t *thr, int K, int D,
   *o_miss = miss; *o_mbytes = mb; *o_n = nc; *o_rbytes = rb;
 }
 
-static inline double rseg__objval(rseg_t *R, const int64_t *thr, int K, int D,
-                                  double scap, double rbytes) {
+/* 1 分割を影シミュし MR と BMR を両方返す。 */
+static inline void rseg__sim_mrbmr(rseg_t *R, const int64_t *thr, int K, int D,
+                                   double scap, double rbytes, double *mr, double *bmr) {
   double mi, mb, n, rb;
   rseg__sim(R, thr, K, D, scap, rbytes, &mi, &mb, &n, &rb);
-  if (R->objective == RSEG_OBJ_BMR) return (rb > 0) ? mb / rb : 1.0;
-  return (n > 0) ? mi / n : 1.0;
+  *mr  = (n  > 0) ? mi / n  : 1.0;
+  *bmr = (rb > 0) ? mb / rb : 1.0;
+}
+
+/* スカラー化した目的値(小さいほど良)。PARETO は k=1 基準(mr1,bmr1)で正規化してブレンド。
+ *   MR    : mr
+ *   BMR   : bmr
+ *   PARETO: w*(bmr/bmr1) + (1-w)*(mr/mr1)   (各項は無分割で 1 → 重みが「相対改善」を均す) */
+static inline double rseg__blend(const rseg_t *R, double mr, double bmr,
+                                 double mr1, double bmr1) {
+  double a, b;
+  if (R->objective == RSEG_OBJ_MR)  return mr;
+  if (R->objective == RSEG_OBJ_BMR) return bmr;
+  if (R->objective == RSEG_OBJ_MR_CAPPED_BMR) {
+    /* 制約: BMR <= 無分割BMR*(1+tol)。違反は実行不可(DBL_MAX)。制約内は MR を最小化。 */
+    double cap = bmr1 * (1.0 + R->bmr_weight);     /* bmr_weight を許容増加率 tol に流用 */
+    return (bmr > cap) ? DBL_MAX : mr;
+  }
+  /* PARETO: k=1 基準で正規化したブレンド */
+  a = (mr1  > 0.0) ? mr  / mr1  : mr;
+  b = (bmr1 > 0.0) ? bmr / bmr1 : bmr;
+  return R->bmr_weight * b + (1.0 - R->bmr_weight) * a;
 }
 
 /* 標本上で k=1..KMAX の全分割を網羅し、限界利得停止で (k, thresholds) を決定。 */
@@ -274,6 +306,7 @@ static inline void rseg_recompute(rseg_t *R) {
   int64_t cand[RSEG_NBUCKET];
   uint8_t occ[RSEG_NBUCKET];
   double scap, region_bytes, mean_obj = 0.0, region_floor;
+  double mr1 = 1.0, bmr1 = 1.0, mr, bmr;
   double bestval[RSEG_KMAX + 1];
   int64_t bestthr[RSEG_KMAX + 1][RSEG_KMAX - 1];
   int kstar;
@@ -306,25 +339,29 @@ static inline void rseg_recompute(rseg_t *R) {
 
   for (k = 0; k <= RSEG_KMAX; k++) bestval[k] = DBL_MAX;
 
-  /* k=1: 無分割 */
-  { int64_t none[1]; (void)none; bestval[1] = rseg__objval(R, cand, 1, D, scap, region_bytes); }
+  /* k=1: 無分割。PARETO 正規化の基準 (mr1,bmr1) もここで確定。 */
+  rseg__sim_mrbmr(R, cand, 1, D, scap, region_bytes, &mr1, &bmr1);
+  bestval[1] = rseg__blend(R, mr1, bmr1, mr1, bmr1);
   /* k=2: 単一閾値 */
   for (i = 0; i < ncand; i++) {
     int64_t t1[1]; double v; t1[0] = cand[i];
-    v = rseg__objval(R, t1, 2, D, scap, region_bytes);
+    rseg__sim_mrbmr(R, t1, 2, D, scap, region_bytes, &mr, &bmr);
+    v = rseg__blend(R, mr, bmr, mr1, bmr1);
     if (v < bestval[2]) { bestval[2] = v; bestthr[2][0] = t1[0]; }
   }
   /* k=3: 2 閾値 */
   for (i = 0; i < ncand; i++) for (j = i + 1; j < ncand; j++) {
     int64_t t2[2]; double v; t2[0] = cand[i]; t2[1] = cand[j];
-    v = rseg__objval(R, t2, 3, D, scap, region_bytes);
+    rseg__sim_mrbmr(R, t2, 3, D, scap, region_bytes, &mr, &bmr);
+    v = rseg__blend(R, mr, bmr, mr1, bmr1);
     if (v < bestval[3]) { bestval[3] = v; bestthr[3][0] = t2[0]; bestthr[3][1] = t2[1]; }
   }
   /* k=4: 3 閾値 */
   for (i = 0; i < ncand; i++) for (j = i + 1; j < ncand; j++) { int m;
     for (m = j + 1; m < ncand; m++) {
       int64_t t3[3]; double v; t3[0] = cand[i]; t3[1] = cand[j]; t3[2] = cand[m];
-      v = rseg__objval(R, t3, 4, D, scap, region_bytes);
+      rseg__sim_mrbmr(R, t3, 4, D, scap, region_bytes, &mr, &bmr);
+      v = rseg__blend(R, mr, bmr, mr1, bmr1);
       if (v < bestval[4]) { bestval[4] = v; bestthr[4][0]=t3[0]; bestthr[4][1]=t3[1]; bestthr[4][2]=t3[2]; }
     }
   }
