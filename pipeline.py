@@ -55,6 +55,19 @@ def unit_of(b):
         if b >= thr: u = UNAME[thr]
     return u
 
+def fmt_count(n):
+    n = int(n)
+    if n >= 1_000_000 and n % 1_000_000 == 0: return f"{n//1_000_000}M"
+    if n >= 1000 and n % 1000 == 0: return f"{n//1000}k"
+    return str(n)
+
+def fmt_dur(s):
+    s = int(s)
+    if s % 86400 == 0: return f"{s//86400}d"
+    if s % 3600 == 0: return f"{s//3600}h"
+    if s % 60 == 0: return f"{s//60}m"
+    return f"{s}s"
+
 def norm(v):
     s = v.sum(); return v / s if s > 0 else v
 def jsd(p, q):
@@ -83,8 +96,8 @@ def read_records(path, chunk_bytes=1 << 23):
             yield np.frombuffer(buf[:m], dtype=dt)
             leftover = buf[m:]
 
-def scan(path, cap=None):
-    """cap(bytes)指定時は size>cap のレコードを除外して集計。"""
+def scan(path, cap=None, sec=SEC, obs=OBS):
+    """cap(bytes)指定時は size>cap のレコードを除外。sec=時間窓秒, obs=観測数窓。"""
     t0 = time.time()
     tmin, tmax, n, dropped = 2**64, 0, 0, 0
     for arr in read_records(path):
@@ -93,8 +106,8 @@ def scan(path, cap=None):
             tot0 = len(arr); arr = arr[arr['size'] <= cap]; dropped += tot0 - len(arr)
             if len(arr) == 0: continue
         clk = arr['clock']; tmin = min(tmin, int(clk.min())); tmax = max(tmax, int(clk.max())); n += len(arr)
-    n_hours = (tmax - tmin) // SEC + 1
-    n_chunks = n // OBS + 2
+    n_hours = (tmax - tmin) // sec + 1
+    n_chunks = n // obs + 2
     hc = np.zeros((n_hours, NB)); hb = np.zeros((n_hours, NB))
     cc = np.zeros((n_chunks, NB)); cb = np.zeros((n_chunks, NB))
     seen = 0
@@ -106,11 +119,11 @@ def scan(path, cap=None):
         if k == 0: continue
         sizes = arr['size'].astype(np.float64)
         b = np.clip(np.floor(np.log2(np.maximum(arr['size'].astype(np.uint64), 1))).astype(np.int64), 0, NB - 1)
-        h = np.clip((arr['clock'].astype(np.int64) - tmin) // SEC, 0, n_hours - 1)
+        h = np.clip((arr['clock'].astype(np.int64) - tmin) // sec, 0, n_hours - 1)
         i1 = h * NB + b
         hc += np.bincount(i1, minlength=n_hours * NB)[:n_hours * NB].reshape(n_hours, NB)
         hb += np.bincount(i1, weights=sizes, minlength=n_hours * NB)[:n_hours * NB].reshape(n_hours, NB)
-        ch = (seen + np.arange(k)) // OBS
+        ch = (seen + np.arange(k)) // obs
         i2 = ch * NB + b
         cc += np.bincount(i2, minlength=n_chunks * NB)[:n_chunks * NB].reshape(n_chunks, NB)
         cb += np.bincount(i2, weights=sizes, minlength=n_chunks * NB)[:n_chunks * NB].reshape(n_chunks, NB)
@@ -121,8 +134,8 @@ def scan(path, cap=None):
     nz = np.where(cc.sum(1) > 0)[0]; last = nz.max() + 1 if len(nz) else 0
     cc, cb = cc[:last], cb[:last]
     cap_msg = f" cap={cap}B dropped={dropped}({100*dropped/(n+dropped):.2f}%)" if cap is not None else ""
-    print(f"  scan: records={n} hours={hc.shape[0]} chunks={cc.shape[0]} span={tmax-tmin}s elapsed={time.time()-t0:.1f}s{cap_msg}")
-    return dict(hc=hc, hb=hb, cc=cc, cb=cb, n=n, tmin=tmin, tmax=tmax, cap=cap, dropped=dropped)
+    print(f"  scan: records={n} 時間窓={hc.shape[0]}({fmt_dur(sec)}) 観測窓={cc.shape[0]}({fmt_count(obs)}) span={tmax-tmin}s elapsed={time.time()-t0:.1f}s{cap_msg}")
+    return dict(hc=hc, hb=hb, cc=cc, cb=cb, n=n, tmin=tmin, tmax=tmax, cap=cap, dropped=dropped, sec=sec, obs=obs)
 
 # ---------------- 解析 ----------------
 def analyze_numbers(S):
@@ -158,8 +171,9 @@ def analyze_numbers(S):
                             floor=floor(np.median(ns))))
         return out
 
-    wall = sweep(hc, hb, [1,2,3,6,12,24], lambda L: f"{L}h", SEC)
-    obs  = sweep(S['cc'], S['cb'], [1,2,5,10,16,32], lambda L: f"{L*100}k", OBS)
+    sec, obsz = S['sec'], S['obs']
+    wall = sweep(hc, hb, [1,2,3,6,12,24], lambda L: fmt_dur(L*sec), sec)
+    obs  = sweep(S['cc'], S['cb'], [1,2,5,10,16,32], lambda L: fmt_count(L*obsz), obsz)
 
     def p50b(h):
         tot = h.sum();
@@ -257,14 +271,15 @@ def _draw(ax, cols, gc, gb, LO, HI, hc=None, hb=None, whisker=False):
     ax.grid(axis="y", alpha=0.25, zorder=0)
     return pc, pb
 
-def _legend2(ax, whisker=False):
+def _legend2(ax, whisker=False, wlabel="窓"):
     shape = [Patch(fc="#dfe3ea", ec=EDGE, label="個数 (塗り)"), Patch(fc="#dfe3ea", ec=EDGE, hatch="////", label="バイト量 (////)")]
-    if whisker: shape.append(plt.Line2D([0], [0], color="#222", lw=1.2, label="1h窓 p10–p90"))
+    if whisker: shape.append(plt.Line2D([0], [0], color="#222", lw=1.2, label=f"{wlabel}窓 p10–p90"))
     cdf = [Patch(fc=C25, ec=EDGE, label="CDF25%"), Patch(fc=C50, ec=EDGE, label="CDF50%(優先)"), Patch(fc=C75, ec=EDGE, label="CDF75%")]
     l1 = ax.legend(handles=shape, loc="upper left", frameon=False, fontsize=9); ax.add_artist(l1)
     ax.legend(handles=cdf, loc="upper right", frameon=False, fontsize=9)
 
 def fig_histogram(R, name, outdir, compact=False):
+    """全体分布(窓基準に依存しない)。"""
     LO, HI = R['LO'], R['HI']
     cols = make_columns(LO, HI, R['gc'], R['gb'], compact)
     fig, ax = plt.subplots(figsize=(max(10, len(cols) * 0.78), 5.0))
@@ -275,47 +290,45 @@ def fig_histogram(R, name, outdir, compact=False):
     fname = "histogram_compact.png" if compact else "histogram_combined.png"
     fig.tight_layout(); fig.savefig(os.path.join(outdir, fname), dpi=160, bbox_inches="tight"); plt.close(fig)
 
-def fig_hero(R, S, name, outdir, compact=False):
+def fig_hero(R, name, outdir, wmc, wmb, tag, wlabel, compact=False):
+    """代表形状＋窓ごとの変動幅(p10-p90)。wmc/wmb=窓行列(時間 or 観測)。tag=接尾辞。"""
     LO, HI = R['LO'], R['HI']
     cols = make_columns(LO, HI, R['gc'], R['gb'], compact)
     fig, ax = plt.subplots(figsize=(max(10, len(cols) * 0.78), 5.2))
-    _draw(ax, cols, R['gc'], R['gb'], LO, HI, S['hc'], S['hb'], whisker=True)
+    _draw(ax, cols, R['gc'], R['gb'], LO, HI, wmc, wmb, whisker=True)
     ax.set_ylabel("出現頻度割合 (正規化)")
-    ax.set_title(f"{name} — 代表形状＋時間変動幅{' (軸圧縮)' if compact else ''} (ひげ=1h窓 p10–p90)", weight="bold")
-    _unitbands(ax, cols); _legend2(ax, whisker=True)
-    fname = "hero_compact.png" if compact else "hero_combined.png"
-    fig.tight_layout(); fig.savefig(os.path.join(outdir, fname), dpi=170, bbox_inches="tight"); plt.close(fig)
+    ax.set_title(f"{name} — 代表形状＋変動幅{' (軸圧縮)' if compact else ''} (ひげ={wlabel}窓 p10–p90)", weight="bold")
+    _unitbands(ax, cols); _legend2(ax, whisker=True, wlabel=wlabel)
+    base = "hero_compact" if compact else "hero_combined"
+    fig.tight_layout(); fig.savefig(os.path.join(outdir, f"{base}_{tag}.png"), dpi=170, bbox_inches="tight"); plt.close(fig)
 
 # ---- レジーム検出(クラスタリング) ＋ small multiples ----
-def fig_regimes(R, S, name, outdir, K=3, force=False):
+def fig_regimes(R, name, outdir, wmc, wmb, tag, wlabel, p90, K=3, force=False):
     LO, HI = R['LO'], R['HI']; sl = slice(LO, HI + 1)
-    p90 = R['wall'][0]['byte']['p90'] if R['wall'] else 0.0
     if not (p90 >= 0.05 or force):
-        print(f"  regimes: 安定 (1h byte JSD p90={p90:.3f} < 0.05) のため省略 (--force-regimes で強制可)")
+        print(f"  regimes[{tag}]: 安定 (byte JSD p90={p90:.3f} < 0.05) のため省略 (--force-regimes で強制可)")
         return
-    hc, hb = S['hc'], S['hb']; H = hc.shape[0]
+    H = wmc.shape[0]
     feats = []; widx = []
     for w in range(H):
-        cs = hc[w][sl].sum(); bs = hb[w][sl].sum()
+        cs = wmc[w][sl].sum(); bs = wmb[w][sl].sum()
         if cs > 0 and bs > 0:
-            feats.append(np.concatenate([hc[w][sl] / cs, hb[w][sl] / bs])); widx.append(w)
+            feats.append(np.concatenate([wmc[w][sl] / cs, wmb[w][sl] / bs])); widx.append(w)
     feats = np.array(feats); widx = np.array(widx)
     if len(feats) < K:
-        print("  regimes: 窓数不足でスキップ"); return
+        print(f"  regimes[{tag}]: 窓数不足でスキップ"); return
     from scipy.cluster.vq import kmeans2
     _, lab = kmeans2(feats, K, seed=0, minit='++', missing='warn')
     groups = [widx[lab == k] for k in range(K)]
     groups = [g for g in groups if len(g) > 0]
-    # バイト加重平均サイズで昇順に並べ替え
     def gdist(g):
-        gcm = hc[g].sum(0); gbm = hb[g].sum(0); return gcm, gbm
+        return wmc[g].sum(0), wmb[g].sum(0)
     def mean_b(gbm):
         p = norm(gbm[sl]); return float((np.arange(LO, HI + 1) * p).sum())
     groups.sort(key=lambda g: mean_b(gdist(g)[1]))
     Keff = len(groups)
     cols = make_columns(LO, HI, R['gc'], R['gb'], compact=True)   # 全体基準で列固定→比較可能
     pal = ['#4C78A8', '#F58518', '#54A24B', '#E45756', '#72B7B2', '#B279A2']
-    # パネル & y上限統一
     panel = []
     for g in groups:
         gcm, gbm = gdist(g); pc, pb = _col_props(cols, gcm, gbm, LO, HI); panel.append((g, gcm, gbm, max(pc.max(), pb.max())))
@@ -324,13 +337,12 @@ def fig_regimes(R, S, name, outdir, K=3, force=False):
     gs = fig.add_gridspec(2, Keff, height_ratios=[4, 0.7], hspace=0.5, wspace=0.22)
     for i, (g, gcm, gbm, _) in enumerate(panel):
         ax = fig.add_subplot(gs[0, i])
-        _draw(ax, cols, gcm, gbm, LO, HI, hc[g], hb[g], whisker=True)
+        _draw(ax, cols, gcm, gbm, LO, HI, wmc[g], wmb[g], whisker=True)
         ax.set_ylim(0, ymax)
         if i == 0: ax.set_ylabel("出現頻度割合")
         share = 100 * len(g) / len(widx)
         ax.set_title(f"レジーム{i+1}  {len(g)}窓 ({share:.0f}%)", color=pal[i % len(pal)], weight="bold", fontsize=11)
         _unitbands(ax, cols)
-    # 時間帯→レジーム 帯
     axt = fig.add_subplot(gs[1, :])
     lab2 = np.full(H, -1)
     for i, (g, *_2) in enumerate(panel):
@@ -339,15 +351,15 @@ def fig_regimes(R, S, name, outdir, K=3, force=False):
     cmap = ListedColormap([pal[i % len(pal)] for i in range(Keff)])
     masked = np.ma.masked_less(lab2.reshape(1, -1), 0)
     axt.imshow(masked, aspect="auto", cmap=cmap, vmin=0, vmax=Keff - 1, extent=[0, H, 0, 1])
-    axt.set_yticks([]); axt.set_xlabel("経過時間 (時)"); axt.set_title("各時間窓のレジーム帰属", fontsize=10)
+    axt.set_yticks([]); axt.set_xlabel(f"経過 ({wlabel}窓 index)"); axt.set_title(f"各{wlabel}窓のレジーム帰属", fontsize=10)
     sh = [Patch(fc="#dfe3ea", ec=EDGE, label="個数(塗り)"), Patch(fc="#dfe3ea", ec=EDGE, hatch="////", label="バイト量(////)"),
           plt.Line2D([0], [0], color="#222", lw=1.2, label="窓内 p10–p90")]
     fig.legend(handles=sh, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02), fontsize=9)
-    fig.suptitle(f"{name} — レジーム別 代表分布 (k-means, K={Keff})", y=1.07, weight="bold", fontsize=13)
-    fig.savefig(os.path.join(outdir, "regimes.png"), dpi=160, bbox_inches="tight"); plt.close(fig)
-    print(f"  regimes: K={Keff} 出力 (時間シェア: " + ", ".join(f"R{i+1}={100*len(g)/len(widx):.0f}%" for i, (g, *_3) in enumerate(panel)) + ")")
+    fig.suptitle(f"{name} — レジーム別 代表分布 ({wlabel}窓, k-means, K={Keff})", y=1.07, weight="bold", fontsize=13)
+    fig.savefig(os.path.join(outdir, f"regimes_{tag}.png"), dpi=160, bbox_inches="tight"); plt.close(fig)
+    print(f"  regimes[{tag}]: K={Keff} 出力 (シェア: " + ", ".join(f"R{i+1}={100*len(g)/len(widx):.0f}%" for i, (g, *_3) in enumerate(panel)) + ")")
 
-def fig_sweep(R, name, outdir):
+def fig_sweep(R, name, outdir, suffix=""):
     def one(ax, rows, xkey, xlabel):
         if not rows: ax.set_visible(False); return
         xs = [(r['span']/3600 if xkey=='h' else r['N_med']) for r in rows]
@@ -363,58 +375,71 @@ def fig_sweep(R, name, outdir):
     one(axes[0], R['wall'], 'h', "壁時計 窓サイズ (時間, log)"); axes[0].set_title("壁時計時間窓", weight="bold")
     one(axes[1], R['obs'], 'N', "観測数 窓サイズ (req, log)"); axes[1].set_title("観測数窓", weight="bold")
     fig.suptitle(f"{name} — 代表性スイープ (実線=p90, 点線=最大, 灰=雑音床)", y=1.02, weight="bold")
-    fig.tight_layout(); fig.savefig(os.path.join(outdir, "sweep.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
+    fig.tight_layout(); fig.savefig(os.path.join(outdir, f"sweep{suffix}.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
 
-def fig_temporal(R, S, name, outdir):
+def fig_temporal(R, name, outdir, wmc, wmb, tag, wlabel):
     LO, HI = R['LO'], R['HI']; sl = slice(LO, HI+1)
     gPc, gPb = np.array(R['gPc']), np.array(R['gPb'])
-    hb = S['hb'][:, sl]; rs = hb.sum(1, keepdims=True)
-    mat = np.divide(hb, rs, out=np.zeros_like(hb), where=rs > 0).T
+    wb = wmb[:, sl]; rs = wb.sum(1, keepdims=True)
+    mat = np.divide(wb, rs, out=np.zeros_like(wb), where=rs > 0).T
     Hn = mat.shape[1]
-    jc = np.array([jsd(norm(S['hc'][w][sl]), gPc) if S['hc'][w][sl].sum()>0 else np.nan for w in range(S['hc'].shape[0])])
-    jb = np.array([jsd(norm(S['hb'][w][sl]), gPb) if S['hb'][w][sl].sum()>0 else np.nan for w in range(S['hb'].shape[0])])
+    jc = np.array([jsd(norm(wmc[w][sl]), gPc) if wmc[w][sl].sum()>0 else np.nan for w in range(wmc.shape[0])])
+    jb = np.array([jsd(norm(wmb[w][sl]), gPb) if wmb[w][sl].sum()>0 else np.nan for w in range(wmb.shape[0])])
     fig = plt.figure(figsize=(13, 6)); gs = fig.add_gridspec(2, 1, height_ratios=[2.2, 1], hspace=0.3)
     ax0 = fig.add_subplot(gs[0])
     im = ax0.imshow(mat, aspect="auto", origin="lower", cmap="viridis", extent=[0, Hn, LO-0.5, HI+0.5])
     ax0.set_yticks(range(LO, HI+1)); ax0.set_yticklabels([size_label(b) for b in range(LO, HI+1)], fontsize=7)
-    ax0.set_ylabel("オブジェクトサイズ"); ax0.set_xlabel("経過時間 (時)"); ax0.set_title(f"{name} — バイト量分布の時間変化", weight="bold")
+    ax0.set_ylabel("オブジェクトサイズ"); ax0.set_xlabel(f"経過 ({wlabel}窓 index)"); ax0.set_title(f"{name} — バイト量分布の変化 ({wlabel}窓)", weight="bold")
     fig.colorbar(im, ax=ax0, pad=0.01).set_label("頻度割合")
     ax1 = fig.add_subplot(gs[1])
     ax1.plot(np.arange(len(jc))+.5, jc, color="#1f77b4", lw=1.1, label="個数 JSD")
     ax1.plot(np.arange(len(jb))+.5, jb, color="#d62728", lw=1.1, label="バイト量 JSD")
-    ax1.set_xlim(0, max(len(jc), 1)); ax1.set_xlabel("経過時間 (時)"); ax1.set_ylabel("JSD vs 全体")
+    ax1.set_xlim(0, max(len(jc), 1)); ax1.set_xlabel(f"経過 ({wlabel}窓 index)"); ax1.set_ylabel("JSD vs 全体")
     ax1.grid(alpha=0.3); ax1.legend(fontsize=9, frameon=False, ncol=2)
-    fig.savefig(os.path.join(outdir, "temporal.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(os.path.join(outdir, f"temporal_{tag}.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
 
-def run(path, name=None, max_size=None, regimes=3, force_regimes=False):
+def run(path, name=None, max_size=None, regimes=3, force_regimes=False, sec=SEC, obs=OBS):
     name = name or os.path.basename(path).split('.')[0]
     if max_size is not None: name = f"{name}_le{size_label(int(np.floor(np.log2(max(max_size,1)))))}"
     outdir = os.path.join(os.path.dirname(__file__), "fig", name); os.makedirs(outdir, exist_ok=True)
-    print(f"[{name}]")
-    S = scan(path, cap=max_size)
+    print(f"[{name}]  window-sec={sec}({fmt_dur(sec)}) obs-window={obs}({fmt_count(obs)})")
+    S = scan(path, cap=max_size, sec=sec, obs=obs)
     R = analyze_numbers(S)
+    # 全体分布(窓に非依存)
     fig_histogram(R, name, outdir, compact=False); fig_histogram(R, name, outdir, compact=True)
-    fig_hero(R, S, name, outdir, compact=False);   fig_hero(R, S, name, outdir, compact=True)
-    fig_sweep(R, name, outdir); fig_temporal(R, S, name, outdir)
-    fig_regimes(R, S, name, outdir, K=regimes, force=force_regimes)
+    # 2つの窓基準 = (時間窓, 観測数窓) で hero / regime / temporal を生成
+    wtag, otag = f"wall{sec}s", f"obs{fmt_count(obs)}"
+    bases = [
+        ("wall", S['hc'], S['hb'], wtag, fmt_dur(sec),         R['wall'][0]['byte']['p90'] if R['wall'] else 0.0),
+        ("obs",  S['cc'], S['cb'], otag, f"{fmt_count(obs)}観測", R['obs'][0]['byte']['p90']  if R['obs']  else 0.0),
+    ]
+    for _b, mc, mb, tag, wlabel, p90 in bases:
+        fig_hero(R, name, outdir, mc, mb, tag, wlabel, compact=False)
+        fig_hero(R, name, outdir, mc, mb, tag, wlabel, compact=True)
+        fig_temporal(R, name, outdir, mc, mb, tag, wlabel)
+        fig_regimes(R, name, outdir, mc, mb, tag, wlabel, p90, K=regimes, force=force_regimes)
+    fig_sweep(R, name, outdir, suffix=f"_{wtag}_{otag}")
     R_save = {k: v for k, v in R.items() if k not in ('gc', 'gb')}
-    R_save['max_size'] = max_size; R_save['dropped'] = S['dropped']
+    R_save.update(max_size=max_size, dropped=S['dropped'], window_sec=sec, obs_window=obs)
     json.dump(R_save, open(os.path.join(outdir, "summary.json"), "w"), ensure_ascii=False)
-    st = R['stab']
+    st = R['stab']; wl = fmt_dur(sec)
     print(f"  size: {size_label(R['LO'])}..{size_label(R['HI'])} | count_p50={st['count_p50']} byte_p50={st['byte_p50']} band={st['band_oct']}oct")
     print(f"  count_p50 一致={st['count_match']*100:.1f}% (±1={st['count_pm1']*100:.1f}%) / byte_p50 一致={st['byte_match']*100:.1f}% (±1={st['byte_pm1']*100:.1f}%)")
-    if R['wall']:
-        w1 = R['wall'][0]
-        print(f"  1h窓 JSD: count p90={w1['count']['p90']:.4f} max={w1['count']['max']:.4f} / byte p90={w1['byte']['p90']:.4f} max={w1['byte']['max']:.4f} (床byte={w1['floor']['byte']:.4f})")
-        print(f"  1h窓 TV p90: count={w1['count']['tv90']*100:.1f}% byte={w1['byte']['tv90']*100:.1f}%")
+    for lab, key in (("時間窓 "+wl, 'wall'), (fmt_count(obs)+"観測窓", 'obs')):
+        if R[key]:
+            w1 = R[key][0]
+            print(f"  最小{lab} JSD: count p90={w1['count']['p90']:.4f} max={w1['count']['max']:.4f} / byte p90={w1['byte']['p90']:.4f} max={w1['byte']['max']:.4f}")
     return R
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="oracleGeneral サイズ分布 代表性分析")
+    ap = argparse.ArgumentParser(description="oracleGeneral サイズ分布 代表性分析 (時間窓・観測数窓)")
     ap.add_argument("trace"); ap.add_argument("name", nargs="?", default=None)
     ap.add_argument("--max-size", default=None, help="このサイズ超のコンテンツを除外 (例 512K, 1M, 2G)")
+    ap.add_argument("--window-sec", type=int, default=SEC, help=f"時間窓の間隔(秒, 既定{SEC})")
+    ap.add_argument("--obs-window", type=int, default=OBS, help=f"観測数窓の値(件, 既定{OBS})")
     ap.add_argument("--regimes", type=int, default=3, help="レジーム small multiples のクラスタ数 K")
     ap.add_argument("--force-regimes", action="store_true", help="安定でもレジーム図を出力")
     a = ap.parse_args()
-    run(a.trace, a.name, max_size=parse_size(a.max_size), regimes=a.regimes, force_regimes=a.force_regimes)
+    run(a.trace, a.name, max_size=parse_size(a.max_size), regimes=a.regimes,
+        force_regimes=a.force_regimes, sec=a.window_sec, obs=a.obs_window)
