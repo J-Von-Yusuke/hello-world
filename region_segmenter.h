@@ -50,6 +50,8 @@
 #define RSEG_NREG_MAX     (1 << 20)          /* region 配列上限(=cache/region の上限) */
 #define RSEG_REG_SLACK    512
 #define RSEG_REGION_OBJ_FLOOR 16             /* 影 region が保証する最小オブジェクト数(退化防止) */
+#define RSEG_MIN_FILL     1.0                /* バッファ footprint >= scap*これ 未満なら影が満たず
+                                              * evict しない → 決定を据え置く(2.0 以上が健全) */
 #define RSEG_RECALC_OBS   200000ULL          /* この標本観測数ごとに再計算 */
 #define RSEG_MIN_OBS      20000u             /* 標本がこれ未満なら再計算を見送る */
 #define RSEG_EPS_PT       0.003              /* 限界利得停止: 目的の絶対改善閾(pt) */
@@ -67,9 +69,16 @@ typedef struct {
   uint64_t  physical_region_bytes; /* 実機の消去ブロック(region)サイズ[byte] 例:256MiB */
   int       nreg;                  /* 実機 region 数 = cache_capacity/physical_region_bytes */
   uint8_t   reject_oversize;       /* 1: region 超のオブジェクトは非キャッシュ(既定1) */
+  uint8_t   region_unscaled;       /* 1: 影 region に実サイズを使う(個数保存しない)。高レート向け。
+                                    *    最適閾値は region 依存なので忠実度↑。既定0(=physical*rate)。
+                                    *    要 nreg*rate >= 数百。init 後に R.region_unscaled=1 で有効化。 */
   int       objective;             /* RSEG_OBJ_MR / _BMR / _PARETO / _MR_CAPPED_BMR */
   double    bmr_weight;            /* PARETO: BMR重み w∈[0,1](1=BMR寄り,0=MR寄り,0.5=均衡)。
                                     * MR_CAPPED_BMR: BMR 許容増加率 tol(0=厳密に書込を増やさない)。 */
+  double    switch_margin;         /* ヒステリシス: 現行閾値より相対 switch_margin 以上良くないと
+                                    *   変更しない(閾値振動とプール再編コストを抑制)。既定0=毎回最良。 */
+  uint8_t   manual_recompute;      /* 1: on_request は採取のみ(自動再計算しない)。ホストが別スレッドで
+                                    *    rseg_recompute(&R) を呼ぶ → 重い網羅をリクエスト経路から外す。 */
   uint64_t  shards_thresh;         /* hash(id) < これ なら採取 */
 
   /* 標本リングバッファ(生 id+size) */
@@ -87,10 +96,14 @@ typedef struct {
   uint64_t **out_pthr;
   int       *out_nthr;
   uint64_t  n_recompute;
-  /* 内省(ログ用): 直近再計算での実効 region 数と平均 obj サイズ。
-   * last_eff_nreg < RSEG_NREG_MIN なら影が粗すぎ(=object≳region) → 判定の信頼が低い。 */
+  /* 内省(ログ用): 直近再計算での実効 region 数・平均 obj サイズ・無分割の影 MR。
+   * last_eff_nreg < RSEG_NREG_MIN なら影が粗すぎ(=object≳region) → 判定の信頼が低い。
+   * last_mr1 が極端に小さい(≈0)なら影キャッシュが満杯にならず evict していない
+   *   → バッファ不足 or rate 過大(BUF_CAP < cap*rate/mean_obj)。決定は信用できない。 */
   int       last_eff_nreg;
   double    last_mean_obj;
+  double    last_mr1;
+  uint8_t   last_underfilled;      /* 1: バッファが影容量を満たせず決定を据え置いた(設定要修正) */
 
   /* スクラッチ(init で確保) */
   uint64_t *ht_key; int32_t *ht_val;    /* id -> dense */
@@ -337,7 +350,11 @@ static inline void rseg_recompute(rseg_t *R) {
   mean_obj = (D > 0) ? mean_obj / (double)D : 1.0;
 
   scap = (double)R->cache_capacity * R->sample_rate;         /* SHARDS 容量スケール */
-  region_bytes = (double)R->physical_region_bytes * R->sample_rate; /* 既定: region個数を保存 */
+  /* 影 region サイズ: 既定は physical*rate(region 個数=実機と同数を保存)。
+   * region_unscaled=1 では実 physical を使う(obj/region=実機と同数を保存; 最適閾値が region
+   * 依存なので忠実度↑。代わりに region 数=nreg*rate に減る → 高 rate が必要)。 */
+  region_bytes = R->region_unscaled ? (double)R->physical_region_bytes
+                                    : (double)R->physical_region_bytes * R->sample_rate;
   region_floor = (double)RSEG_REGION_OBJ_FLOOR * mean_obj;    /* >=この数の obj/region を保証 */
   if (region_bytes < region_floor) region_bytes = region_floor;
   if (region_bytes < 1.0) region_bytes = 1.0;
@@ -345,10 +362,19 @@ static inline void rseg_recompute(rseg_t *R) {
   R->last_mean_obj = mean_obj;
   R->last_eff_nreg = (region_bytes > 0.0) ? (int)(scap / region_bytes) : 0;
 
+  /* バッファの総バイト(=distinct footprint)が影容量 scap を満たせないと、影は一度も evict せず
+   * 全分割が同等(コールドミスのみ)→ 決定が退化。前回の決定を維持し、フラグで通知。
+   * 対策: BUF_CAP を上げる or sample_rate を下げる(目安 BUF_CAP >= 2.5*cap*rate/mean_obj)。 */
+  if (mean_obj * (double)D < scap * RSEG_MIN_FILL) {
+    R->last_underfilled = 1; R->n_recompute++; return;
+  }
+  R->last_underfilled = 0;
+
   for (k = 0; k <= RSEG_KMAX; k++) bestval[k] = DBL_MAX;
 
   /* k=1: 無分割。PARETO 正規化の基準 (mr1,bmr1) もここで確定。 */
   rseg__sim_mrbmr(R, cand, 1, D, scap, region_bytes, &mr1, &bmr1);
+  R->last_mr1 = mr1;   /* ≈0 なら影が evict していない(バッファ不足/rate過大)→ 決定は無効 */
   bestval[1] = rseg__blend(R, mr1, bmr1, mr1, bmr1);
   /* k=2: 単一閾値 */
   for (i = 0; i < ncand; i++) {
@@ -382,6 +408,18 @@ static inline void rseg_recompute(rseg_t *R) {
     gain = bestval[k - 1] - bestval[k];
     if (gain >= RSEG_EPS_PT && gain >= RSEG_EPS_REL * bestval[1]) kstar = k; else break;
   }
+
+  /* ヒステリシス: 現行閾値の目的値を測り、新最良がそれを switch_margin 以上下回らなければ据え置き
+   * (閾値の小刻みな振動 = プール再編コストを抑える)。 */
+  if (R->switch_margin > 0.0 && R->out_pthr && *R->out_pthr && R->out_nthr && *R->out_nthr > 0
+      && *R->out_nthr <= RSEG_KMAX - 1) {
+    int cn = *R->out_nthr; int64_t cthr[RSEG_KMAX]; double cmr, cbmr, cv;
+    for (k = 0; k < cn; k++) cthr[k] = (int64_t)(*R->out_pthr)[k];
+    rseg__sim_mrbmr(R, cthr, cn + 1, D, scap, region_bytes, &cmr, &cbmr);
+    cv = rseg__blend(R, cmr, cbmr, mr1, bmr1);
+    if (bestval[kstar] >= cv * (1.0 - R->switch_margin)) { R->n_recompute++; return; } /* 現行維持 */
+  }
+
   /* 決定を外部へ書き込む。配列は必要数(kstar-1)だけ realloc して確保(無分割なら free)。 */
   if (R->out_pthr && R->out_nthr) {
     int n = kstar - 1;
@@ -410,8 +448,9 @@ static inline void rseg_on_request(rseg_t *R, uint64_t obj_id, uint32_t obj_size
   if (R->buf_count < RSEG_BUF_CAP) R->buf_count++;
   R->n_sampled++;
   /* 初回は標本が RSEG_MIN_OBS たまった時点で1回、以後は RSEG_RECALC_OBS 採取ごとに再計算。
+   * manual_recompute=1 なら自動発火しない(ホストが別スレッドで rseg_recompute を駆動)。
    * (旧 "n_sampled % RECALC==0" は短いトレースで一度も発火しない/modulo一致依存で脆かった) */
-  if (R->buf_count >= RSEG_MIN_OBS &&
+  if (!R->manual_recompute && R->buf_count >= RSEG_MIN_OBS &&
       (R->n_recompute == 0 ||
        R->n_sampled - R->last_recompute_at >= RSEG_RECALC_OBS)) {
     rseg_recompute(R);
