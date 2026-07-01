@@ -96,8 +96,8 @@ def read_records(path, chunk_bytes=1 << 23):
             yield np.frombuffer(buf[:m], dtype=dt)
             leftover = buf[m:]
 
-def scan(path, cap=None, sec=SEC, obs=OBS):
-    """cap(bytes)指定時は size>cap のレコードを除外。sec=時間窓秒, obs=観測数窓。"""
+def scan(path, cap=None, sec=SEC, obs=OBS, wall_intervals=None):
+    """cap(bytes)指定時は size>cap のレコードを除外。sec=時間窓秒, obs=観測数窓, wall_intervals=追加の壁時計間隔リスト(秒)。"""
     t0 = time.time()
     tmin, tmax, n, dropped = 2**64, 0, 0, 0
     for arr in read_records(path):
@@ -110,6 +110,10 @@ def scan(path, cap=None, sec=SEC, obs=OBS):
     n_chunks = n // obs + 2
     hc = np.zeros((n_hours, NB)); hb = np.zeros((n_hours, NB))
     cc = np.zeros((n_chunks, NB)); cb = np.zeros((n_chunks, NB))
+    # 複数の壁時計間隔ごとの窓行列 (第2パスに相乗り; 追加のデコード無し)
+    ivs = sorted(set(int(t) for t in (wall_intervals or []) if int(t) > 0))
+    inw = {T: (tmax - tmin) // T + 1 for T in ivs}
+    imats = {T: [np.zeros((inw[T], NB)), np.zeros((inw[T], NB))] for T in ivs}
     seen = 0
     for arr in read_records(path):
         if len(arr) == 0: continue
@@ -119,7 +123,8 @@ def scan(path, cap=None, sec=SEC, obs=OBS):
         if k == 0: continue
         sizes = arr['size'].astype(np.float64)
         b = np.clip(np.floor(np.log2(np.maximum(arr['size'].astype(np.uint64), 1))).astype(np.int64), 0, NB - 1)
-        h = np.clip((arr['clock'].astype(np.int64) - tmin) // sec, 0, n_hours - 1)
+        crel = arr['clock'].astype(np.int64) - tmin
+        h = np.clip(crel // sec, 0, n_hours - 1)
         i1 = h * NB + b
         hc += np.bincount(i1, minlength=n_hours * NB)[:n_hours * NB].reshape(n_hours, NB)
         hb += np.bincount(i1, weights=sizes, minlength=n_hours * NB)[:n_hours * NB].reshape(n_hours, NB)
@@ -127,15 +132,21 @@ def scan(path, cap=None, sec=SEC, obs=OBS):
         i2 = ch * NB + b
         cc += np.bincount(i2, minlength=n_chunks * NB)[:n_chunks * NB].reshape(n_chunks, NB)
         cb += np.bincount(i2, weights=sizes, minlength=n_chunks * NB)[:n_chunks * NB].reshape(n_chunks, NB)
+        for T in ivs:
+            wT = np.clip(crel // T, 0, inw[T] - 1); iT = wT * NB + b; M = inw[T] * NB
+            imats[T][0] += np.bincount(iT, minlength=M)[:M].reshape(inw[T], NB)
+            imats[T][1] += np.bincount(iT, weights=sizes, minlength=M)[:M].reshape(inw[T], NB)
         seen += k
     def trim(a):
         nz = np.where(a.sum(1) > 0)[0]; return a[:nz.max() + 1] if len(nz) else a[:0]
     hc, hb = trim(hc), trim(hb)
     nz = np.where(cc.sum(1) > 0)[0]; last = nz.max() + 1 if len(nz) else 0
     cc, cb = cc[:last], cb[:last]
+    interval_mats = {T: (trim(imats[T][0]), imats[T][1][:trim(imats[T][0]).shape[0]]) for T in ivs}
     cap_msg = f" cap={cap}B dropped={dropped}({100*dropped/(n+dropped):.2f}%)" if cap is not None else ""
     print(f"  scan: records={n} 時間窓={hc.shape[0]}({fmt_dur(sec)}) 観測窓={cc.shape[0]}({fmt_count(obs)}) span={tmax-tmin}s elapsed={time.time()-t0:.1f}s{cap_msg}")
-    return dict(hc=hc, hb=hb, cc=cc, cb=cb, n=n, tmin=tmin, tmax=tmax, cap=cap, dropped=dropped, sec=sec, obs=obs)
+    return dict(hc=hc, hb=hb, cc=cc, cb=cb, n=n, tmin=tmin, tmax=tmax, cap=cap, dropped=dropped,
+                sec=sec, obs=obs, wall_intervals=interval_mats)
 
 # ---------------- 解析 ----------------
 def analyze_numbers(S):
@@ -377,6 +388,95 @@ def fig_sweep(R, name, outdir, suffix=""):
     fig.suptitle(f"{name} — 代表性スイープ (実線=p90, 点線=最大, 灰=雑音床)", y=1.02, weight="bold")
     fig.tight_layout(); fig.savefig(os.path.join(outdir, f"sweep{suffix}.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
 
+def window_jsds(mc, mb, sl, gPc, gPb):
+    """窓行列(mc,mb)の各行 → 全体との JSD スカラー列 (count, byte)。空窓は除外。"""
+    jc, jb = [], []
+    for w in range(mc.shape[0]):
+        cs, bs = mc[w][sl], mb[w][sl]
+        if cs.sum() > 0: jc.append(jsd(norm(cs), gPc))
+        if bs.sum() > 0: jb.append(jsd(norm(bs), gPb))
+    return np.array(jc), np.array(jb)
+
+JSD_SAME = 0.05          # 「ほぼ同形」の実用しきい値(§2-2)
+
+def _thr_line(ax):
+    """JSD=0.05 の水平基準線＋注記。"""
+    ax.axhline(JSD_SAME, color="#c0392b", ls="--", lw=1.2, zorder=1)
+    ax.annotate("JSD=0.05 (ほぼ同形の目安)", (0.99, JSD_SAME), xycoords=("axes fraction", "data"),
+                fontsize=8, color="#c0392b", ha="right", va="bottom")
+
+def fig_interval_whiskers(R, S, name, outdir):
+    """複数の壁時計間隔ごとに窓JSDの分布を2形式で出力:
+       sweep_wall_range = p10–p90帯＋中央値＋最大 / sweep_wall_box = 標準の箱ひげ図。
+       いずれも JSD=0.05 の基準線付き。"""
+    from matplotlib.lines import Line2D
+    iv = S.get('wall_intervals', {})
+    if not iv: return
+    LO, HI = R['LO'], R['HI']; sl = slice(LO, HI + 1)
+    gPc, gPb = np.array(R['gPc']), np.array(R['gPb'])
+    Ts, AC, AB = [], [], []                                  # 間隔ごとの生JSD配列
+    for T in sorted(iv):
+        jc, jb = window_jsds(*iv[T], sl, gPc, gPb)
+        if len(jc) < 2 or len(jb) < 2: continue
+        Ts.append(T); AC.append(jc); AB.append(jb)
+    if not Ts: return
+    eps = 1e-5
+
+    # ---- 版1: p10–p90 レンジ ----
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    for ax, arrs, col, title in [(axes[0], AC, "#1f77b4", "個数分布"), (axes[1], AB, "#d62728", "バイト量分布")]:
+        xs = np.array(Ts, dtype=float)
+        p10 = np.maximum([np.percentile(a, 10) for a in arrs], eps); p50 = np.maximum([np.median(a) for a in arrs], eps)
+        p90 = np.maximum([np.percentile(a, 90) for a in arrs], eps); mx = np.maximum([a.max() for a in arrs], eps)
+        mean = np.maximum([a.mean() for a in arrs], eps)
+        for x, a, c in zip(xs, p10, p90):
+            ax.plot([x, x], [a, c], color=col, lw=9, alpha=0.28, solid_capstyle='round', zorder=2)
+        ax.plot(xs, p90, '_', color=col, ms=15, mew=2, zorder=4); ax.plot(xs, p10, '_', color=col, ms=15, mew=2, zorder=4)
+        ax.plot(xs, p50, 'o-', color=col, lw=1.3, ms=6, zorder=5)
+        ax.plot(xs, mean, 'x', color="#222", ms=8, mew=2, zorder=7)               # 平均値
+        ax.plot(xs, mx, ':', color="#222", lw=0.9, alpha=0.7, zorder=3); ax.plot(xs, mx, 'v', color="#222", ms=8, zorder=6)
+        _thr_line(ax)
+        ax.set_xscale('log'); ax.set_yscale('log')
+        ax.set_xticks(xs); ax.set_xticklabels([fmt_dur(int(t)) for t in Ts], fontsize=9)
+        ax.set_xlabel("壁時計 窓間隔 (log)"); ax.set_title(title, weight="bold"); ax.grid(alpha=0.3, which='both')
+        ax.legend(handles=[Line2D([0], [0], color=col, marker='o', label="中央値 p50"),
+                           Line2D([0], [0], color="#222", marker='x', ls='', mew=2, label="平均値"),
+                           Line2D([0], [0], color="#222", marker='v', ls=':', label="最大"),
+                           Patch(fc=col, alpha=0.28, label="p10–p90 範囲"),
+                           Line2D([0], [0], color="#c0392b", ls="--", label="JSD=0.05")],
+                  fontsize=8, frameon=False, loc="lower left")
+        for x, a in zip(xs, arrs):
+            ax.annotate(f"n={len(a)}", (x, ax.get_ylim()[1]), fontsize=7, color="#888", ha="center", va="top")
+    axes[0].set_ylabel("JS divergence vs 全体 (bits)")
+    fig.suptitle(f"{name} — 壁時計窓間隔ごとの JSD 範囲 (帯=p10–p90, ●=中央値, ▼=最大)", y=1.01, weight="bold")
+    fig.tight_layout(); fig.savefig(os.path.join(outdir, "sweep_wall_range.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
+
+    # ---- 版2: 箱ひげ図 (箱=IQR, 中央線=中央値, ひげ=1.5IQR, 点=外れ値) ----
+    pos = np.arange(len(Ts))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    for ax, arrs, col, title in [(axes[0], AC, "#1f77b4", "個数分布"), (axes[1], AB, "#d62728", "バイト量分布")]:
+        ax.boxplot([np.maximum(a, eps) for a in arrs], positions=pos, widths=0.55, patch_artist=True,
+                   showfliers=True, showmeans=True,
+                   medianprops=dict(color="#222", lw=1.6), boxprops=dict(facecolor=col, alpha=0.35, edgecolor=col),
+                   whiskerprops=dict(color=col), capprops=dict(color=col),
+                   meanprops=dict(marker='x', mfc="#222", mec="#222", ms=7, mew=2),
+                   flierprops=dict(marker='o', ms=3, mfc=col, mec='none', alpha=0.5))
+        _thr_line(ax)
+        ax.set_yscale('log'); ax.set_xticks(pos); ax.set_xticklabels([fmt_dur(int(t)) for t in Ts], fontsize=9)
+        ax.set_xlabel("壁時計 窓間隔"); ax.set_title(title, weight="bold"); ax.grid(alpha=0.3, axis='y', which='both')
+        ax.legend(handles=[Patch(fc=col, alpha=0.35, label="箱=IQR(25–75%)"),
+                           Line2D([0], [0], color="#222", label="中央値"),
+                           Line2D([0], [0], color="#222", marker='x', ls='', mew=2, label="平均値"),
+                           Line2D([0], [0], marker='o', ls='', mfc=col, mec='none', label="外れ値"),
+                           Line2D([0], [0], color="#c0392b", ls="--", label="JSD=0.05")],
+                  fontsize=8, frameon=False, loc="lower left")
+        for p, a in zip(pos, arrs):
+            ax.annotate(f"n={len(a)}", (p, ax.get_ylim()[1]), fontsize=7, color="#888", ha="center", va="top")
+    axes[0].set_ylabel("JS divergence vs 全体 (bits)")
+    fig.suptitle(f"{name} — 壁時計窓間隔ごとの JSD 箱ひげ図 (箱=IQR, ひげ=1.5IQR, 点=外れ値)", y=1.01, weight="bold")
+    fig.tight_layout(); fig.savefig(os.path.join(outdir, "sweep_wall_box.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
+    print("  interval-range[wall]: " + ", ".join(f"{fmt_dur(int(t))}(n={len(a)})" for t, a in zip(Ts, AB)))
+
 def fig_temporal(R, name, outdir, wmc, wmb, tag, wlabel):
     LO, HI = R['LO'], R['HI']; sl = slice(LO, HI+1)
     gPc, gPb = np.array(R['gPc']), np.array(R['gPb'])
@@ -398,12 +498,12 @@ def fig_temporal(R, name, outdir, wmc, wmb, tag, wlabel):
     ax1.grid(alpha=0.3); ax1.legend(fontsize=9, frameon=False, ncol=2)
     fig.savefig(os.path.join(outdir, f"temporal_{tag}.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
 
-def run(path, name=None, max_size=None, regimes=3, force_regimes=False, sec=SEC, obs=OBS):
+def run(path, name=None, max_size=None, regimes=3, force_regimes=False, sec=SEC, obs=OBS, wall_intervals=None):
     name = name or os.path.basename(path).split('.')[0]
     if max_size is not None: name = f"{name}_le{size_label(int(np.floor(np.log2(max(max_size,1)))))}"
     outdir = os.path.join(os.path.dirname(__file__), "fig", name); os.makedirs(outdir, exist_ok=True)
-    print(f"[{name}]  window-sec={sec}({fmt_dur(sec)}) obs-window={obs}({fmt_count(obs)})")
-    S = scan(path, cap=max_size, sec=sec, obs=obs)
+    print(f"[{name}]  window-sec={sec}({fmt_dur(sec)}) obs-window={obs}({fmt_count(obs)}) wall-intervals={wall_intervals}")
+    S = scan(path, cap=max_size, sec=sec, obs=obs, wall_intervals=wall_intervals)
     R = analyze_numbers(S)
     # 全体分布(窓に非依存)
     fig_histogram(R, name, outdir, compact=False); fig_histogram(R, name, outdir, compact=True)
@@ -419,6 +519,7 @@ def run(path, name=None, max_size=None, regimes=3, force_regimes=False, sec=SEC,
         fig_temporal(R, name, outdir, mc, mb, tag, wlabel)
         fig_regimes(R, name, outdir, mc, mb, tag, wlabel, p90, K=regimes, force=force_regimes)
     fig_sweep(R, name, outdir, suffix=f"_{wtag}_{otag}")
+    fig_interval_whiskers(R, S, name, outdir)   # 複数壁時計間隔ごとの JSD 範囲(p10-p90+最大)
     R_save = {k: v for k, v in R.items() if k not in ('gc', 'gb')}
     R_save.update(max_size=max_size, dropped=S['dropped'], window_sec=sec, obs_window=obs)
     json.dump(R_save, open(os.path.join(outdir, "summary.json"), "w"), ensure_ascii=False)
@@ -440,6 +541,9 @@ if __name__ == "__main__":
     ap.add_argument("--obs-window", type=int, default=OBS, help=f"観測数窓の値(件, 既定{OBS})")
     ap.add_argument("--regimes", type=int, default=3, help="レジーム small multiples のクラスタ数 K")
     ap.add_argument("--force-regimes", action="store_true", help="安定でもレジーム図を出力")
+    ap.add_argument("--wall-intervals", default="300,1800,3600,86400",
+                    help="JSD範囲図(sweep_wall_range)の壁時計間隔リスト(秒, カンマ区切り)。空で無効")
     a = ap.parse_args()
+    ivs = [int(x) for x in a.wall_intervals.split(',') if x.strip()]
     run(a.trace, a.name, max_size=parse_size(a.max_size), regimes=a.regimes,
-        force_regimes=a.force_regimes, sec=a.window_sec, obs=a.obs_window)
+        force_regimes=a.force_regimes, sec=a.window_sec, obs=a.obs_window, wall_intervals=ivs)
