@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>チャンク化オブジェクトの元サイズと個数を Navy BlockCache に伝える</title>
+<style>
+  :root {
+    --ink: #1a2233; --sub: #5a6478; --bg: #f7f8fb; --card: #ffffff;
+    --line: #dde2ec; --acc: #2563eb; --acc2: #d97706; --ok: #059669; --ng: #dc2626;
+    --code-bg: #0f172a; --code-ink: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 2rem 1rem 4rem; background: var(--bg); color: var(--ink);
+         font-family: "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif; line-height: 1.75; }
+  main { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; border-bottom: 3px solid var(--acc); padding-bottom: .4rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.5rem; padding-left: .6rem; border-left: 5px solid var(--acc); }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: var(--acc); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 1rem 1.2rem; margin: 1rem 0; }
+  .figwrap { overflow-x: auto; margin: 1.2rem 0; }
+  svg { display: block; margin: .5rem auto; width: 100%; min-width: 660px; height: auto; }
+  code { background: #eef1f7; border-radius: 4px; padding: .1em .35em; font-size: .92em;
+         font-family: Consolas, "Cascadia Code", monospace; }
+  pre { background: var(--code-bg); color: var(--code-ink); border-radius: 8px;
+        padding: .9rem 1.1rem; overflow-x: auto; font-size: .85rem; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .7rem; text-align: left; vertical-align: top; }
+  th { background: #eef1f7; }
+  .ok { color: var(--ok); font-weight: 600; } .ng { color: var(--ng); font-weight: 600; }
+  .note { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: .7rem 1rem; margin: 1rem 0; }
+  .warn { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: .7rem 1rem; margin: 1rem 0; }
+  .pill { display:inline-block; background:var(--acc); color:#fff; border-radius:99px;
+          font-size:.75rem; padding:.05rem .6rem; margin-right:.4rem; vertical-align:middle; }
+  .pill.ng { background: var(--ng); color:#fff; }
+  .pill.ok { background: var(--ok); color:#fff; }
+  figcaption { text-align:center; color: var(--sub); font-size:.85rem; }
+  .lead { font-size: 1.02rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>チャンク化されたオブジェクトの「元サイズ」と「個数」を Navy BlockCache に伝える</h1>
+
+<p class="lead">
+Workload Generator / Trace Replay が生成したオブジェクトは、一定サイズを超えるとチャンクに分割されて
+保存される。このとき SSD 側の Navy BlockCache から見ると、1 個の巨大オブジェクトは
+<b>N 個の無関係なアイテム</b>にしか見えない。サイズ別リージョン分割を実装するには、この見え方を
+変えて次の 2 つを保証する必要がある。このページはその設計と、そこに至るまでに棄却した案の
+根拠をまとめる。
+</p>
+
+<div class="card">
+<b>絶対に守る 2 条件</b>
+<table>
+<tr><th style="width:3rem"></th><th>条件</th><th>これが無いと何が壊れるか</th></tr>
+<tr><td><b>①</b></td><td>あるキーを持つアイテムの<b>元のサイズ</b>が分かる</td>
+    <td>サイズ別リージョン分割そのものが成立しない。1 MiB チャンクは全部「1 MiB のオブジェクト」に見える</td></tr>
+<tr><td><b>②</b></td><td>チャンク化されたコンテンツを<b>重複なく数える</b>(N チャンクなら代表 1 つを 1 と数える)</td>
+    <td>個数ヒストグラムが N 倍に膨張し、サイズ帯が chunkSize に潰れて分割閾値が読めなくなる</td></tr>
+</table>
+</div>
+
+<h2>① 何が問題なのか</h2>
+
+<p>
+CacheLib のアイテムは <code>Slab::kSize = 4 MiB</code> を超えられない。ハイブリッド構成でも
+必ず DRAM を経由するため、これが全体の天井になる。そこで 1 レコードを固定長チャンクに展開して
+この不変条件を回避しているが、その代償として<b>オブジェクトという単位が Navy に届かなくなる</b>。
+</p>
+
+<div class="figwrap">
+<figure>
+<svg viewBox="0 0 860 250" role="img" aria-labelledby="f1t f1d">
+  <title id="f1t">チャンク化によってオブジェクト単位が失われる</title>
+  <desc id="f1d">1GiBの論理オブジェクトが1MiBチャンク1024個に分割され、Navyからは1024個の別アイテムに見えるため、元サイズが不明になり個数も1024倍に膨張する</desc>
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="30" y="34" width="190" height="62" rx="6" fill="#eef1f7" stroke="#94a3b8" stroke-width="1"/>
+  <text x="125" y="60" text-anchor="middle" font-size="14" font-weight="600" fill="#1a2233">論理オブジェクト</text>
+  <text x="125" y="80" text-anchor="middle" font-size="12.5" fill="#5a6478">1 GiB</text>
+
+  <line x1="220" y1="65" x2="266" y2="65" stroke="#5a6478" stroke-width="1.6" marker-end="url(#a1)"/>
+
+  <rect x="272" y="34" width="200" height="62" rx="6" fill="#eef1f7" stroke="#94a3b8" stroke-width="1"/>
+  <text x="372" y="60" text-anchor="middle" font-size="14" font-weight="600" fill="#1a2233">ChunkSplitter</text>
+  <text x="372" y="80" text-anchor="middle" font-size="12.5" fill="#5a6478">1 MiB × 1024 個に分割</text>
+
+  <line x1="472" y1="65" x2="518" y2="65" stroke="#5a6478" stroke-width="1.6" marker-end="url(#a1)"/>
+
+  <rect x="524" y="34" width="306" height="62" rx="6" fill="#fef2f2" stroke="#dc2626" stroke-width="1"/>
+  <text x="677" y="60" text-anchor="middle" font-size="14" font-weight="600" fill="#7f1d1d">Navy から見えるもの</text>
+  <text x="677" y="80" text-anchor="middle" font-size="12.5" fill="#991b1b">互いに無関係な 1024 個のアイテム</text>
+
+  <line x1="620" y1="96" x2="420" y2="136" stroke="#dc2626" stroke-width="1.4" marker-end="url(#a1)"/>
+  <line x1="730" y1="96" x2="730" y2="136" stroke="#dc2626" stroke-width="1.4" marker-end="url(#a1)"/>
+
+  <rect x="272" y="140" width="290" height="72" rx="6" fill="#fff" stroke="#dc2626" stroke-width="1"/>
+  <text x="417" y="166" text-anchor="middle" font-size="13.5" font-weight="600" fill="#7f1d1d">① 元サイズが分からない</text>
+  <text x="417" y="186" text-anchor="middle" font-size="12.5" fill="#5a6478">どの item も「1 MiB」にしか見えない</text>
+  <text x="417" y="204" text-anchor="middle" font-size="12.5" fill="#5a6478">→ サイズ別に振り分けられない</text>
+
+  <rect x="586" y="140" width="244" height="72" rx="6" fill="#fff" stroke="#dc2626" stroke-width="1"/>
+  <text x="708" y="166" text-anchor="middle" font-size="13.5" font-weight="600" fill="#7f1d1d">② 個数が 1024 倍</text>
+  <text x="708" y="186" text-anchor="middle" font-size="12.5" fill="#5a6478">個数ヒストグラムが膨張し</text>
+  <text x="708" y="204" text-anchor="middle" font-size="12.5" fill="#5a6478">分割閾値が読めなくなる</text>
+</svg>
+<figcaption>図 1: チャンク化はサイズ上限を回避するが、オブジェクトという単位を Navy から奪う</figcaption>
+</figure>
+</div>
+
+<div class="note">
+<b>誤解しやすい点:</b> 4 MiB の上限は「1 アイテムのペイロードのバイト数」にかかるもので、
+<b>サイズという数値には無関係</b>。1 GiB でも 4 GiB でも、それを表す整数は 4〜8 バイトである。
+天井にぶつかるのは <code>value.size()</code> から論理サイズを<b>推定</b>しようとした場合だけ。
+明示的に運べば上限は無い。
+</div>
+
+<h2>② 検討した 3 案と、棄却の根拠</h2>
+
+<p>
+情報を Navy に届ける経路は原理的に 3 つしかない。<b>キー</b>・<b>外部の写像</b>・<b>値</b>である
+(<code>insertAsync(HashedKey, BufferView)</code> 以外の入口が無いため)。順に検討した。
+</p>
+
+<h3>案 A: キーにサイズを埋める <span class="pill ng">棄却</span></h3>
+<p>
+<code>&lt;objId 20&gt;_&lt;chunkIdx 6&gt;_&lt;objSize 10&gt;</code> の 38 字固定キーにする案。
+<b>サイズは可変属性なので識別子に混ぜてはならない</b>という一点で破綻する。
+同一 objId でサイズが変わったとき、(1) 全チャンクが別キーになり偽ミス、
+(2) 旧チャンク集合が無効化されず残留して SSD 占有とリージョン占有率が二重計上される。
+後者は<b>測定対象である WAF とリージョン指標そのものを汚染する</b>。
+</p>
+<p>
+原理的にも、チャンク <i>k</i> の中身はバイト範囲 [<i>kC</i>, (<i>k</i>+1)<i>C</i>) であり
+サイズ変化後も不変なので、重なるチャンクは本来ヒットすべきである。
+<b>チャンクの同一性は (objId, chunkIdx) だけで決まる。</b>
+</p>
+<p>
+これを避けるには「objId → サイズ」を関数にする前処理(初出サイズへの正規化)が要る。
+その改変量を全トレースで実測した結果が次表で、<b>tencentBlock ではリクエストの 10.3% が
+サイズクラスの所属ごと変わる</b>。入力の 1 割の所属を前処理で動かすのでは評価が成立しない。
+</p>
+
+<table>
+<tr><th>トレース</th><th>サイズが変動する object</th><th>書き換わる request</th><th>クラス境界を跨ぐ request</th></tr>
+<tr><td>w01</td><td>0%</td><td>0%</td><td class="ok">0%</td></tr>
+<tr><td>msr_usr_1</td><td>0%</td><td>0%</td><td class="ok">0%</td></tr>
+<tr><td>meta_rnha</td><td>0.77%</td><td>4.55%</td><td>1.08%(閾値 32 MiB)</td></tr>
+<tr><td>block_traces_3</td><td>28.5%</td><td>41.3%</td><td class="ng">6.90%(閾値 256 KiB)</td></tr>
+<tr><td>tencentBlock_11784</td><td>31.1%</td><td>33.3%</td><td class="ng">10.30%(閾値 32 KiB)</td></tr>
+</table>
+<p style="font-size:.88rem;color:var(--sub)">
+全 5 トレースを実測(2026-08-05)。旧記録の「tencentBlock は 27%」は誤りで、object 基準 31.1% / request 基準 33.3% が正しい。
+</p>
+
+<h3>案 B: 外部のヒント表 <span class="pill ng">棄却</span></h3>
+<p>
+キーは 27 字のまま据え置き、<code>objId → 元サイズ</code> の有界な直接マップ表を別に持ち、
+BlockCache がキー先頭 20 桁から objId を parse して引く案。トレース改変は不要になる。
+</p>
+<p>
+棄却理由は 2 つ。<b>メモリを別途消費する</b>こと、そして
+<b>それは item の lookup table と機能が重複している</b>こと。
+既にキーからアイテムを引く機構がある系に、キーから属性を引く機構をもう一つ足すのは
+構造として冗長である。加えて表は有限なので情報が失われうる
+(欠落率 ≈ 1 − exp(−<i>M</i>/<i>S</i>)、<i>M</i> ≈ DRAM 容量 ÷ chunkSize)。
+</p>
+<div class="note">
+この案の副産物のうち <b>chunkIdx 下界</b>は最終設計でも使える。
+チャンク <i>k</i> が存在することは、親が少なくとも (<i>k</i>+1)×chunkSize あることを<b>証明する</b>。
+ヘッダが読めなかった場合のフォールバックとして有効。
+</div>
+
+<h3>案 C: 値の先頭に埋める <span class="pill ok">採用</span></h3>
+<p>
+情報をアイテム自身に同居させる。外部状態がゼロになり、値はリージョン内に保存されるので
+<b>リクレイム時の退避処理でも再起動後でも同じヘッダを読み直せる</b>。
+</p>
+
+<table>
+<tr><th></th><th>A: キー埋め込み</th><th>B: ヒント表</th><th class="ok">C: 値ヘッダ</th></tr>
+<tr><td>トレース改変</td><td class="ng">必要(10.3% の歪み)</td><td>不要</td><td class="ok">不要</td></tr>
+<tr><td>情報の欠落</td><td>なし</td><td class="ng">0.03%(実効)</td><td class="ok">なし</td></tr>
+<tr><td>追加メモリ</td><td>なし</td><td class="ng">128 MB〜</td><td class="ok">なし</td></tr>
+<tr><td>既存機構との重複</td><td>なし</td><td class="ng">lookup table と重複</td><td class="ok">なし</td></tr>
+<tr><td>リクレイム退避時</td><td>キーから読める</td><td>表次第</td><td class="ok">値から読める</td></tr>
+<tr><td>層の結合</td><td class="ok">なし</td><td class="ok">なし</td><td>NvmItem のオフセット 1 点</td></tr>
+</table>
+
+<h2>③ 最終設計: 8 バイトの値ヘッダ</h2>
+
+<p>
+各チャンクの値の先頭に 8 バイト置く。<code>obj_size</code> は uint32 なので 4 B で足りる。
+</p>
+
+<div class="figwrap">
+<figure>
+<svg viewBox="0 0 860 210" role="img" aria-labelledby="f2t f2d">
+  <title id="f2t">値ヘッダのレイアウト</title>
+  <desc id="f2d">値の先頭にマジック3バイトとフラグ1バイト、続いて元サイズ4バイトを置き、その後にペイロードが続く。ヘッダはreplay層とBlockCacheの両方が読む</desc>
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="60" y="30" width="150" height="58" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="135" y="54" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1e3a8a">magic</text>
+  <text x="135" y="74" text-anchor="middle" font-size="12.5" fill="#1e40af">3 B</text>
+
+  <rect x="214" y="30" width="120" height="58" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="274" y="54" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1e3a8a">flags</text>
+  <text x="274" y="74" text-anchor="middle" font-size="12.5" fill="#1e40af">1 B</text>
+
+  <rect x="338" y="30" width="160" height="58" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="418" y="54" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1e3a8a">origSize</text>
+  <text x="418" y="74" text-anchor="middle" font-size="12.5" fill="#1e40af">4 B</text>
+
+  <rect x="502" y="30" width="298" height="58" rx="6" fill="#eef1f7" stroke="#94a3b8" stroke-width="1"/>
+  <text x="651" y="54" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1a2233">payload</text>
+  <text x="651" y="74" text-anchor="middle" font-size="12.5" fill="#5a6478">chunkSize − 8 B</text>
+
+  <line x1="274" y1="88" x2="274" y2="120" stroke="#d97706" stroke-width="1.4" marker-end="url(#a2)"/>
+  <rect x="140" y="124" width="270" height="58" rx="6" fill="#fff7ed" stroke="#d97706" stroke-width="1"/>
+  <text x="275" y="148" text-anchor="middle" font-size="13.5" font-weight="600" fill="#92400e">bit0 = representative</text>
+  <text x="275" y="168" text-anchor="middle" font-size="12.5" fill="#5a6478">このピースだけを 1 と数える</text>
+
+  <line x1="418" y1="88" x2="560" y2="120" stroke="#2563eb" stroke-width="1.4" marker-end="url(#a2)"/>
+  <rect x="440" y="124" width="290" height="58" rx="6" fill="#eff6ff" stroke="#2563eb" stroke-width="1"/>
+  <text x="585" y="148" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1e3a8a">親オブジェクトの論理サイズ</text>
+  <text x="585" y="168" text-anchor="middle" font-size="12.5" fill="#5a6478">全チャンクが同じ値を持つ</text>
+</svg>
+<figcaption>図 2: 値ヘッダ 8 B。条件 ① を origSize が、条件 ② を rep フラグが担う</figcaption>
+</figure>
+</div>
+
+<h3>代表判定を「キーの規約」ではなく「フラグ」に置く理由</h3>
+<p>
+当初は「代表 = chunkIdx が 0」とキーを parse して判定する設計だった。これをフラグに移すと、
+<b>BlockCache がキー形式に一切依存しなくなる</b>。oracleGeneral 再生の
+<code>&lt;objId 20&gt;_&lt;chunkIdx 6&gt;</code> でも、PieceWise の <code>|#|</code> 区切りキーでも、
+同じコードがそのまま動く。どのピースを代表にするかは各 generator が決めればよい
+(oracleGeneral なら chunk 0、PieceWise なら必ず存在する header ピース)。
+</p>
+
+<h2>④ enableLookaside = false への対応</h2>
+
+<p>
+PieceWise-Replay を <code>enableLookaside = false</code> で回すと、挿入は kGet のミス経由ではなく
+明示的な kSet で起きる。ヘッダの書き込みを<b>挿入経路ではなく「値を実体化する 1 箇所」</b>に
+置くことで、この違いを設計から消せる。どちらの経路も
+<code>allocate()</code> → 値を書く → <code>insertOrReplace()</code> という同じ流れを通るからである。
+</p>
+
+<div class="figwrap">
+<figure>
+<svg viewBox="0 0 860 380" role="img" aria-labelledby="f3t f3d">
+  <title id="f3t">2つの挿入経路が値の実体化点で合流する</title>
+  <desc id="f3d">kGetミスからのlookaside挿入と明示的なkSet挿入がどちらも同じ値の実体化点を通り、そこでヘッダが書かれ、NvmCacheのラップを経てBlockCacheが固定オフセットで読む</desc>
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="60" y="26" width="320" height="58" rx="6" fill="#eef1f7" stroke="#94a3b8" stroke-width="1"/>
+  <text x="220" y="50" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1a2233">kGet ミス → lookaside 挿入</text>
+  <text x="220" y="70" text-anchor="middle" font-size="12.5" fill="#5a6478">oracleGeneral チャンク再生</text>
+
+  <rect x="480" y="26" width="320" height="58" rx="6" fill="#eef1f7" stroke="#94a3b8" stroke-width="1"/>
+  <text x="640" y="50" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1a2233">kSet による明示挿入</text>
+  <text x="640" y="70" text-anchor="middle" font-size="12.5" fill="#5a6478">PieceWise・enableLookaside = false</text>
+
+  <line x1="220" y1="84" x2="360" y2="112" stroke="#5a6478" stroke-width="1.6" marker-end="url(#a3)"/>
+  <line x1="640" y1="84" x2="500" y2="112" stroke="#5a6478" stroke-width="1.6" marker-end="url(#a3)"/>
+
+  <rect x="230" y="116" width="400" height="64" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+  <text x="430" y="142" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a8a">値を実体化する唯一の箇所</text>
+  <text x="430" y="163" text-anchor="middle" font-size="12.5" fill="#1e40af">allocate 成功直後に先頭 8 B を書く</text>
+
+  <line x1="430" y1="180" x2="430" y2="208" stroke="#5a6478" stroke-width="1.6" marker-end="url(#a3)"/>
+
+  <rect x="280" y="212" width="300" height="52" rx="6" fill="#eef1f7" stroke="#94a3b8" stroke-width="1"/>
+  <text x="430" y="234" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1a2233">NvmCache が NvmItem でラップ</text>
+  <text x="430" y="253" text-anchor="middle" font-size="12.5" fill="#5a6478">ヘッダは固定オフセットに移動する</text>
+
+  <line x1="430" y1="264" x2="430" y2="292" stroke="#5a6478" stroke-width="1.6" marker-end="url(#a3)"/>
+
+  <rect x="50" y="296" width="760" height="72" rx="6" fill="none" stroke="#94a3b8" stroke-width="1" stroke-dasharray="6 4"/>
+  <text x="70" y="316" font-size="13.5" font-weight="600" fill="#1a2233">Navy BlockCache</text>
+
+  <rect x="70" y="322" width="350" height="38" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="245" y="346" text-anchor="middle" font-size="13" font-weight="600" fill="#1e3a8a">分類: origSize → class(全チャンク)</text>
+
+  <rect x="440" y="322" width="350" height="38" rx="6" fill="#fff7ed" stroke="#d97706" stroke-width="1"/>
+  <text x="615" y="346" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">計数: rep フラグの item のみ</text>
+</svg>
+<figcaption>図 3: 挿入経路に依存しないので enableLookaside の真偽を問わない</figcaption>
+</figure>
+</div>
+
+<div class="card">
+<b>BlockCache が行う 2 つの動作(これだけ)</b>
+<table>
+<tr><th style="width:4.5rem">動作</th><th style="width:9rem">対象</th><th>内容</th></tr>
+<tr><td><b>分類</b></td><td>全チャンク</td>
+    <td>固定オフセットの 8 B を読み、magic 一致なら <code>origSize</code> でクラスを決め、
+        priority として <code>Allocator::allocate()</code> に渡す。
+        全チャンクが同じ origSize を読むので、<b>巨大オブジェクトの全チャンクが同じクラスのリージョンに揃う</b></td></tr>
+<tr><td><b>計数</b></td><td>rep フラグの item のみ</td>
+    <td>insert で 1 回、リクレイム退避で 1 回だけ計上。<b>N チャンクのオブジェクトも 1 と数えられる</b>。
+        退避時に読み直せるのは、値がリージョン内に保存されているため</td></tr>
+</table>
+</div>
+
+<h2>⑤ 実装: 変更は 4 箇所</h2>
+
+<h3>1. <code>cachebench/util/Request.h</code> — フィールド 2 つ追加</h3>
+<pre><code>struct Request {
+  // ... 既存 ...
+  uint32_t origSize{0};    // 親オブジェクトの論理サイズ (0 = ヘッダを書かない)
+  bool     isRep{false};   // このピースを代表として 1 と数える
+};</code></pre>
+
+<h3>2. Navy 側のヘッダ定義 — 「読むだけ」の構造体</h3>
+<pre><code>namespace facebook::cachelib::navy {
+
+struct ValueHeader {                  // 8 B, little endian
+  uint32_t magicAndFlags;             // 上位 24 bit = magic, 下位 8 bit = flags
+  uint32_t origSize;
+
+  static constexpr uint32_t kMagic = 0xCAC5E7;   // 24 bit
+  static constexpr uint32_t kRep   = 0x01;       // flags bit0
+
+  bool valid() const { return (magicAndFlags &gt;&gt; 8) == kMagic; }
+  bool isRep() const { return (magicAndFlags &amp; kRep) != 0; }
+};
+static_assert(sizeof(ValueHeader) == 8, "value header must be 8B");
+
+} // namespace</code></pre>
+
+<h3>3. <code>CacheStressor</code> — 値を実体化する 1 箇所</h3>
+<pre><code>auto handle = cache_-&gt;allocate(pid, *req.key, sz);
+if (handle) {
+  if (req.origSize != 0) {
+    auto* h = reinterpret_cast&lt;navy::ValueHeader*&gt;(handle-&gt;getMemory());
+    h-&gt;magicAndFlags = (navy::ValueHeader::kMagic &lt;&lt; 8)
+                     | (req.isRep ? navy::ValueHeader::kRep : 0u);
+    h-&gt;origSize = req.origSize;
+  }
+  cache_-&gt;insertOrReplace(handle);
+}</code></pre>
+<p>
+lookaside の insert-on-miss と kSet がこの経路を共有していることを、実装で必ず確認すること。
+共有していなければ、両方から呼ぶ小さなヘルパに切り出す。
+</p>
+
+<h3>4. 各 generator — 値を設定するだけ</h3>
+<table>
+<tr><th>generator</th><th>origSize</th><th>isRep</th></tr>
+<tr><td>oracleGeneral チャンク再生</td><td><code>ChunkSplitter</code> が保持する親サイズ</td><td><code>chunkIdx == 0</code></td></tr>
+<tr><td>PieceWise-Replay</td><td><code>PieceWiseReqWrapper</code> の <code>fullObjectSize</code></td><td>header ピースのとき</td></tr>
+</table>
+
+<h3>5. <code>BlockCache::insert</code> とリクレイム退避</h3>
+<pre><code>const auto* h = probeHeader(value);        // config のオフセットで読む
+uint16_t priority;
+if (h != nullptr &amp;&amp; h-&gt;valid()) {
+  priority = classOf(h-&gt;origSize);         // ← 条件 ①
+  if (h-&gt;isRep()) {                        // ← 条件 ②
+    splitThreshold_.onAdmit(h-&gt;origSize);
+    nRepAdmit_.inc();
+  }
+} else {
+  nHeaderMiss_.inc();                      // 定常運転で 0 でなければならない
+  priority = classOf(value.size());        // フォールバック
+}
+allocator_.allocate(size, priority, ...);</code></pre>
+
+<div class="note">
+<b>navy を NvmItem に依存させないこと。</b>
+<code>BlockCacheConfig</code> に「ヘッダを取り出す関数」と「magic」を渡し、BlockCache は
+<b>関数の型と 8 B 構造体</b>以上のことを知らない設計にする。レイアウトの知識は
+cachebench 側の 1 箇所に閉じ込め、単体テストで固定する。
+</div>
+
+<h3>6. chained items への対応 — 固定オフセットではなく probe 関数にする</h3>
+<p>
+<code>allocateChainedItem()</code> を明示的に呼ばない限り鎖は発生しないので、
+<code>sizes[0]</code> しか設定しない現在の generator では chained items は生じない。
+ただし<b>鎖が生じても Navy のエントリは 1 個のまま</b>である —
+NvmCache が parent と鎖全体を 1 つの <code>NvmItem</code> に直列化するため、
+<b>条件 ② の計数は影響を受けない</b>。変わるのは <code>numBlobs</code> が
+1 + 鎖長になることで実データ先頭のオフセットがずれる点だけ。
+</p>
+<p>
+そこでオフセットを固定値で渡すのをやめ、<b>ヘッダを取り出す関数そのもの</b>を渡す。
+<code>getBlob(0)</code> が内部で <code>numBlobs</code> を勘定するので、
+鎖があってもなくても同じコードが正しい位置を返す。
+鎖を使う予定が無くても、こちらの方が堅牢である。
+</p>
+<pre><code>// navy 側 — 関数の型と 8 B 構造体しか知らない
+using HeaderProbe = folly::Function&lt;const ValueHeader*(BufferView) const&gt;;
+// BlockCacheConfig::setHeaderProbe(HeaderProbe);
+
+// cachebench 側 — レイアウトを知っているのでここだけで実装する
+cfg.setHeaderProbe([](navy::BufferView v) -&gt; const navy::ValueHeader* {
+  const auto* ni = reinterpret_cast&lt;const NvmItem*&gt;(v.data());
+  if (ni-&gt;getNumBlobs() == 0) { return nullptr; }
+  auto blob = ni-&gt;getBlob(0);                       // parent は blob 0
+  if (blob.data.size() &lt; sizeof(navy::ValueHeader)) { return nullptr; }
+  return reinterpret_cast&lt;const navy::ValueHeader*&gt;(blob.data.data());
+});</code></pre>
+<p>
+書き込み側は <b>parent の割当の先頭</b>に置く。parent は常に存在し、常に blob 0 である。
+<code>origSize</code> には鎖の断片長ではなく<b>論理オブジェクト全体のサイズ</b>を入れる。
+</p>
+<div class="warn">
+<b>blob 0 が parent であることは単体テストで往復確認すること。</b>
+CacheLib の鎖は新しい要素を先頭に繋ぐ連結リストなので、直列化時の並び順が
+挿入順と逆になる可能性がある。違っていた場合も probe 関数側だけ直せば済む構造にしておく。
+</div>
+<p>
+なお<b>鎖でチャンク化を置き換えることはできない</b>。chained items は DRAM で 4 MiB を
+超えるための機構だが、Navy 側は <code>kMaxItemSize = 512 × UINT16_MAX</code> ≈ 33.5 MiB が
+理論上限である(§1.1 参照)。1 GiB のオブジェクトは鎖でも入らない。
+両方を混ぜると不変条件が増えるだけなので、<b>chunkSize を 4 MiB 未満に保って
+鎖が発生しない状態を維持する</b>のが最も単純である。現行の 64 KiB / 1 MiB はこれを満たす。
+</p>
+
+<h2>⑥ 守るべき不変条件と、出すべきカウンタ</h2>
+
+<div class="warn">
+<b>magic 不一致は必ずフォールバック + カウンタに落とすこと。</b>
+CacheLib を更新して NvmItem のレイアウトが変わった瞬間にカウンタが立つので、
+黙って誤分類し続ける事故が構造的に起きなくなる。これが値埋め込みの唯一の弱点
+(層の結合)に対する保険である。
+</div>
+
+<table>
+<tr><th>カウンタ</th><th>期待値</th><th>ずれたときの意味</th></tr>
+<tr><td><code>nHeaderMiss</code></td><td class="ok">0</td><td>NvmItem レイアウト変更、または probe 関数が parent blob を見失った</td></tr>
+<tr><td><code>numBlobs != 1</code> の件数</td><td class="ok">0</td><td>意図せず chained items が発生している(§5-6)</td></tr>
+<tr><td><code>nRepAdmit</code></td><td>distinct オブジェクト数と一致</td><td>代表フラグの設定漏れ、または重複計上</td></tr>
+<tr><td>クラス跨ぎオブジェクト数</td><td>ほぼ 0</td><td>同一オブジェクトのチャンクが別クラスへ散った</td></tr>
+<tr><td>孤児チャンク数とバイト量</td><td>小さい</td><td>後述の既知の系統誤差の量</td></tr>
+<tr><td>クラス別リージョンあたり収容数</td><td>—</td><td>研究の測定対象そのもの</td></tr>
+</table>
+
+<h3>前提として assert すること</h3>
+<ul>
+<li><code>numBlobs == 1</code> であること(= 鎖が発生していない)。
+    §5-6 の probe 関数を使えば鎖があっても動くが、初期段階では 1 であることを
+    カウンタで確認する。0 でない値が出たら generator が意図せず多要素 <code>sizes</code> を
+    出しているか、config で鎖が有効になっている</li>
+<li>値の長さが最低 8 B あること。サイズ 0 → 1 B にクランプされるオブジェクトは 8 + 1 B になる</li>
+<li><code>chunkSize = アロケーションクラスサイズ − 35(ヘッダ 8 + キー 27) − アイテムヘッダ長</code>
+    に合わせ、割当クラス境界を跨がないこと</li>
+</ul>
+
+<h2>⑦ 残る既知の系統誤差</h2>
+
+<p>
+オブジェクトのサイズが縮小した後に再投入されると、旧バージョンの末尾チャンクが
+<b>孤児</b>として旧クラスのリージョンに残る。二度と参照されないので LRU で抜けるが、
+その間はリージョン占有に乗る。これはキー設計や値ヘッダとは無関係な、
+<b>チャンク化そのものに固有の現象</b>である。消そうとするのではなく、
+孤児チャンク数とバイト量をカウンタに出して報告する。
+</p>
+
+<p>
+また「rep の item が在中 = オブジェクトが在中」という計数なので、部分残留
+(rep だけ退避されて他チャンクが残る、またはその逆)の間は数え方に近似が入る。
+既存の <code>objFullHit%</code> / <code>objPartialHit%</code> と head/tail ヒット率差が
+そのまま測定器になるので、バイアスの量は数字で示せる。
+</p>
+
+<h2>⑧ コストと着手順</h2>
+
+<table>
+<tr><th>chunkSize</th><th>8 B ヘッダのオーバーヘッド</th></tr>
+<tr><td>1 MiB</td><td>0.0008%</td></tr>
+<tr><td>64 KiB</td><td>0.012%</td></tr>
+<tr><td>5 KiB</td><td>0.16%</td></tr>
+</table>
+<p>全アームで共通なので、A/B 比較には影響しない。</p>
+
+<div class="card">
+<b>着手順</b>
+<ol>
+<li><b>2 と 5(ヘッダの定義と BlockCache の読み取り)を先に入れる。</b>
+    generator は生サイズのまま動かし、<code>nHeaderMiss</code> が 0 になることを確認する。
+    ここで最もリスクの高い層間結合を先に潰せる</li>
+<li>1・3・4(Request のフィールドと書き込み、generator 側の設定)を載せる</li>
+<li><code>nRepAdmit</code> が distinct オブジェクト数と一致することを確認する</li>
+<li><code>numPriorities = 3</code> にして、クラス別のリージョン統計を取り始める</li>
+</ol>
+</div>
+
+<p style="margin-top:2.5rem;color:var(--sub);font-size:.85rem">
+関連: <code>ORACLE_GENERAL_CHUNKED_REPLAY.md</code>(チャンク再生の設計と検証手順) /
+<code>SplitThreshold_guide.html</code>(分割閾値アルゴリズム) /
+<code>OracleGeneralCache.h</code>(統計層)
+</p>
+
+</main>
+</body>
+</html>
