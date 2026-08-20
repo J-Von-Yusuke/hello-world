@@ -1,7 +1,10 @@
 # CacheValue.h を使った「元サイズ」「代表フラグ」伝達 — 変更手順書
 
 - **対象読者**: CacheLib のコードを初めて触る人
-- **確認したソース**: CacheLib `main` / commit `7c04a82`
+- **確認したソース**: CacheLib **`v20240621`**(commit `c5c0d9b`)。
+  行番号・構造ともこのタグで実機確認済み
+- **注意**: `main` とは構造がかなり違う(`BlockCache::insert` の引数、`allocateForInsert` の有無、
+  `numPriorities` の型、`ReinsertionRes` の名前など)。上流のドキュメントを見るときは注意すること
 - **行番号について**: 行番号はこの commit のもの。バージョンが違うとずれるので、
   各手順に **grep 用のアンカー文字列**を併記した。行番号よりアンカーを信用すること
 - **背景と、この方式を選んだ理由**: `OBJECT_SIZE_TO_NAVY.md`(棄却した案の比較あり)
@@ -50,13 +53,11 @@ CacheLib のシリアライズ形式に依存してしまう。CacheValue なら
 `getMemoryAs<CacheValue>()` という既存のアクセサがそのまま使える。
 
 **理由 2: 割当サイズが 1 バイトも増えない。**
-`CacheValue::getSize()` の実装はこうなっている(`CacheValue.h:74-80`)。
+`CacheValue::getSize()` の実装はこうなっている(`CacheValue.h:72-73`)。
 
 ```cpp
-static uint32_t getSize(size_t size) {
-  const auto cacheValueSize = std::max<size_t>(size, sizeof(CacheValue));
-  ...
-  return static_cast<uint32_t>(cacheValueSize);
+static size_t getSize(size_t size) {
+  return std::max<size_t>(size, sizeof(CacheValue));
 }
 ```
 
@@ -73,8 +74,8 @@ DRAM から SSD へ落ちるとき、NvmCache はアイテムのメモリをそ�
 ### 1.3 ペイロードは絶対に壊れない
 
 心配になる点なので先に潰しておく。値にデータを書く関数は
-`Cache::setStringItem()`(`Cache.h:1571-1578`)で、中で使っているのは
-`getMemory(handle)` である。そして `getMemory` の実装はこうなっている(`Cache.h:250-256`)。
+`Cache::setStringItem()`(`Cache.h:1325-1331`)で、中で使っているのは
+`getMemory(handle)` である。そして `getMemory` の実装はこうなっている(`Cache.h:231` / `:236`)。
 
 ```cpp
 const void* getMemory(const Item& item) const noexcept {
@@ -108,7 +109,8 @@ CacheValue のフィールドを踏むことは構造上ありえない。
 
 | ファイル | 役割 |
 |---|---|
-| `cachelib/cachebench/cache/CacheValue.h` | ヘッダにフィールド追加 |
+| `cachelib/navy/common/ObjectInfo.h` | **新規**。読み取り対象の 8 B(navy が所有) |
+| `cachelib/cachebench/cache/CacheValue.h` | ObjectInfo を先頭に埋め込む |
 | `cachelib/cachebench/cache/Cache.h` | allocate に引数追加 |
 | `cachelib/cachebench/util/Request.h` | Request にフィールド追加 |
 | `cachelib/cachebench/runner/CacheStressor.h` | setKey で受け渡し |
@@ -122,7 +124,7 @@ CacheValue のフィールドを踏むことは構造上ありえない。
 
 ### 変更場所
 
-`cachelib/cachebench/cache/CacheValue.h`、private セクション(`:85-92` 付近)。
+`cachelib/cachebench/cache/CacheValue.h`、private セクション(`:79-86`)。
 
 ```bash
 grep -n "consistencyNum_" cachelib/cachebench/cache/CacheValue.h
@@ -141,48 +143,83 @@ grep -n "consistencyNum_" cachelib/cachebench/cache/CacheValue.h
   unsigned char data_[0];
 ```
 
-### 変更後
+### 先に: 読み取り対象の 8 B は **navy 側**で定義する
+
+`CacheValue` は cachebench にあり、**cachebench → navy** の依存が既にある。
+したがって navy から `CacheValue.h` を include すると**循環参照になる**。
+そこで読み取り対象の 8 B だけを navy 側に置き、cachebench がそれを埋め込む。
+定義は 1 箇所だけなので二重管理にならない。
+
+`cachelib/navy/common/ObjectInfo.h`(新規):
 
 ```cpp
- private:
-  // for ItemDestructorCheck usage
-  uint64_t idx_;        // an unique id for item in cache
-  uint64_t version_{0}; // a version number for item due to in-place mutation
-  // for ConsistencyCheck usage
-  uint64_t consistencyNum_{0}; // a number to check for item validation
-  // ---- ここから追加 ----
-  // 親オブジェクトの論理サイズ。チャンク化されていない場合は自分自身のサイズ。
-  // 0 は「未設定」を意味する。
-  uint32_t origSize_{0};
-  // bit0 = representative(この piece をオブジェクト 1 個として数える)
-  uint32_t flags_{0};
-  // ---- ここまで追加 ----
-  // beginning of the byte array.
-  unsigned char data_[0];
+#pragma once
+#include <folly/Portability.h>
+#include <cstdint>
+
+namespace facebook::cachelib::navy {
+
+// cachebench の CacheValue 先頭に埋め込まれる 8 B。
+// BlockCache は blob 0 の先頭からこれを読む。
+struct FOLLY_PACK_ATTR ObjectInfo {
+  uint32_t origSize;  // 親オブジェクトの論理サイズ
+  uint32_t flags;     // 上位 16 bit = カナリア, bit0 = representative
+
+  static constexpr uint32_t kCanary     = 0xCA5A0000u;
+  static constexpr uint32_t kCanaryMask = 0xFFFF0000u;
+  static constexpr uint32_t kRep        = 0x00000001u;
+
+  bool valid() const { return (flags & kCanaryMask) == kCanary; }
+  bool isRep() const { return (flags & kRep) != 0; }
+};
+static_assert(sizeof(ObjectInfo) == 8, "ObjectInfo must be 8B");
+
+} // namespace facebook::cachelib::navy
 ```
 
-public セクションにアクセサも足す(`getConsistencyNum()` の隣あたり)。
+**カナリアを `flags` の上位 16 bit に入れるのが要点。**
+`flags` には空きがあるので、**追加バイトゼロで自己検証**にできる。
+レイアウトがずれたら `valid()` が false になり、カウンタで即座に分かる。
+
+### 変更後(CacheValue.h)
+
+**フィールドは末尾ではなく先頭に置くこと。**
+末尾だと navy が `sizeof(CacheValue)` を知る必要が出てしまう。
+先頭なら navy は「blob 0 の offset 0」を読むだけで済み、
+**CacheValue の他の中身に一切依存しない。**
 
 ```cpp
-  static constexpr uint32_t kFlagRepresentative = 0x1;
+#include "cachelib/navy/common/ObjectInfo.h"
 
-  uint32_t getOrigSize() const { return origSize_; }
-  bool isRepresentative() const { return (flags_ & kFlagRepresentative) != 0; }
+class CACHELIB_PACKED_ATTR CacheValue {
+ public:
+  uint32_t getOrigSize() const { return objInfo_.origSize; }
+  bool isRepresentative() const { return objInfo_.isRep(); }
 
-  void setOrigSize(uint32_t s) { origSize_ = s; }
-  void setRepresentative(bool rep) {
-    flags_ = rep ? (flags_ | kFlagRepresentative)
-                 : (flags_ & ~kFlagRepresentative);
+  void setObjectInfo(uint32_t origSize, bool isRep) {
+    objInfo_.origSize = origSize;
+    objInfo_.flags = navy::ObjectInfo::kCanary |
+                     (isRep ? navy::ObjectInfo::kRep : 0u);
   }
+  // ... 既存のメソッドはそのまま ...
+
+ private:
+  // ★必ず先頭★ Navy が blob 0 の offset 0 から読むため、順序を変えないこと
+  navy::ObjectInfo objInfo_{};
+  // ---- 以下は既存 ----
+  uint64_t idx_;
+  uint64_t version_{0};
+  uint64_t consistencyNum_{0};
+  unsigned char data_[0];
+};
 ```
 
-### なぜ uint32 を 2 つなのか
+### なぜこの形なのか
 
-- `origSize_` が uint32 なのは、`oracleGeneral` の `obj_size` が uint32 だから(最大 4 GiB)。
+- `origSize` が uint32 なのは、`oracleGeneral` の `obj_size` が uint32 だから(最大 4 GiB)。
   トレース形式が表現できない値は存在しないので、これで十分
-- `flags_` を uint8 ではなく uint32 にしたのは**アラインメントのため**。
-  uint32 + uint8 だと合計 29 B になり `data_` が中途半端な位置から始まる。
-  uint32 を 2 つにすれば合計 32 B で 8 の倍数に揃い、ペイロードのアクセスが素直になる
+- 8 B が先頭に入るので、後続の `uint64_t` 3 本は offset 8 / 16 / 24 と 8 B 境界に揃い、
+  `data_` も offset 32 で揃う。アラインメントが崩れない
 
 ### 変更後の予測動作
 
@@ -208,7 +245,7 @@ static_assert(sizeof(CacheValue) == 32, "CacheValue must be 32B");
 
 ### 変更場所
 
-`cachelib/cachebench/cache/Cache.h`、`Cache<Allocator>::allocate` の定義(`:1085-1098` 付近)。
+`cachelib/cachebench/cache/Cache.h`、`Cache<Allocator>::allocate` の定義(`:899-913`)。
 
 ```bash
 grep -n "CacheValue::initialize" cachelib/cachebench/cache/Cache.h
@@ -248,8 +285,8 @@ typename Cache<Allocator>::WriteHandle Cache<Allocator>::allocate(
       auto* cv = handle->template getMemoryAs<CacheValue>();
       // origSize が 0 のときは「チャンク化していない」とみなし自分のサイズを入れる。
       // これで下流は常に非 0 を前提にできる。
-      cv->setOrigSize(origSize != 0 ? origSize : static_cast<uint32_t>(size));
-      cv->setRepresentative(isRep);
+      cv->setObjectInfo(origSize != 0 ? origSize : static_cast<uint32_t>(size),
+                        isRep);
     }
   } catch (const std::invalid_argument& e) {
     XLOGF(DBG, "Unable to allocate, reason: {}", e.what());
@@ -258,7 +295,7 @@ typename Cache<Allocator>::WriteHandle Cache<Allocator>::allocate(
 }
 ```
 
-宣言側(`Cache.h:145` 付近)にも**デフォルト引数**を付けておくと、
+宣言側(`Cache.h:125`)にも**デフォルト引数**を付けておくと、
 既存の呼び出し箇所を一切直さずに済む。
 
 ```bash
@@ -299,7 +336,7 @@ grep -n "WriteHandle allocate(PoolId pid" cachelib/cachebench/cache/Cache.h
 
 ### 変更場所
 
-`cachelib/cachebench/util/Request.h`、`struct Request` の public メンバ(`:187-198` 付近)。
+`cachelib/cachebench/util/Request.h`、`struct Request`(`:63`)の public メンバ(`:134-135` 付近)。
 
 ```bash
 grep -n "std::vector<size_t>::iterator sizeBegin" cachelib/cachebench/util/Request.h
@@ -335,7 +372,10 @@ generator(トレースを読む側)と stressor(キャッシュを叩く側)の�
 
 ### 変更場所
 
-`cachelib/cachebench/runner/CacheStressor.h`、`setKey()`(`:443-467`)。
+`cachelib/cachebench/runner/CacheStressor.h`、`setKey()`(`:476-500`)。
+
+**注意**: v20240621 の `setKey` は第 3 引数が `const std::string* key`(ポインタ)である。
+`main` の `std::string_view` とは違うので、コピペで持ってこないこと。
 
 ```bash
 grep -n "OpResultType setKey" cachelib/cachebench/runner/CacheStressor.h
@@ -345,33 +385,33 @@ grep -n "OpResultType setKey" cachelib/cachebench/runner/CacheStressor.h
 
 ```cpp
   OpResultType setKey(
-      PoolId pid, ThroughputStats& stats, const std::string_view key,
+      PoolId pid, ThroughputStats& stats, const std::string* key,
       size_t size, uint32_t ttlSecs,
       const std::unordered_map<std::string, std::string>& featureMap,
       const std::string& itemValue) {
     ...
-    auto it = cache_->allocate(pid, key, size, ttlSecs);
+    auto it = cache_->allocate(pid, *key, size, ttlSecs);
 ```
 
 ### 変更後
 
 ```cpp
   OpResultType setKey(
-      PoolId pid, ThroughputStats& stats, const std::string_view key,
+      PoolId pid, ThroughputStats& stats, const std::string* key,
       size_t size, uint32_t ttlSecs,
       const std::unordered_map<std::string, std::string>& featureMap,
       const std::string& itemValue,
       uint32_t origSize = 0, bool isRep = true) {   // ← 追加
     ...
-    auto it = cache_->allocate(pid, key, size, ttlSecs, origSize, isRep);
+    auto it = cache_->allocate(pid, *key, size, ttlSecs, origSize, isRep);
 ```
 
 呼び出し元は 2 箇所だけなので、両方に `req.origSize, req.isRep` を足す。
 
 | 行 | 文脈 | grep アンカー |
 |---|---|---|
-| `:309` | `OpType::kSet` / `kLoneSet` | `result = setKey(pid, stats, key,` |
-| `:339` | `OpType::kGet` の**ミス時 lookaside 挿入** | `if (config_.enableLookaside) {` の直後 |
+| `:342` | `OpType::kSet` / `kLoneSet` | `result = setKey(pid, stats, key,` |
+| `:372` | `OpType::kGet` の**ミス時 lookaside 挿入** | `if (config_.enableLookaside) {`(`:366`)の直後 |
 
 ### ここが設計上の要
 
@@ -434,77 +474,177 @@ XLOGF(INFO, "key={} origSize={} rep={}", key, cv->getOrigSize(),
 
 ## Step 6: Navy 側で読んで分類する
 
-### 6.1 読み取りヘルパを用意する
+### 6.1 依存関係の確認(v20240621 で必ず読むこと)
 
-Navy は cachebench を知らないので、**Navy 側に小さな読み取り関数を置く**。
-`NvmItem` のレイアウトは `NvmItem.h:154-167` に明記されており、blob へのアクセスは
-`getBlob(size_t)`(`:114`、public)が用意されている。
+| 向き | v20240621 での状況 |
+|---|---|
+| navy → allocator/nvmcache の **include** | **既にある**。`BlockCache.h:25` が `NavyConfig.h`、`navy/common/Device.h:22` や `navy/Factory.h:23` も同様。だから `NvmItem.h` を足しても新しい依存方向は生まれない |
+| navy → cachebench | **不可**(循環する)。だから Step 1 で 8 B だけを navy 側の `ObjectInfo` として定義した |
+| **リンク** | `cachelib_navy` は **`cachelib_common` にしかリンクしない**(`navy/CMakeLists.txt:58-60`)。一方 `NvmItem.cpp` は **`cachelib_allocator`** に入っている(`allocator/CMakeLists.txt:50`)。しかも `cachelib_allocator` が `cachelib_navy` にリンクする側である(`:63-64`) |
 
 ```bash
-grep -n "Blob getBlob" cachelib/allocator/nvmcache/NvmItem.h
+grep -n "target_link_libraries(cachelib_navy" -A 3 cachelib/navy/CMakeLists.txt
+grep -n "nvmcache/NvmItem.cpp" cachelib/allocator/CMakeLists.txt
 ```
 
-**blob 0 が parent** であることはソースで確認済み(`NvmCache.h:1196`、
-`blobs.push_back(makeBlob(item))` が chained ループより前にある)。
-だから `getBlob(0)` の先頭が CacheValue である。
+**ここから出る結論**: `NvmItem::getBlob()` は `NvmItem.cpp` にある**アウトオブライン関数**なので、
+navy から呼ぶと `cachelib_navy` に未定義シンボルが残る。cachebench の実行ファイルは
+`cachelib_allocator` 経由で最終的に解決するが、**navy 単体のテストがリンクできなくなる恐れがある**。
 
-**オフセットを自前で計算してはいけない。** `getBlob(0)` を使えば chained items があっても正しく動く。
+そこで **`getBlob()` は呼ばず、オフセットを navy 内でインライン計算する**。
+`getNumBlobs()` は `NvmItem.h:87` で**インライン定義**されているので、これは呼んでよい。
 
-### 6.2 分類を差し込む場所
+> `main` ブランチでは `BlockCache.h` が `NvmItem.h` を include しており、
+> `ReuseTimeReinsertionPolicy` という前例もあるが、**v20240621 にはどちらも無い**。
 
-`cachelib/navy/block_cache/BlockCache.cpp` の `allocateForInsert`(`:1278-1303`)。
+### 6.2 読み取りヘルパ
+
+`cachelib/navy/block_cache/BlockCache.cpp` の無名 namespace に置く。
+
+```cpp
+#include "cachelib/allocator/nvmcache/NvmItem.h"   // ★v20240621 では自分で足す
+#include "cachelib/navy/common/ObjectInfo.h"
+
+namespace {
+
+// NvmItem のレイアウト(NvmItem.h:147-159 のコメントに明記):
+//   [ヘッダ sizeof(NvmItem)][BlobInfo × numBlobs][Blob データ...]
+// BlobInfo は uint32 × 2 = 8 B(NvmItem.h:118-121, FOLLY_PACK_ATTR)。
+// private なので sizeof が取れない。値は単体テストで固定する(§6.3)。
+constexpr size_t kBlobInfoSize = 8;
+
+// value は NvmCache が書いた NvmItem のバイト列そのもの。
+// その blob 0 が parent アイテムのメモリで、先頭が ObjectInfo。
+const ObjectInfo* probeObjectInfo(BufferView value) {
+  // (1) NvmItem のヘッダが乗る長さがあるか
+  if (value.size() < sizeof(cachelib::NvmItem)) {
+    return nullptr;
+  }
+  const auto* nvmItem =
+      reinterpret_cast<const cachelib::NvmItem*>(value.data());
+
+  // (2) numBlobs の健全性。掛け算でオーバーフローさせないため割り算で判定する。
+  //     getNumBlobs() はインライン(NvmItem.h:87)なのでリンク依存が出ない
+  const size_t numBlobs = nvmItem->getNumBlobs();
+  if (numBlobs == 0 || numBlobs > value.size() / kBlobInfoSize) {
+    return nullptr;
+  }
+
+  // (3) blob 0 のデータ開始位置。ヘッダ + BlobInfo 配列の直後
+  const size_t off = sizeof(cachelib::NvmItem) + numBlobs * kBlobInfoSize;
+  if (off + sizeof(ObjectInfo) > value.size()) {
+    return nullptr;
+  }
+
+  // (4) blob 0 = parent(NvmCache.h:942 が chained ループ :945 より前にある)
+  const auto* oi = reinterpret_cast<const ObjectInfo*>(value.data() + off);
+
+  // (5) カナリアで検証。false ならレイアウトがずれている
+  return oi->valid() ? oi : nullptr;
+}
+
+} // namespace
+```
+
+#### ガードの順序に意味がある
+
+(2) を掛け算ではなく**割り算**で書いているのは、壊れた `numBlobs`(例えば `SIZE_MAX`)で
+`numBlobs * kBlobInfoSize` がオーバーフローし、(3) のチェックをすり抜けるのを防ぐため。
+順番を入れ替えたり掛け算に直したりしないこと。
+
+`reinterpret_cast` でオンディスク構造体を読むのは、同じファイル内に前例がある
+(`onRegionReclaim` 内の `*reinterpret_cast<const EntryDesc*>(...)`)。
+`NvmItem` は `FOLLY_PACK_ATTR` なのでアラインメント要求もない。
+
+### 6.3 `kBlobInfoSize = 8` を単体テストで固定する
+
+`BlobInfo` は private なので `sizeof` が取れない。ここだけが唯一の「レイアウトの決め打ち」なので、
+**cachebench 側のテスト**(allocator と navy の両方にリンクできる)で固定する。
+
+```cpp
+TEST(ObjectInfoProbe, BlobZeroOffsetMatchesGetBlob) {
+  std::string payload(64, 0x78);
+  cachelib::Blob blob{static_cast<uint32_t>(payload.size()),
+                      folly::StringPiece{payload}};
+  auto item = std::unique_ptr<cachelib::NvmItem>(
+      new (cachelib::NvmItem::estimateVariableSize(blob))
+          cachelib::NvmItem(0, 0, 0, blob));
+
+  const auto* base = reinterpret_cast<const uint8_t*>(item.get());
+  const size_t off = sizeof(cachelib::NvmItem) + item->getNumBlobs() * 8;
+  EXPECT_EQ(item->getBlob(0).data.data(),
+            reinterpret_cast<const char*>(base + off));
+}
+```
+
+これが通る限り、インライン計算は `getBlob(0)` と等価である。
+CacheLib を上げたときにここが落ちれば、レイアウトが変わったと分かる。
+
+### 6.4 分類を差し込む場所
+
+**v20240621 には `allocateForInsert()` が無い。** 優先度は
+`BlockCache::insert()` の中で直接決めている。`value` がその場にあるので、
+**関数シグネチャの変更は一切要らない**(`main` より変更が小さい)。
 
 ```bash
 grep -n "All newly inserted items are assigned with the lowest priority" \
      cachelib/navy/block_cache/BlockCache.cpp
 ```
 
-### 変更前
+#### 変更前(`BlockCache.cpp:168-180`)
 
 ```cpp
+Status BlockCache::insert(HashedKey hk, BufferView value) {
+  INJECT_PAUSE(pause_blockcache_insert_entry);
+
+  uint32_t size = serializedSize(hk.key().size(), value.size());
+  if (size > kMaxItemSize) {
+    allocErrorCount_.inc();
+    insertCount_.inc();
+    return Status::Rejected;
+  }
+
   // All newly inserted items are assigned with the lowest priority
-  auto retVal = allocateImpl(hk, valueSize, kDefaultItemPriority, canWait);
+  auto [desc, slotSize, addr] =
+      allocator_.allocate(size, kDefaultItemPriority, true /* canWait */);
 ```
 
-### 変更後
+#### 変更後
 
 ```cpp
+  const ObjectInfo* oi = probeObjectInfo(value);
+
   uint16_t priority = kDefaultItemPriority;
-  const auto* cv = probeCacheValue(value);   // 6.1 のヘルパ
-  if (cv != nullptr && cv->getOrigSize() != 0) {
-    priority = classOf(cv->getOrigSize());   // 0 / 1 / 2
+  if (oi != nullptr && oi->origSize != 0) {
+    priority = classOf(oi->origSize);        // 0 / 1 / 2
   } else {
     headerMissCount_.inc();                  // 定常運転で 0 であるべき
   }
   // ★重要★ numPriorities_ を超える priority を渡してはならない
-  if (numPriorities_ > 0) {
-    priority = std::min<uint16_t>(priority, numPriorities_ - 1);
-  } else {
-    priority = kDefaultItemPriority;
-  }
-  auto retVal = allocateImpl(hk, valueSize, priority, canWait);
+  priority = (numPriorities_ == 0)
+                 ? kDefaultItemPriority
+                 : std::min<uint16_t>(priority, numPriorities_ - 1);
+
+  auto [desc, slotSize, addr] =
+      allocator_.allocate(size, priority, true /* canWait */);
 ```
 
-`allocateForInsert` は現在 `value` 本体を受け取っていない(引数は `hk` と `valueSize` だけ)。
-**呼び出し元は `:293` の 1 箇所しかない**ので、引数に `BufferView value` を足すのが最小変更である。
+`Allocator::allocate` は v20240621 では **3 引数**(`size, priority, canWait`)である
+(`Allocator.h:103`)。`main` の 4 引数版(`distKey` 付き)とは違う。
 
-```bash
-grep -n "allocateForInsert(hk, value.size())" cachelib/navy/block_cache/BlockCache.cpp
-```
+#### なぜクランプが要るのか
 
-### なぜクランプが要るのか
-
-`Allocator::allocate` のコメント(`Allocator.h:98-101`)にこう書かれている。
+`Allocator::allocate` のコメント(`Allocator.h:100-102`)にこう書かれている。
 
 > When allocating with a priority, the priority must NOT exceed the max priority
-> which is (numPriorities - 1)
+> which is (numPriorities - 1) specified when constructing this allocator.
 
 つまり `numPriorities = 1` のまま priority 2 を渡すと**壊れる**。
 クランプを入れておけば、Step 8 で `numPriorities` を 3 にするまで
 **全部 priority 0 に丸められ、挙動が今までと完全に同じになる**。
 これが「Step 7 まで結果が変わらない」ことの仕掛けである。
 
-### 変更後の予測動作
+#### 変更後の予測動作
 
 | 項目 | 予測 |
 |---|---|
@@ -515,47 +655,59 @@ grep -n "allocateForInsert(hk, value.size())" cachelib/navy/block_cache/BlockCac
 
 ## Step 7: 代表だけ数える
 
-### 7.1 挿入側
+### 7.1 挿入側(`BlockCache.cpp:168-` の `insert()` 内)
 
-`BlockCache::insert`(`:282-306`)。`allocateForInsert` の成功後に足す。
+Step 6 で取った `oi` をそのまま使う。`OpenStatus::Ready` を確認した後に置く。
 
 ```cpp
-  if (cv != nullptr && cv->isRepresentative()) {
-    splitThreshold_.onAdmit(cv->getOrigSize());
+  if (oi != nullptr && oi->isRep()) {
+    splitThreshold_.onAdmit(oi->origSize);
     repAdmitCount_.inc();
   }
 ```
 
-### 7.2 退避側
+### 7.2 退避側(`BlockCache::onRegionReclaim`、`:395-`)
 
-`BlockCache::onRegionReclaim`(`:672-730`)の switch。
-`hk` と `value` は `:709-711` で既に手元にある。
+`hk` と `value` は `:424-426` で既に手元にある。
+**v20240621 の判定は `AllocatorApiResult` ではなく `ReinsertionRes`** である。
 
 ```bash
-grep -n "AllocatorApiResult reinsertionRes = reinsertOrRemoveItem" \
-     cachelib/navy/block_cache/BlockCache.cpp
+grep -n "case ReinsertionRes::kEvicted" cachelib/navy/block_cache/BlockCache.cpp
 ```
 
+`:441-450` の switch に足す。
+
 ```cpp
-    switch (reinsertionRes) {
-    case AllocatorApiResult::EVICTED:
-    case AllocatorApiResult::EXPIRED: {
-      evictionCount++;
-      usedSizeBytes_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
-      const auto* cv = probeCacheValue(value);          // ← 追加
-      if (cv != nullptr && cv->isRepresentative()) {    // ← 追加
-        splitThreshold_.onEvict(cv->getOrigSize(), /* freq = */ ...);
-        repEvictCount_.inc();
+      switch (reinsertionRes) {
+      case ReinsertionRes::kEvicted: {
+        evictionCount++;
+        usedSizeBytes_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
+        const ObjectInfo* oi = probeObjectInfo(value);   // ← 追加
+        if (oi != nullptr && oi->isRep()) {              // ← 追加
+          splitThreshold_.onEvict(oi->origSize, /* freq = */ ...);
+          repEvictCount_.inc();
+        }
+        break;
       }
-      break;
-    }
+      case ReinsertionRes::kRemoved:
+        holeCount_.sub(1);
+        holeSizeTotal_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
+        break;
+      case ReinsertionRes::kReinserted:
+        break;
+      }
 ```
+
+`case` の中で変数を宣言するので、`{ }` でブロックを作ることを忘れないこと
+(付けないとコンパイルエラーになる)。
 
 ### 7.3 再挿入の優先度 — ここは必ず直す
 
-`reinsertOrRemoveItem` の中(`:1208-1215`)。
+`reinsertOrRemoveItem`(`:523-524`)の中、`:552-556`。
+v20240621 の引数は **4 つ**(`hk, value, entrySize, currAddr`)で、
+`main` の `EntryDesc` 付き 5 引数版とは違う。
 
-### 変更前
+#### 変更前
 
 ```cpp
   // Priority of an re-inserted item is determined by its past accesses
@@ -566,7 +718,7 @@ grep -n "AllocatorApiResult reinsertionRes = reinsertOrRemoveItem" \
           : std::min<uint16_t>(lr.currentHits(), numPriorities_ - 1);
 ```
 
-### 変更後
+#### 変更後
 
 ```cpp
   // サイズクラスを優先度に流用しているため、アクセス回数による昇格は行わない。
@@ -577,9 +729,9 @@ grep -n "AllocatorApiResult reinsertionRes = reinsertOrRemoveItem" \
           : regionManager_.getRegion(currAddr.rid()).getPriority();
 ```
 
-`Region::getPriority()` は `Region.h:118` にある。
+`Region::getPriority()` は `Region.h:108` にある(`setPriority` は `:102`)。
 
-### なぜこれを直さないといけないのか
+#### なぜこれを直さないといけないのか
 
 元の実装は**アクセス回数が多いアイテムを上位の優先度リージョンへ昇格させる**ものである。
 優先度をサイズクラスに流用すると、この昇格は「よく使われる小さいオブジェクトを
@@ -601,24 +753,26 @@ grep -n "AllocatorApiResult reinsertionRes = reinsertOrRemoveItem" \
 
 ### 変更場所
 
-`cachelib/navy/block_cache/BlockCache.h:93`。
+`cachelib/navy/block_cache/BlockCache.h:87`。
+**v20240621 では単なる `uint16_t`** である
+(`main` の `std::vector<uint32_t> allocatorsPerPriority` ではない)。
 
 ```bash
-grep -n "allocatorsPerPriority" cachelib/navy/block_cache/BlockCache.h
+grep -n "numPriorities" cachelib/navy/block_cache/BlockCache.h
 ```
 
 ```cpp
-    std::vector<uint32_t> allocatorsPerPriority{1};
+    uint16_t numPriorities{1};      // ← 3 にする
 ```
 
-`numPriorities_` はこの vector の**要素数**から決まる(`BlockCache.cpp:218-219`)。
-なので要素を 3 つにすれば優先度が 3 段になる。
+`numPriorities_` はこれをそのまま受け取る(`BlockCache.cpp:117`)。
 
-```cpp
-    std::vector<uint32_t> allocatorsPerPriority{1, 1, 1};   // クラス 0 / 1 / 2
-```
+**注意**: v20240621 の `NavyConfig` には `numPriorities` のセッターが**無い**。
+つまり JSON 設定からは変えられない。次のどちらかにする。
 
-設定経由で渡すなら `cachelib/allocator/nvmcache/NavyConfig.h:474` のセッターを使う。
+1. `BlockCache::Config` の既定値を 3 に変える(最小変更。実験用途ならこれで十分)
+2. `NavyConfig` にセッターを足し、`NavySetup.cpp` で `BlockCache::Config` に流す
+   (設定ファイルから切り替えたい場合)
 
 ### 変更後の予測動作
 
@@ -658,7 +812,7 @@ grep -n "allocatorsPerPriority" cachelib/navy/block_cache/BlockCache.h
 | **トレースファイル** | 前処理でサイズを正規化する必要がない。tencentBlock ではリクエストの 10.3% がクラス所属ごと変わってしまう |
 | **Navy の index** | キーからアイテムを引く機構は既にある。サイズ用の別表は作らない |
 | **`NvmItem`** | `getBlob(0)` という公開アクセサがあるので、レイアウトを直接触る必要がない |
-| **chained items 関連** | cachebench で鎖ができるのは `OpType::kAddChained`(`CacheStressor.h:357-391`)だけで、`sizeBegin + 1 != sizeEnd` が前提。チャンク再生は `sizes[0]` しか使わないので鎖は発生しない。仮に発生しても `getBlob(0)` を使っていれば正しく動く |
+| **chained items 関連** | cachebench で鎖ができるのは `OpType::kAddChained`(`CacheStressor.h:390-415`)だけで、`req.sizeBegin + 1 != req.sizeEnd`(`:406`)が前提。チャンク再生は `sizes[0]` しか使わないので鎖は発生しない。仮に発生しても §6.2 の実装は `numBlobs` を勘定するので正しく動く |
 
 ---
 
@@ -678,34 +832,69 @@ grep -n "allocatorsPerPriority" cachelib/navy/block_cache/BlockCache.h
 
 ---
 
-## 付録 A: 確認済みの事実と出典
-
-すべて CacheLib commit `7c04a82` のソースで確認済み。
+## 付録 A: 確認済みの事実と出典(すべて v20240621 / `c5c0d9b`)
 
 | 事実 | 出典 |
 |---|---|
-| CacheValue は全アイテム共通の値ヘッダ | `cachebench/cache/CacheValue.h:26-45` |
-| `getSize()` は `max(size, sizeof(CacheValue))` を返す | `cachebench/cache/CacheValue.h:74-80` |
-| 値の実体化は `Cache::allocate` の 1 箇所 | `cachebench/cache/Cache.h:1085-1098` |
-| ペイロード書き込みはヘッダの後ろから | `cachebench/cache/Cache.h:250-256`・`:1571-1578` |
-| kSet と lookaside が同じ `setKey` を通る | `cachebench/runner/CacheStressor.h:309`・`:339` → `:443` |
-| 鎖は `kAddChained` でのみ発生 | `cachebench/runner/CacheStressor.h:357-391` |
-| blob 0 は parent | `allocator/nvmcache/NvmCache.h:1194-1204` |
-| NvmItem のレイアウトと `getBlob` | `allocator/nvmcache/NvmItem.h:109`・`:114`・`:154-167` |
-| 挿入は最低優先度に固定されている | `navy/block_cache/BlockCache.cpp:1286-1287` |
-| 再挿入優先度はアクセス回数で決まる | `navy/block_cache/BlockCache.cpp:1208-1215` |
-| priority は `numPriorities - 1` を超えてはならない | `navy/block_cache/Allocator.h:98-101` |
-| `numPriorities_` は vector の要素数 | `navy/block_cache/BlockCache.cpp:218-219`・`BlockCache.h:93` |
-| Region に優先度の getter/setter がある | `navy/block_cache/Region.h:112`・`:118` |
-| 退避処理の位置 | `navy/block_cache/BlockCache.cpp:672-730` |
+| CacheValue は全アイテム共通の値ヘッダ | `cachebench/cache/CacheValue.h:43` |
+| `getSize()` は `max(size, sizeof(CacheValue))` を返す | `cachebench/cache/CacheValue.h:72-73` |
+| CacheValue の既存フィールドは 24 B | `cachebench/cache/CacheValue.h:79-86` |
+| 値の実体化は `Cache::allocate` の 1 箇所 | `cachebench/cache/Cache.h:899-913`(`CacheValue::initialize` は `:906`) |
+| 宣言側 | `cachebench/cache/Cache.h:125` |
+| ペイロード書き込みはヘッダの後ろから | `cachebench/cache/Cache.h:231` / `:236`(`getData()`)・`:1325-1331`(`setStringItem`) |
+| kSet と lookaside が同じ `setKey` を通る | `cachebench/runner/CacheStressor.h:342` と `:372` → `:476` |
+| `setKey` の key 引数は `const std::string*` | `cachebench/runner/CacheStressor.h:478` |
+| Request のサイズ反復子 | `cachebench/util/Request.h:63`(struct)・`:134-135` |
+| `NvmItem` のレイアウト | `allocator/nvmcache/NvmItem.h:147-159`(コメント)・`:118-121`(`BlobInfo`) |
+| `getNumBlobs()` はインライン / `getBlob()` はアウトオブライン | `allocator/nvmcache/NvmItem.h:87` / `:92` |
+| blob 0 は parent | `allocator/nvmcache/NvmCache.h:942`(chained ループ `:945` より前) |
+| value は NvmItem の先頭から始まる | `allocator/nvmcache/NvmCache.h:998`(`toIOBuf`)→ `:1015-1016`(`insertAsync`) |
+| **`BlockCache::insert` は 2 引数** | `navy/block_cache/BlockCache.cpp:168` |
+| **挿入は最低優先度に固定、`insert()` 内で決まる** | `navy/block_cache/BlockCache.cpp:178-180` |
+| **`Allocator::allocate` は 3 引数** | `navy/block_cache/Allocator.h:103` |
+| priority は `numPriorities - 1` を超えてはならない | `navy/block_cache/Allocator.h:100-102` |
+| **`numPriorities` は `uint16_t` スカラー** | `navy/block_cache/BlockCache.h:87`(受け取りは `BlockCache.cpp:117`) |
+| 退避処理の位置 | `navy/block_cache/BlockCache.cpp:395`(`onRegionReclaim`)、switch は `:441-450` |
+| **退避判定は `ReinsertionRes`** | `navy/block_cache/BlockCache.cpp:441-450` |
+| **`reinsertOrRemoveItem` は 4 引数** | `navy/block_cache/BlockCache.cpp:523-524` |
+| 再挿入優先度はアクセス回数で決まる | `navy/block_cache/BlockCache.cpp:552-556` |
+| Region に優先度の getter/setter がある | `navy/block_cache/Region.h:102` / `:108` |
+| `cachelib_navy` は `cachelib_common` にしかリンクしない | `navy/CMakeLists.txt:58-60` |
+| `NvmItem.cpp` は `cachelib_allocator` に入る | `allocator/CMakeLists.txt:50`、リンクは `:63-64` |
+
+### `main` との主な違い(上流ドキュメントを見るときの注意)
+
+| 項目 | v20240621(こちら) | main |
+|---|---|---|
+| `BlockCache::insert` | `(hk, value)` | `(hk, value, poolId, expiryTime, lastAccessTimeSecs)` |
+| 挿入時の priority 決定 | `insert()` 内(**value がその場にある**) | `allocateForInsert()`(value を持たないので引数追加が必要) |
+| `Allocator::allocate` | `(size, priority, canWait)` | `(size, priority, canWait, distKey)` |
+| `numPriorities` | `uint16_t` スカラー | `std::vector<uint32_t> allocatorsPerPriority` |
+| 退避結果の型 | `ReinsertionRes::kEvicted` | `AllocatorApiResult::EVICTED` |
+| `reinsertOrRemoveItem` | 4 引数 | 5 引数(`EntryDesc` 付き) |
+| `BlockCache.h` が `NvmItem.h` を include | **しない** | する |
+| navy 内で NvmItem を読む前例 | **無い** | `ReuseTimeReinsertionPolicy` |
+
+**v20240621 のほうが変更量は小さい。** `insert()` に `value` があるため、
+関数シグネチャを変えずに済む。
 
 ## 付録 B: 実装時に判断が必要な点
 
-- **`probeCacheValue()` の置き場所**: Navy から `NvmItem` を参照すると、
-  navy が allocator 層に依存することになる。依存を避けたい場合は
-  「blob 0 の先頭を返す関数」を `BlockCacheConfig` 経由で cachebench 側から注入する。
-  研究用プロトタイプとして直接参照でも通るが、上流に出すなら注入方式にすること
+**解決済みの論点**(記録として残す):
+
+- 「navy が allocator に依存してよいか」→ **include は既存**
+  (`BlockCache.h:25` が `NavyConfig.h`)。新しい依存方向は生まれない。
+  ただし**リンクは別問題**で、`cachelib_navy` は `cachelib_common` にしかリンクしない。
+  だからアウトオブラインの `getBlob()` は呼ばず、インライン計算にした(§6.1〜6.2)
+- 「navy から `CacheValue.h` を読めるか」→ **不可**(cachebench → navy が既存で循環する)。
+  8 B の `ObjectInfo` を navy 側に置いて解決した(Step 1)
+
+**まだ判断が必要な点**:
+
 - **`splitThreshold_.onEvict()` に渡す `freq`(在中アクセス数)**:
-  Navy のどの値から取るか。`lr.currentHits()` が候補
+  Navy のどの値から取るか。`reinsertOrRemoveItem` 内の `lr.currentHits()` が候補だが、
+  退避カウントは `onRegionReclaim` 側で行うため、値を渡す経路を決める必要がある
+- **`headerMissCount_` / `repAdmitCount_` / `repEvictCount_` の登録**:
+  `BlockCache::getCounters()` に足して cachebench の統計に出す
 - **`classOf()` の閾値**: トレースごとに違う。`OBJECT_SIZE_TO_NAVY.md` 第 6 部を参照
   (meta_rnha なら 32 MiB、tencentBlock なら 32 KiB 付近)
