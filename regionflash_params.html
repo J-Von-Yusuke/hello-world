@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RegionFlash 引数一覧</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9;--card:#fff;--a:#2f6f9f;--b:#b5651d;--c:#4a8a4a;--bad:#a33;--code:#f1eee7}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732;--card:#24221f;--a:#7fb2db;--b:#e09a5a;--c:#86c086;--bad:#e07a7a;--code:#2c2a26}}
+:root[data-theme="dark"]{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732;--card:#24221f;--a:#7fb2db;--b:#e09a5a;--c:#86c086;--bad:#e07a7a;--code:#2c2a26}
+body{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}
+main{max-width:960px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.6rem;margin:.2em 0}h2{font-size:1.2rem;margin-top:2.2em;border-bottom:1px solid var(--line);padding-bottom:.2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+p,li{color:var(--fg)}.mut{color:var(--mut)}
+a{color:var(--a)}
+code,pre{background:var(--code);border-radius:4px;font:13px/1.5 ui-monospace,Consolas,monospace}
+code{padding:1px 4px;overflow-wrap:anywhere}pre{padding:10px 12px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:.6em 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+th{white-space:nowrap}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td:first-child code{white-space:nowrap}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
+.wrap{overflow-x:auto}
+.toc{columns:2;column-gap:32px;margin:8px 0;padding-left:20px}
+@media (max-width:640px){.toc{columns:1}}
+svg{max-width:100%;height:auto;display:block}
+svg text{fill:var(--fg);font:13px system-ui,sans-serif}
+svg .m{fill:var(--mut);font-size:12px}
+svg .mono{font:12px ui-monospace,Consolas,monospace}
+svg .box{fill:var(--card);stroke:var(--line);stroke-width:1.5}
+svg .ln{stroke:var(--mut);stroke-width:1.5;fill:none}
+</style>
+</head>
+<body><main>
+<h1>RegionFlash 引数一覧</h1>
+<p class="mut">2026-10-19。libCacheSim に足した二段フラッシュキャッシュ <code>RegionFlash</code> に渡せる引数をすべて並べる。設計と検証は <a href="regionflash.html">regionflash.html</a>、変更点は <a href="regionflash_changes.html">regionflash_changes.html</a>。表の既定値と制約はソース（<code>RegionFlash.c</code> の <code>rf_parse</code>、各プラグインの <code>param_spec_t</code>）から写した。</p>
+
+<div class="card">
+<b>質問への答え</b>
+<ul>
+<li><b>DRAM と SSD のアルゴリズムに別々の引数を渡せるか → 渡せる。</b> <code>dram-params=</code> は DRAM 層のアルゴリズム、<code>ssd-params=</code> は SSD 層（物単位モード）のアルゴリズム、<code>region-params=</code> は Region を選ぶアルゴリズム（<code>region-evict=lcs:名前</code>）に、それぞれ独立に渡る。実際に走らせて確かめた（§4.1）: DRAM の S3FIFO の引数を変えると DRAM の OMR が動き、SSD の S3FIFO の引数を変えても DRAM の OMR は 0.8031 のまま SSD の OMR だけが動く。</li>
+<li><b>split_threshold の引数を変えられるか → 変えられる。</b> <code>hint=split_threshold:lambda=128/min_band=3/recalc=50000</code> のように、8 つの引数（lambda・min_band・no_split_pct・recalc・ema_den・size_add・hyst_hold・hyst_band）をすべて指定できる。どれも効くことを確かめた（§5.1）: 既定の閾値 32K が、lambda=256 で 64K、recalc=10000/ema_den=4 で 16K、min_band=8 で「分けない」に変わる。</li>
+</ul>
+</div>
+
+<ol class="toc">
+<li><a href="#s1">どの引数がどこに効くか（図 1）</a></li>
+<li><a href="#s2">書き方の規則</a></li>
+<li><a href="#s3">RegionFlash の引数（<code>-e</code>）</a></li>
+<li><a href="#s4">中のアルゴリズムの引数（<code>dram-params</code> など）</a></li>
+<li><a href="#s5">ヒントの引数（<code>hint=</code>）</a></li>
+<li><a href="#s6">受け入れ方針の引数（<code>admit=</code>）</a></li>
+<li><a href="#s7">libCacheSim の CLI の引数</a></li>
+<li><a href="#s8">起動時の確認（組み合わせの制約）</a></li>
+<li><a href="#s9">例</a></li>
+</ol>
+
+<h2 id="s1">1. どの引数がどこに効くか（図 1）</h2>
+<p>1 要求は左上から右へ流れる。DRAM でミスした物は DRAM に入り、DRAM から追い出された物（victim）が受け入れ方針とヒントを通って SSD に書かれる。引数は、その流れのどこに効くかで分かれる。</p>
+<div class="wrap">
+<svg viewBox="0 0 880 440" role="img" aria-label="引数が効く場所の図">
+<defs><marker id="p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<rect class="box" x="10" y="24" width="110" height="64" rx="6"/><text x="65" y="50" text-anchor="middle">要求</text><text class="m" x="65" y="70" text-anchor="middle">トレースの 1 行</text>
+<path class="ln" d="M120,56 L150,56" marker-end="url(#p1)"/>
+<rect class="box" x="150" y="16" width="220" height="80" rx="6" style="stroke:var(--a)"/>
+<text x="260" y="38" text-anchor="middle">DRAM 層</text>
+<text class="mono" x="260" y="60" text-anchor="middle">dram-size（容量）</text>
+<text class="mono" x="260" y="80" text-anchor="middle">dram-algo / dram-params</text>
+<path class="ln" d="M370,56 L420,56" marker-end="url(#p1)"/><text class="m" x="395" y="46" text-anchor="middle">victim</text>
+<rect class="box" x="420" y="16" width="200" height="80" rx="6" style="stroke:var(--b)"/>
+<text x="520" y="38" text-anchor="middle">受け入れ</text>
+<text class="mono" x="520" y="60" text-anchor="middle">admit=名前:k=v/…</text>
+<text class="mono" x="520" y="80" text-anchor="middle">-a（libCacheSim）</text>
+<path class="ln" d="M620,56 L670,56" marker-end="url(#p1)"/><text class="m" x="645" y="46" text-anchor="middle">yes</text>
+<rect class="box" x="670" y="16" width="200" height="80" rx="6" style="stroke:var(--b)"/>
+<text x="770" y="38" text-anchor="middle">ヒント（分類 c）</text>
+<text class="mono" x="770" y="60" text-anchor="middle">hint=名前:k=v/…</text>
+<text class="m" x="770" y="80" text-anchor="middle">c の書き込み系列へ</text>
+<path class="ln" d="M770,96 L770,140" marker-end="url(#p1)"/><text class="m" x="780" y="124">書く</text>
+<path class="ln" d="M260,96 L260,140" style="stroke-dasharray:4 4"/>
+<text class="mono" x="272" y="124">inclusion=cachelib|exclusive|inclusive</text><text class="m" x="560" y="124">（写しの持ち方）</text>
+<rect class="box" x="10" y="140" width="860" height="210" rx="6" style="stroke:var(--c)"/>
+<text x="440" y="162" text-anchor="middle">SSD 層（容量 = 位置引数の大きさ）　ssd-mode=region（既定）| object</text>
+<rect class="box" x="26" y="176" width="540" height="160" rx="5"/>
+<text x="40" y="198">region: Region 単位で消す</text>
+<text class="mono" x="40" y="222">region-size（R）</text>
+<text class="mono" x="40" y="244">region-evict / region-params</text>
+<text class="mono" x="40" y="266">beta</text>
+<text class="mono" x="40" y="288">chunk（piece-wise）</text>
+<text class="mono" x="40" y="310">reinsert=hits:…</text>
+<text class="m" x="320" y="222">FDP デバイスモデル</text>
+<text class="mono" x="320" y="244">ru-size（0 で無効）</text>
+<text class="mono" x="320" y="266">ruh</text>
+<text class="mono" x="320" y="288">fdp-iso / fdp-op</text>
+<text class="mono" x="320" y="310">fdp-trim</text>
+<rect class="box" x="582" y="176" width="272" height="160" rx="5"/>
+<text x="596" y="198">object: 物単位で消す</text>
+<text class="mono" x="596" y="222">ssd-algo / ssd-params</text>
+<text class="mono" x="596" y="244">reinsert=hits:…</text>
+<text class="m" x="596" y="266">（その場で入れ直す。n ≥ 1）</text>
+<text class="m" x="596" y="288">書き込み = 受け入れたバイト</text>
+<rect class="box" x="10" y="370" width="860" height="60" rx="6"/>
+<text x="26" y="394">集計と出力</text>
+<text class="mono" x="26" y="416">warmup-req / interval / out（prefix）/ seed</text>
+<text class="m" x="470" y="394">最終結果は warmup-req 以降、区間は最初から</text>
+</svg></div>
+
+<h2 id="s2">2. 書き方の規則</h2>
+<pre>./bin/cachesim &lt;トレース&gt; &lt;形式&gt; RegionFlash &lt;SSD の大きさ&gt; [libCacheSim の引数] -e "&lt;RegionFlash の引数&gt;"
+
+例: ./bin/cachesim w01.oracleGeneral.bin.zst oracleGeneral RegionFlash 240gb \
+      -e "dram-size=4G,dram-algo=s3fifo,dram-params=small-size-ratio=0.05,region-size=626M,hint=split_threshold:lambda=128,out=out/w01"</pre>
+<table>
+<tr><th>規則</th><th>中身</th></tr>
+<tr><td><code>-e</code> の区切り</td><td><code>キー=値</code> を <code>,</code> でつなぐ。キーの大文字・小文字は区別しない。同じキーを 2 回書くと後の値が勝つ。</td></tr>
+<tr><td>入れ子の区切りは <code>/</code></td><td><code>-e</code> 全体が <code>,</code> で区切られ、しかも libCacheSim の CLI が <code>-e</code> の中の <code>;</code> を <code>,</code> に置き換えるので、値の中の区切りには <code>/</code> を使う。
+<ul>
+<li><code>dram-params</code>・<code>ssd-params</code>・<code>region-params</code>: <code>/</code> はすべて <code>,</code> に戻してアルゴリズムに渡す（<code>dram-params=small-size-ratio=0.1/move-to-main-threshold=2</code>）。</li>
+<li><code>hint=</code>・<code>admit=</code>: <code>名前:k=v/k=v</code>。<code>/</code> は、次に <code>名前=</code> が続くときと、数どうしの間（<code>fixed:16K/64K</code>、<code>hr=20%/40%</code>）だけ区切りとみなす。ファイルの道筋の <code>/</code> は壊さない（<code>profile:path=/data/w01/sizebin_profile.csv/k=3</code>）。</li>
+<li><code>reinsert=</code>: <code>hits:n=1/max_frac=0.5/mode=ii</code>。</li>
+</ul></td></tr>
+<tr><td>大きさ</td><td><code>-e</code> の中は 2 進の接尾辞 K・M・G・T（<code>4G</code> = 4 GiB、<code>626M</code>、<code>1.5K</code>。<code>4MiB</code> も 4 MiB と読む）。位置引数の SSD の大きさは libCacheSim の書き方（<code>64mb</code>、<code>240gb</code>。これも 2 進）。<code>240GiB</code> と書くと CLI は数字だけ読んで 240 B になるので注意。</td></tr>
+<tr><td>リスト</td><td>ヒント・受け入れ方針のリストは <code>/</code> で区切る（<code>fixed:4K/64K/1M</code>、<code>hr=20%/40%/60%/80%</code>）。% は割合。</td></tr>
+<tr><td>誤りの扱い</td><td>知らないキーや値は黙って無視せず、起動時に止まる（下の表。どれも実際に走らせて確かめた）。</td></tr>
+<tr><td>今の値を見る</td><td><code>P.json</code> の <code>config</code>・<code>hint</code>・<code>admit</code> に、既定値で補った後の値がすべて出る。中のアルゴリズムの値は <code>dram-params=print</code>（他の引数の後に <code>/print</code> でもよい）で表示して終わる（S3FIFO など print に対応したアルゴリズム）。</td></tr>
+</table>
+<div class="wrap"><table>
+<tr><th>誤り</th><th>例</th><th>結果</th></tr>
+<tr><td>RegionFlash の引数の綴り</td><td><code>dram-sise=4M</code></td><td>終了コード 1: <code>RegionFlash does not have parameter dram-sise</code></td></tr>
+<tr><td>ヒント・受け入れ方針の引数の綴り</td><td><code>hint=split_threshold:lamda=1</code></td><td>1: <code>RegionFlash: split_threshold: unknown param 'lamda'</code></td></tr>
+<tr><td>選択肢にない値</td><td><code>hint=split_threshold_req:scope=dram</code></td><td>1: <code>bad value 'dram' for 'scope', choices: all|ssd</code></td></tr>
+<tr><td>中のアルゴリズムの引数の綴り</td><td><code>dram-params=small-ratio=0.1</code></td><td>libCacheSim の ERROR で中断（134）: <code>S3FIFO does not have parameter small-ratio</code></td></tr>
+</table></div>
+
+<h2 id="s3">3. RegionFlash の引数（<code>-e</code>）</h2>
+<h3>3.1 層の大きさとアルゴリズム</h3>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>値</th><th>意味</th></tr>
+<tr><td><code>dram-size</code></td><td>0</td><td>大きさ</td><td>DRAM 層の容量。0 で DRAM なし（ミスした物は直接 SSD の受け入れ判定へ、SSD ヒットの昇格もない）</td></tr>
+<tr><td><code>dram-algo</code>（別名 <code>dram-policy</code>）</td><td>lru</td><td>libCacheSim のアルゴリズム名</td><td>DRAM 層のアルゴリズム（lru・fifo・s3fifo・arc・sieve・slru・twoq・lecar・wtinylfu・S4FIFO・GLCache …）。どれが使えるかは <a href="regionflash.html">regionflash.html</a> §9.4 の表</td></tr>
+<tr><td><code>dram-params</code></td><td>なし</td><td><code>k=v/k=v</code></td><td>DRAM 層のアルゴリズムの引数（§4）</td></tr>
+<tr><td><code>ssd-mode</code></td><td>region</td><td>region / object</td><td>SSD を Region 単位で消すか（§3.2）、物単位で消すか</td></tr>
+<tr><td><code>ssd-algo</code></td><td>lru</td><td>アルゴリズム名</td><td>ssd-mode=object のときの SSD 層のアルゴリズム。フラッシュへの書き込みは受け入れたバイト（デバイスの GC なし）</td></tr>
+<tr><td><code>ssd-params</code></td><td>なし</td><td><code>k=v/k=v</code></td><td>ssd-algo の引数（§4）</td></tr>
+<tr><td><code>inclusion</code></td><td>cachelib</td><td>cachelib / exclusive / inclusive</td><td>DRAM と SSD の写しの持ち方。cachelib: SSD ヒットで DRAM に上げても SSD の写しを残し、DRAM から出すとき SSD に有効な写しがあれば書かない（<code>clean_skip_objs</code>）/ exclusive: 上げるとき SSD の写しを消す / inclusive: DRAM から出すたびに書き直す</td></tr>
+</table></div>
+
+<h3>3.2 SSD の Region（ssd-mode=region）</h3>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>値</th><th>意味</th></tr>
+<tr><td><code>region-size</code></td><td>16M</td><td>大きさ</td><td>Region の大きさ R。Region の数 N = ⌊SSD の大きさ ÷ R⌋。N ≥ 分類数 + 2 が必要。分類ごとに書き込み中（OPEN）の Region を 1 つ持ち、封じた Region を丸ごと書く（R バイト）</td></tr>
+<tr><td><code>region-evict</code></td><td>lru</td><td>fifo / lru / beta / <code>lcs:名前</code></td><td>消す Region の選び方。fifo: 封じた順 / lru: 最後に書いた・ヒットした時刻が古い順 / beta: 下の <code>beta</code> / <code>lcs:名前</code>（組み込み以外の名前だけでもよい）: 封じた Region を R バイトの物として libCacheSim のアルゴリズムに入れ、選ばせる</td></tr>
+<tr><td><code>region-params</code></td><td>なし</td><td><code>k=v/k=v</code></td><td><code>lcs:</code> のアルゴリズムの引数（§4）</td></tr>
+<tr><td><code>beta</code></td><td>0</td><td>実数</td><td>region-evict=beta のときの指数 β。分類ごとに最も古い Region を候補にし、(今 − 最後に触れた時刻) × (s<sub>ref</sub> ÷ その分類の平均の大きさ)<sup>β</sup> が最大のものを消す（s<sub>ref</sub> = 分類の平均の大きさの最小）。β = 0 なら全体の lru と同じ。β &gt; 0 で平均の大きい分類の Region が残りやすく、β &lt; 0 で消えやすい</td></tr>
+<tr><td><code>chunk</code></td><td>0</td><td>大きさ（≤ region-size）</td><td>piece-wise 書き込みのピースの大きさ。0 で無効（R より大きい物は書かない）。物を chunk ごとに分けて書き、1 ピースでも失えば物全体を SSD から外す。入る物の上限は (N − k − 1) × R。要求・ヒット・大きさの区分はいつも物全体で数える</td></tr>
+<tr><td><code>seal-on-repartition</code></td><td>none</td><td>none / inactive / all</td><td>ヒントの分割（閾値）が変わったときの書き込み中の Region の扱い。none: そのまま書き続ける（FDP では RU に追記されるだけなので閉じる意味がない）/ inactive: 新しい分割で使われなくなった分類の Region を封じる（cachesim の既定。cachesim と照合するときに指定）/ all: すべて封じる。封じた Region の空きは詰め物になり、フラッシュへの書き込み（pad_bytes）が増える</td></tr>
+<tr><td><code>reinsert</code></td><td>none</td><td><code>none</code> / <code>hits:k=v/…</code></td><td>Region（物単位モードでは物）を追い出すとき、条件を満たす物を書き直す（CacheLib Navy の再挿入）。引数は下の表</td></tr>
+</table></div>
+<p><b><code>reinsert=hits:</code> の引数</b></p>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>意味</th></tr>
+<tr><td><code>n</code></td><td>1</td><td>前回書いてからの SSD ヒット数がこれ以上なら候補（Navy の hits-based）</td></tr>
+<tr><td><code>p</code></td><td>1</td><td>候補を書き直す確率（0 &lt; p ≤ 1。<code>n=0,p=0.3</code> で Navy の percentage-based）</td></tr>
+<tr><td><code>max_size</code></td><td>0（制限なし）</td><td>これより大きい物は書き直さない</td></tr>
+<tr><td><code>max_frac</code></td><td>0.5</td><td>1 回の Region の追い出しで書き直す量の上限（R に対する割合、0 &lt; f ≤ 1）</td></tr>
+<tr><td><code>mode</code></td><td>pi</td><td>pi: 元の分類の OPEN Region へ / ii: 書き直しだけを集めた分類（系列を 1 本足す）へ</td></tr>
+<tr><td><code>class</code></td><td>keep</td><td>keep: 元の分類のまま / reclassify: ヒントに分類し直させる（<code>hint_on_reinsert=yes</code> が必要）</td></tr>
+<tr><td><code>hint_on_reinsert</code></td><td>no</td><td>yes なら書き直しもヒントの on_insert に知らせる（統計のため）</td></tr>
+</table></div>
+
+<h3>3.3 FDP デバイスモデル（ssd-mode=region）</h3>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>値</th><th>意味</th></tr>
+<tr><td><code>ru-size</code></td><td>0</td><td>大きさ（region-size の倍数）</td><td>RU（Reclaim Unit）の大きさ。0 なら FDP なし（DLWA = 1 とみなす）</td></tr>
+<tr><td><code>ruh</code></td><td>8</td><td>1 以上</td><td>RUH の数。分類 c は RUH（c mod ruh）に書く。分類数が ruh より多いと警告を出す</td></tr>
+<tr><td><code>fdp-iso</code></td><td>ii</td><td>ii / pi</td><td>GC で写す Region の書き先。ii: 全 RUH で 1 本の GC 用の流れ / pi: 元の RUH ごとに分ける</td></tr>
+<tr><td><code>fdp-op</code></td><td>0.07</td><td>実数 ≥ 0</td><td>物理容量の予備率。RU の数 = ⌊N·R·(1 + op) ÷ ru-size⌋。足りないと起動時に止まる（<code>raise fdp-op</code>）</td></tr>
+<tr><td><code>fdp-trim</code></td><td>0</td><td>0 / 1</td><td>1 なら Region を消すときデバイスにも無効を知らせる（TRIM。GC がその Region を写さない）</td></tr>
+</table></div>
+
+<h3>3.4 受け入れ・ヒント・乱数</h3>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>値</th><th>意味</th></tr>
+<tr><td><code>admit</code></td><td>all</td><td><code>名前[:k=v/…]</code></td><td>SSD に書く前の受け入れ方針（§6）。libCacheSim の <code>-a</code> も使え、両方あれば <code>-a</code> → admit の順に判定する</td></tr>
+<tr><td><code>hint</code></td><td>none</td><td><code>名前[:k=v/…]</code></td><td>書き込みの分類（書き込み系列・RUH）を決めるヒント（§5）。分類数はヒントが決める（最大 64）</td></tr>
+<tr><td><code>seed</code></td><td>1</td><td>整数</td><td>乱数の種。受け入れ方針（seed·6+4）・ヒント（seed·6+5）・再挿入のコイン（seed·6+6）は cachesim と同じ系列。中のアルゴリズムの乱数も最初の要求でこの種から作り直す（Random・LeCaR・LHD などが毎回同じ結果になる）</td></tr>
+<tr><td><code>taus</code>・<code>st-lambda</code></td><td>—</td><td>古い書き方</td><td><code>hint=fixed,taus=4K/64K</code> は <code>hint=fixed:4K/64K</code>、<code>hint=split_threshold,st-lambda=256</code> は <code>hint=split_threshold:lambda=256</code> と同じ（引数なしの fixed・split_threshold のときだけ効く）</td></tr>
+</table></div>
+
+<h3>3.5 集計と出力</h3>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>値</th><th>意味</th></tr>
+<tr><td><code>warmup-req</code></td><td>0</td><td>要求数</td><td>最終結果（P.json・P.class.csv・P.sizebin.csv と画面の表）を数え始める要求数。区間の出力（kind=interval）はウォームアップ中も数える</td></tr>
+<tr><td><code>interval</code></td><td>1000000</td><td>要求数（0 = なし）</td><td>中間結果の区間の長さ（P.interval*.csv）。out がないときは書かない</td></tr>
+<tr><td><code>out</code>（別名 <code>prefix</code>）</td><td>なし</td><td>パス</td><td>出力ファイルの接頭辞。親ディレクトリは作る。並列に走らせるときは実行ごとに変える。出力の中身は regionflash.html §7</td></tr>
+</table></div>
+
+<h2 id="s4">4. 中のアルゴリズムの引数（<code>dram-params</code>・<code>ssd-params</code>・<code>region-params</code>）</h2>
+<p>RegionFlash は層ごとに libCacheSim のキャッシュを 1 つずつ作る。<code>dram-params</code> は DRAM 層、<code>ssd-params</code> は SSD 層（物単位）、<code>region-params</code> は Region を選ぶキャッシュ（<code>region-evict=lcs:名前</code>）に、<code>/</code> を <code>,</code> に戻して<b>そのまま</b>渡る（libCacheSim の <code>-e</code> に書くのと同じ）。3 つは互いに独立で、同じアルゴリズムを違う引数で使い分けられる。</p>
+
+<h3 id="s4-1">4.1 確かめたこと（tencent の先頭 200 万要求、SSD 2 GiB、R = 16 MiB、DRAM 64 MiB）</h3>
+<div class="wrap"><table>
+<tr><th>DRAM 層</th><th>SSD 層</th><th class="n">DRAM の OMR</th><th class="n">SSD の OMR</th><th class="n">全体の OMR</th></tr>
+<tr><td>s3fifo、small-size-ratio=0.01</td><td>Region（lru）</td><td class="n">0.7800</td><td class="n">0.7130</td><td class="n">0.5562</td></tr>
+<tr><td>s3fifo（既定 0.10）</td><td>Region（lru）</td><td class="n">0.7725</td><td class="n">0.7201</td><td class="n">0.5563</td></tr>
+<tr><td>s3fifo、small-size-ratio=0.5/move-to-main-threshold=1</td><td>Region（lru）</td><td class="n">0.7669</td><td class="n">0.7261</td><td class="n">0.5568</td></tr>
+<tr><td>lru</td><td>物単位 s3fifo、small-size-ratio=0.01</td><td class="n">0.8031</td><td class="n">0.6131</td><td class="n">0.4924</td></tr>
+<tr><td>lru</td><td>物単位 s3fifo（既定 0.10）</td><td class="n">0.8031</td><td class="n">0.6037</td><td class="n">0.4849</td></tr>
+<tr><td>lru</td><td>物単位 s3fifo、small-size-ratio=0.5</td><td class="n">0.8031</td><td class="n">0.5993</td><td class="n">0.4813</td></tr>
+<tr><td>s3fifo、small-size-ratio=0.01</td><td>物単位 s3fifo、small-size-ratio=0.5</td><td class="n"><b>0.7800</b></td><td class="n">0.6169</td><td class="n">0.4812</td></tr>
+<tr><td>lru</td><td>Region、lcs:slru、n-seg=2</td><td class="n">0.8031</td><td class="n">0.6973</td><td class="n">0.5600</td></tr>
+<tr><td>lru</td><td>Region、lcs:slru、n-seg=8</td><td class="n">0.8031</td><td class="n">0.6971</td><td class="n">0.5599</td></tr>
+</table></div>
+<ul>
+<li>DRAM の引数を変えると DRAM の OMR が変わる（0.7800・0.7725・0.7669）。DRAM から出る物が変わるので、SSD の OMR も動く。</li>
+<li>SSD の引数だけを変えると、DRAM の OMR は 0.8031 のまま SSD の OMR だけが変わる。DRAM には SSD でヒットしてもミスしても同じように物が入るので、DRAM は SSD の設定の影響を受けない。</li>
+<li>両方を同時に違う値にした行の DRAM の OMR（0.7800）は、DRAM だけを変えた 1 行目と同じ。引数が混ざらずにそれぞれの層へ届いている。</li>
+</ul>
+
+<h3>4.2 主なアルゴリズムの引数</h3>
+<p class="mut">libCacheSim のソース（各アルゴリズムの <code>*_parse_params</code>）から。ここにないもの（lru・fifo・arc・sieve・lirs・lhd など）は引数を持たない。正確な今の値は <code>dram-params=print</code> で見られる。</p>
+<div class="wrap"><table>
+<tr><th>アルゴリズム</th><th>引数（既定）</th></tr>
+<tr><td>S3FIFO</td><td><code>small-size-ratio</code>（別名 fifo-size-ratio、0.10）・<code>ghost-size-ratio</code>（0.90）・<code>move-to-main-threshold</code>（2）</td></tr>
+<tr><td>S4FIFO</td><td>S3FIFO の 3 つ ＋ <code>ghost-to-main-threshold</code>（0）・<code>small-skip-ratio</code>（0）・<code>auto-tune</code>（1）・<code>feature-collect-reqs</code>（0.2）・<code>prediction-interval</code>（0）・<code>model-path</code>・<code>dump-features</code></td></tr>
+<tr><td>SLRU</td><td><code>n-seg</code>（4）・<code>seg-size</code>（各段の大きさの比を <code>:</code> で区切る。例 <code>seg-size=1:1:2</code>）</td></tr>
+<tr><td>TwoQ</td><td><code>Ain-size-ratio</code>（0.25）・<code>Aout-size-ratio</code>（0.5）</td></tr>
+<tr><td>LeCaR</td><td><code>update-weight</code>（1）・<code>lru-weight</code>（0.5）</td></tr>
+<tr><td>Clock</td><td><code>init-freq</code>（0）・<code>n-bit-counter</code>（1）</td></tr>
+<tr><td>ClockPro</td><td><code>init-ref</code>（0）・<code>init-ratio-cold</code>（1）</td></tr>
+<tr><td>CAR</td><td><code>p</code>（0）</td></tr>
+<tr><td>WTinyLFU</td><td><code>main-cache</code>（SLRU）・<code>window-size</code>（0.01）</td></tr>
+<tr><td>QDLP</td><td><code>fifo-size-ratio</code>（0.10）・<code>ghost-size-ratio</code>（0.9）・<code>main-cache</code>（Clock2）・<code>move-to-main-threshold</code>（1）</td></tr>
+<tr><td>Clock2QPlus</td><td><code>fifo-size-ratio</code>（0.10）・<code>ghost-size-ratio</code>（0.90）・<code>move-to-main-threshold</code>（1）・<code>corr-window-ratio</code>（0.5）</td></tr>
+<tr><td>MQ</td><td><code>n-queue</code>（8）・<code>lifetime</code>（10000）・<code>Qout-size-ratio</code>（4.0）</td></tr>
+<tr><td>FIFO_Merge・FIFO_Reinsertion</td><td><code>n-exam</code>（100）・<code>n-keep</code>（n-exam ÷ 2）・<code>retain-policy</code>（freq）</td></tr>
+<tr><td>GLCache</td><td><code>segment-size</code>（100）・<code>n-merge</code>（2）・<code>type</code>（learned）・<code>rank-intvl</code>（0.02）・<code>merge-consecutive-segs</code>（true）・<code>train-source-y</code>（online）・<code>retrain-intvl</code>（86400）</td></tr>
+<tr><td>SFIFO</td><td><code>n-seg</code>（4）</td></tr>
+<tr><td>LRU_K</td><td><code>k</code>（2）</td></tr>
+<tr><td>RandomLRU・Hyperbolic・BeladySize</td><td><code>n-samples</code>（16）・<code>n-sample</code>（64）・<code>n-sample</code>（128）</td></tr>
+<tr><td>LRUProb</td><td><code>prob</code>（0.5）</td></tr>
+</table></div>
+
+<h2 id="s5">5. ヒントの引数（<code>hint=名前:k=v/…</code>）</h2>
+<p>ヒントは SSD に書く物の分類（書き込み系列。FDP では RUH = 分類 mod ruh）を決める。<code>P.json</code> の <code>hint</code> に、既定値で補った後の引数がすべて出る。「受け入れ数」は SSD への書き込み（on_insert）の回数、「要求数」は要求の回数。</p>
+
+<h3>5.1 split_threshold・st_recursive・split_threshold_req</h3>
+<p>研究者の SplitThreshold（<code>split_threshold.h</code>、改変なし）。大きさの log2 のバケットごとに個数・バイト・cold のバイトの 3 本のヒストグラムを持ち、<code>recalc</code> 回ごとに閾値 τ を決め直す。大きさが τ より大きい物を分類 1 にする。</p>
+<div class="wrap">
+<svg viewBox="0 0 880 270" role="img" aria-label="split_threshold の閾値の決め方の図（模式図）">
+<defs><marker id="p2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<path class="ln" d="M40,160 L840,160"/>
+<g class="m">
+<text class="m" x="60" y="180" text-anchor="middle">512</text><text class="m" x="125" y="180" text-anchor="middle">1K</text><text class="m" x="190" y="180" text-anchor="middle">2K</text>
+<text class="m" x="255" y="180" text-anchor="middle">4K</text><text class="m" x="320" y="180" text-anchor="middle">8K</text><text class="m" x="385" y="180" text-anchor="middle">16K</text>
+<text class="m" x="450" y="180" text-anchor="middle">32K</text><text class="m" x="515" y="180" text-anchor="middle">64K</text><text class="m" x="580" y="180" text-anchor="middle">128K</text>
+<text class="m" x="645" y="180" text-anchor="middle">256K</text><text class="m" x="710" y="180" text-anchor="middle">512K</text><text class="m" x="775" y="180" text-anchor="middle">1M</text>
+</g>
+<path class="ln" d="M255,152 L255,168"/><path class="ln" d="M580,152 L580,168"/><path class="ln" d="M515,152 L515,168"/><path class="ln" d="M450,140 L450,168"/>
+<circle cx="255" cy="160" r="5" style="fill:var(--a)"/><text x="255" y="140" text-anchor="middle">count_p50</text>
+<circle cx="580" cy="160" r="5" style="fill:var(--a)"/><text x="610" y="140">byte_p50</text>
+<circle cx="515" cy="160" r="5" style="fill:var(--b)"/><text x="515" y="102" text-anchor="middle">cold_byte_p50</text><path class="ln" d="M515,108 L515,152" style="stroke-dasharray:3 3"/>
+<rect x="444" y="154" width="12" height="12" style="fill:var(--c)"/><text x="400" y="140" text-anchor="middle">mid（λ = 0）</text>
+<path class="ln" d="M456,70 L505,70" marker-end="url(#p2)"/>
+<text class="m" x="450" y="56" text-anchor="middle">λ ÷ 256 だけ min_rule = min(byte_p50, cold_byte_p50) へ寄せる</text>
+<path class="ln" d="M255,196 L255,204 L580,204 L580,196"/>
+<text class="m" x="417" y="222" text-anchor="middle">狭帯ゲート: byte_p50 と count_p50 が min_band オクターブ以上離れていなければ分けない</text>
+<text class="m" x="440" y="248" text-anchor="middle">大 pool ゲート: τ のバケットより上にあるバイトが no_split_pct % 未満なら分けない。分類 = s &gt; τ なら 1</text>
+<text class="m" x="40" y="24">模式図（バケット = ⌊log2 大きさ⌋。mid は count_p50 と byte_p50 のバケットの真ん中 (cb + bb + 1) ÷ 2）</text>
+</svg></div>
+<div class="wrap"><table>
+<tr><th>引数</th><th>既定</th><th>意味</th></tr>
+<tr><td><code>lambda</code></td><td>0</td><td>λ × 256（0〜256）。0: mid（count_p50 と byte_p50 の対数の真ん中）/ 256: min_rule = min(byte_p50, cold_byte_p50)（C 版の既定）/ 間は対数で補間。cold は λ &gt; 0 のときだけ効く</td></tr>
+<tr><td><code>min_band</code></td><td>2</td><td>狭帯ゲート（オクターブ）。byte_p50 − count_p50 がこれ未満なら分けない</td></tr>
+<tr><td><code>no_split_pct</code></td><td>5</td><td>大 pool ゲート（%）。τ のバケットより上のバイトがこれ未満なら分けない</td></tr>
+<tr><td><code>recalc</code></td><td>100000</td><td>再計算の間隔。split_threshold・st_recursive は受け入れ数、split_threshold_req は数えた要求数</td></tr>
+<tr><td><code>ema_den</code></td><td>16</td><td>再計算のたびにヒストグラムを (ema_den − 1) ÷ ema_den 倍に減らす（実効の窓 ≒ ema_den × recalc）</td></tr>
+<tr><td><code>size_add</code></td><td>0</td><td>数えるとき各物の大きさに足すバイト（Navy の serializedSize の近似）。τ は足す前の大きさに直して使う</td></tr>
+<tr><td><code>hyst_hold</code></td><td>1</td><td>ヒステリシス: 同じ向きの候補がこの回数続いたら採用（1 = すぐ採用）</td></tr>
+<tr><td><code>hyst_band</code></td><td>0</td><td>ヒステリシス: 採用中の τ からこのオクターブ未満しか動かない候補は無視（0 = 無効）</td></tr>
+<tr><td><code>depth</code></td><td>2（st_recursive）/ 1（split_threshold_req）</td><td>st_recursive と split_threshold_req だけ。同じ規則で範囲を再帰的に分け、最大 2<sup>depth</sup> 分類</td></tr>
+<tr><td><code>scope</code></td><td>all</td><td>split_threshold_req だけ。all: 全要求を数える / ssd: SSD まで来た要求（DRAM ミス）だけ</td></tr>
+</table></div>
+<p><b>数える場所の違い。</b> split_threshold と st_recursive は SSD へ書いた物を数え、ヒットせずに SSD から出た物を cold とする（物で数える）。split_threshold_req は要求を数え、ミスした要求を cold とする（要求で数える。違いと実測は regionflash.html §2.3）。</p>
+<p><b>確かめたこと</b>（tencent の先頭 200 万要求、SSD 2 GiB、R = 16 MiB、DRAM 64 MiB の lru。τ は最後の閾値）:</p>
+<div class="wrap"><table>
+<tr><th>指定</th><th>最後の τ</th><th class="n">SSD の OMR</th><th class="n">全体の OMR</th></tr>
+<tr><td><code>hint=split_threshold</code>（既定）</td><td>32K</td><td class="n">0.6415</td><td class="n">0.5152</td></tr>
+<tr><td><code>split_threshold:lambda=256</code></td><td>64K</td><td class="n">0.6501</td><td class="n">0.5221</td></tr>
+<tr><td><code>hint=split_threshold,st-lambda=256</code>（古い書き方）</td><td>64K</td><td class="n">0.6501</td><td class="n">0.5221</td></tr>
+<tr><td><code>split_threshold:min_band=8</code></td><td>分けない</td><td class="n">0.6968</td><td class="n">0.5597</td></tr>
+<tr><td><code>split_threshold:no_split_pct=99</code></td><td>分けない</td><td class="n">0.6968</td><td class="n">0.5597</td></tr>
+<tr><td><code>split_threshold:recalc=10000/ema_den=4</code></td><td>16K</td><td class="n">0.6376</td><td class="n">0.5121</td></tr>
+<tr><td><code>split_threshold:size_add=65536</code></td><td>分けない</td><td class="n">0.6968</td><td class="n">0.5597</td></tr>
+<tr><td><code>split_threshold:recalc=10000/hyst_hold=3/hyst_band=1</code></td><td>32K</td><td class="n">0.6388</td><td class="n">0.5130</td></tr>
+<tr><td><code>st_recursive:depth=3</code></td><td>32K と 64K</td><td class="n">0.6417</td><td class="n">0.5154</td></tr>
+<tr><td><code>split_threshold_req:scope=ssd/lambda=128</code></td><td>64K</td><td class="n">0.6466</td><td class="n">0.5193</td></tr>
+</table></div>
+<p class="mut">size_add=65536 は、どの物も 64K 底上げして数えるので、count_p50 と byte_p50 の差（オクターブ）が縮み、ゲートにかかって分けなくなった。recalc を短くすると減衰の窓（ema_den × recalc）も短くなり、最近の要求に早く追従する。</p>
+
+<h3>5.2 その他のヒント</h3>
+<div class="wrap"><table>
+<tr><th>名前</th><th>引数（既定）</th><th>中身</th></tr>
+<tr><td><code>none</code></td><td>なし</td><td>分けない（分類 1 つ）</td></tr>
+<tr><td><code>fixed</code></td><td><code>tau</code>（リスト。<code>fixed:4K/64K</code>）</td><td>固定の境界 τ で分ける。分類 = 大きさ s が超える境界の数（s &gt; τ<sub>j</sub> となる j の数）</td></tr>
+<tr><td><code>st_hitrate</code></td><td><code>size</code>（st | fixed | none）・<code>tau</code>・<code>hr</code>（20%/40%/60%/80%）・<code>hr_metric</code>（ssd | all）・<code>hr_mode</code>（ema | cum | window）・<code>hr_window</code>（100000 要求）・<code>hr_alpha</code>（0.3）・<code>hr_min_obs</code>（100）・<code>hr_default</code>（low | high）・<code>hr_hyst</code>（0）・<code>merge</code>（none | hot）・<code>merge_level</code>（−1）・<code>merge_to</code>（smallest | next）＋ split_threshold の 8 つ</td><td>サイズ分類 × 2 のべき乗の帯ごとに測ったヒット率の分類。分類数 = サイズ分類数 × (hr の数 + 1)。hr を空にすると size の規則だけになる</td></tr>
+<tr><td><code>st_hr_refine</code></td><td><code>k_max</code>（4）・<code>stat</code>（hd | reuse | useful）・<code>weight</code>（bytes | count）・<code>min_obs</code>（200）・<code>min_share</code>（0.02）・<code>eps</code>（0.05）・<code>hyst</code>（0.05）・<code>dwell</code>（2）・<code>eps_log</code>（1e-12）・<code>refine_when_nosplit</code>（no）＋ split_threshold の 8 つ</td><td>split_threshold で分けた後、各側をバケット別の SSD ヒット統計で細かく分ける（重み付き 1 次元の最適分割）</td></tr>
+<tr><td><code>hr_segment</code></td><td>st_hr_refine の k_max〜eps_log ＋ <code>recalc</code>（100000）・<code>ema_den</code>（16）</td><td>split_threshold を使わず、SSD ヒット統計だけで分割する</td></tr>
+<tr><td><code>profile</code></td><td><code>path</code>（cachesim 本体が書いた sizebin_profile.csv。RegionFlash の P.sizebin.csv は列が違うので使えない）・<code>method</code>（qbytes | qcount | geo | stseg | hrseg）・<code>k</code>（2）・<code>stat</code>・<code>weight</code>・<code>min_obs</code>（200）・<code>min_share</code>（0.02）・<code>eps</code>（0.05）・<code>eps_log</code>・<code>lambda</code>・<code>min_band</code>・<code>no_split_pct</code></td><td>前の実行のプロファイルから、動かない境界を決める（2 パス）</td></tr>
+<tr><td><code>key</code></td><td><code>key</code>（size | hash | dram | gap | age | freq | sizefreq）・<code>k</code>（4）・<code>kf</code>（2）・<code>weight</code>（bytes）・<code>recalc</code>（100000 受け入れ）・<code>ema_den</code>（16）・<code>fsrc</code>（ghost | dram | cms | bloom）・<code>fmem</code>（16M）・<code>fwin</code>（10000000 要求）・<code>q</code>・<code>fq</code>・<code>thr</code>・<code>fthr</code></td><td>書く時に分かる鍵で分ける。gap = 直前 2 回のアクセスの間隔、age = 直前のアクセスからの要求数、freq = 回数、dram = DRAM ヒット数。境界は鍵の log2 のバケットを重みで k 等分（q で分位点、thr で固定の閾値も可）</td></tr>
+<tr><td><code>oracle_gdt</code></td><td><code>k</code>（4）・<code>metric</code>（dist | bytetime）・<code>recalc</code>（100000）・<code>ema_den</code>（16）</td><td>次のアクセスまでの距離（未来の情報。oracleGeneral など次のアクセスの欄があるトレースだけ）で分ける参照点</td></tr>
+<tr><td><code>oracle_key</code></td><td><code>key</code>（rate | dist | dens | live | wlive）・<code>k</code>（4）・<code>weight</code>・<code>recalc</code>・<code>ema_den</code>・<code>W</code>（0）・<code>log</code>・<code>events</code>・<code>q</code></td><td>未来の値で分ける。rate・dens・wlive は 2 パス（1 パス目 log=PATH、2 パス目 events=PATH と W）</td></tr>
+<tr><td><code>oracle_keyinfo</code></td><td><code>window</code>（1000000）・<code>W</code>（0）・<code>events</code></td><td>分類しない。鍵と未来の値の相互情報量を P.json の hint_result に書く</td></tr>
+</table></div>
+
+<h2 id="s6">6. 受け入れ方針の引数（<code>admit=名前:k=v/…</code>）</h2>
+<div class="wrap"><table>
+<tr><th>名前</th><th>引数（既定）</th><th>中身</th></tr>
+<tr><td><code>all</code></td><td>なし</td><td>すべて受け入れる（既定）</td></tr>
+<tr><td><code>prob</code></td><td><code>p</code>（1.0）</td><td>確率 p で受け入れる</td></tr>
+<tr><td><code>sizemax</code></td><td><code>max</code>（1M）</td><td>大きさ ≤ max なら受け入れる</td></tr>
+<tr><td><code>sizeexp</code></td><td><code>c</code>（64K）</td><td>確率 exp(−大きさ ÷ c) で受け入れる</td></tr>
+<tr><td><code>seen</code></td><td><code>m</code>（100000）</td><td>直近 m 件の DRAM の victim の記録に 2 回以上ある物を受け入れる（DRAM なしでは、前にミスしたことのある物）。再挿入は常に受け入れる</td></tr>
+<tr><td><code>tinylfu</code></td><td><code>width</code>（16777216）・<code>window</code>（10000000 SSD 参照）・<code>thr</code>（2）</td><td>SSD 参照ごとに 4 行の count-min sketch で回数を数え（window 回ごとに半分にする）、推定回数が thr 以上なら受け入れる</td></tr>
+<tr><td><code>adaptsize</code></td><td><code>tuner</code>（sim | model）・<code>interval</code>（1000000）・<code>alpha</code>（0.5）・<code>lo</code>（8）・<code>hi</code>（40）・<code>step</code>（1）・<code>c0</code>（1T）・<code>sample</code>（0.01）・<code>objective</code>（ohr | bhr）・<code>win</code>（2）・<code>horizon</code>（0）</td><td>AdaptSize: 確率 exp(−大きさ ÷ c) の c を定期的に調整する</td></tr>
+<tr><td><code>cachesack</code></td><td><code>w</code>（1）・<code>miss</code>（obj | byte）・<code>oct</code>（1）・<code>interval</code>（1000000）・<code>alpha</code>（0.5）・<code>dmin</code>（1000）・<code>dmax</code>（1e10）・<code>nd</code>（128）</td><td>CacheSack: 大きさの分類ごとに、書き込みの費用とヒットの得を比べて受け入れ方を最適化する</td></tr>
+<tr><td><code>oracle_opt</code></td><td><code>log</code>・<code>episodes</code>・<code>budget</code>（0）・<code>benefit</code>（ohr | bhr）・<code>eage</code>（0）</td><td>未来を知る最適に近い受け入れ（2 パス: 1 パス目 log=PATH、2 パス目 episodes=PATH）</td></tr>
+</table></div>
+
+<h2 id="s7">7. libCacheSim の CLI の引数（関係するもの）</h2>
+<div class="wrap"><table>
+<tr><th>引数</th><th>意味（RegionFlash での扱い）</th></tr>
+<tr><td>位置引数の大きさ</td><td>SSD の大きさ（<code>240gb</code>、<code>64mb</code>）。<code>1gb,2gb</code> のように並べると複数のキャッシュを走らせるが、同じ out に書いてしまうので 1 回の実行では 1 つにする</td></tr>
+<tr><td><code>-e</code>（<code>--eviction-params</code>）</td><td>RegionFlash の引数（§3）</td></tr>
+<tr><td><code>-n</code>（<code>--num-req</code>）</td><td>先頭からこの数の要求だけ流す</td></tr>
+<tr><td><code>-o</code>（<code>--output</code>）</td><td>libCacheSim が自分で書く結果ファイル（既定 <code>result/&lt;トレース名&gt;.cachesim</code>、追記）。並列に走らせるときは実行ごとに変える</td></tr>
+<tr><td><code>-a</code>・<code>--admission-params</code></td><td>libCacheSim の受け入れ方針。SSD への書き込みで admit= より先に判定し、update() は SSD を引くたびに呼ぶ</td></tr>
+<tr><td><code>-t</code>（<code>--trace-type-params</code>）</td><td>トレースの読み方（csv の列など）</td></tr>
+<tr><td><code>--ignore-obj-size</code></td><td>すべての物の大きさを 1 にする</td></tr>
+<tr><td><code>--warmup-sec</code></td><td>libCacheSim が画面に出す miss ratio のためのウォームアップ（秒）。RegionFlash の表と出力は <code>warmup-req</code> を使う</td></tr>
+</table></div>
+<p class="mut">libCacheSim の CLI は大きさ 0 の要求を捨てる。RegionFlash の要求数は、大きさ 0 の要求の数だけ cachesim より少なくなる。</p>
+
+<h2 id="s8">8. 起動時の確認（組み合わせの制約）</h2>
+<p>次の組み合わせは、走らせる前に理由を書いて止まる。</p>
+<div class="wrap"><table>
+<tr><th>条件</th><th>理由</th></tr>
+<tr><td>N（Region の数）&lt; 分類数 + 2</td><td>分類ごとの OPEN Region と、追い出しの余地が要る</td></tr>
+<tr><td><code>chunk</code> &gt; <code>region-size</code></td><td>ピースがどの Region にも入らず止まらなくなる</td></tr>
+<tr><td>ssd-mode=object で <code>chunk</code>・<code>ru-size</code>・<code>region-evict</code>（lru 以外）</td><td>Region モードだけの機能</td></tr>
+<tr><td><code>ru-size</code> が <code>region-size</code> の倍数でない／<code>ruh=0</code>／RU が足りない</td><td>FDP の配置ができない（<code>raise fdp-op</code>）</td></tr>
+<tr><td>reinsert の <code>class=reclassify</code> で <code>hint_on_reinsert=no</code></td><td>分類し直すにはヒントに知らせる必要がある</td></tr>
+<tr><td>reinsert の <code>mode=ii</code> と <code>class=reclassify</code></td><td>ii はすべての書き直しを 1 本の系列に入れる</td></tr>
+<tr><td>reinsert の <code>n=0</code> と <code>p=1</code></td><td>追い出しのたびに全部書き直し、空きができずに止まらなくなることがある</td></tr>
+<tr><td>reinsert の <code>max_frac</code>・<code>p</code> が (0, 1] の外</td><td>—</td></tr>
+<tr><td>ssd-mode=object で reinsert の <code>mode=ii</code>・<code>class=reclassify</code>・<code>n=0</code></td><td>物単位ではその場で入れ直すだけ</td></tr>
+<tr><td>ヒントの分類数 &gt; 64（mode=ii なら 63）</td><td>分類は 1 バイトで持つ</td></tr>
+<tr><td>層のアルゴリズムに RegionFlash、または知らない名前</td><td>—</td></tr>
+</table></div>
+<p class="mut">走らせている間も、要求ごとに「RegionFlash が数えた中身のバイト ＝ 中のキャッシュが持つバイト」を確かめる。追い出しを知らせないアルゴリズムは、ここで理由を書いて止まる（regionflash.html §3）。</p>
+
+<h2 id="s8b">8b. どの引数をどう確かめたか</h2>
+<div class="wrap"><table>
+<tr><th>方法</th><th>通した引数</th></tr>
+<tr><td>参照モデルとの差分テスト（<code>diff_ref.py</code>、300 ケース）</td><td>inclusion（3 方式）、region-evict=fifo・lru・lcs:fifo、chunk、ssd-mode=object・ssd-algo、FDP（ru-size・ruh・fdp-iso・fdp-op・fdp-trim）、reinsert の n・max_size・max_frac・mode、dram-size=0、dram-policy / dram-algo</td></tr>
+<tr><td>cachesim 本体との照合（<code>plugin_cmp.py</code>、30 構成）</td><td>ヒント 12 種・受け入れ方針 9 種とその引数、reinsert の class=reclassify・hint_on_reinsert</td></tr>
+<tr><td>cachesim 本体との照合（<code>param_verify.py</code>、11 構成）</td><td>region-evict=beta と beta（0・1・−1・2.5）、reinsert の p（n=0 の割合方式、mode=ii、物単位モード）、warmup-req、seed（prob・adaptsize）</td></tr>
+<tr><td>同じになるはずの書き方の比較（<code>param_verify.py</code>）</td><td>taus と fixed:、region-evict=s3fifo と lcs:s3fifo、beta=0 と lru、out と prefix、大きさの書き方（8MiB・8M・8388608・0.0078125G、1.5K・1536）、-a size と admit=sizemax</td></tr>
+<tr><td>cachesim との照合での指定</td><td>plugin_cmp.py・trace_cmp.py・param_verify.py は seal-on-repartition=inactive を付けて cachesim の既定に合わせる（10-19 に既定を none に変えたため）</td></tr>
+<tr><td>効き目の確認（§4.1・§5.1）</td><td>dram-params・ssd-params・region-params、split_threshold 系の全引数、seed を変えると結果が変わること、interval=0</td></tr>
+</table></div>
+<p class="mut">10-19 の確認で、<b>reinsert の p &lt; 1 が cachesim と食い違う誤り</b>を見つけて直した。RegionFlash は再挿入のコインを独自の乱数で振っていたため、p &lt; 1 では書き直す物が cachesim と違っていた（OHR で 0.001〜0.003 の差）。cachesim と同じ系列（seed·6+6）に変えて、4 構成とも全カウンタが一致した。</p>
+
+<h2 id="s9">9. 例</h2>
+<pre># DRAM は S3FIFO（小さな FIFO を 5%）、SSD は Region、split_threshold を細かく調整
+./bin/cachesim w01.oracleGeneral.bin.zst oracleGeneral RegionFlash 240gb -o runs/a.cachesim \
+  -e "dram-size=4G,dram-algo=s3fifo,dram-params=small-size-ratio=0.05/move-to-main-threshold=1,\
+region-size=626M,chunk=1M,hint=split_threshold:lambda=128/recalc=50000/ema_den=8/hyst_hold=2,\
+interval=1000000,prefix=runs/a/w01"
+
+# SSD を物単位にして SLRU（2 段）、DRAM は LRU
+./bin/cachesim w01.oracleGeneral.bin.zst oracleGeneral RegionFlash 240gb -o runs/b.cachesim \
+  -e "dram-size=4G,ssd-mode=object,ssd-algo=slru,ssd-params=n-seg=2,prefix=runs/b/w01"
+
+# 消す Region を S3FIFO（引数つき）に選ばせ、要求で数える SplitThreshold（SSD まで来た要求だけ）
+./bin/cachesim tencent.oracleGeneral.zst oracleGeneral RegionFlash 10gb -o runs/c.cachesim \
+  -e "dram-size=165M,region-size=64M,region-evict=lcs:s3fifo,region-params=small-size-ratio=0.2,\
+hint=split_threshold_req:scope=ssd/depth=2,prefix=runs/c/tencent"
+
+# FDP（RU 4 Region 分、RUH 4、GC は元の RUH ごと）と再挿入（1 回以上ヒットした物、半分まで）
+./bin/cachesim tencent.oracleGeneral.zst oracleGeneral RegionFlash 10gb -o runs/d.cachesim \
+  -e "dram-size=165M,region-size=64M,chunk=1M,hint=st_recursive:depth=2,ru-size=256M,ruh=4,fdp-iso=pi,\
+fdp-op=0.35,reinsert=hits:n=1/max_frac=0.5,warmup-req=5000000,prefix=runs/d/tencent"</pre>
+<p class="mut">シェルの行の継ぎ目（<code>\</code>）は <code>-e</code> の文字列の途中でも使えるが、空白を入れないこと（<code>,</code> の後の空白は読み飛ばすが、キーの前後の空白は読み飛ばさない）。</p>
+</main></body>
+</html>
