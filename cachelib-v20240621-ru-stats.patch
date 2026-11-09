@@ -209,7 +209,7 @@ index c3d78a1..7d5662c 100644
  
    auto cache = createCache(std::move(proto));
 diff --git a/cachelib/cachebench/cache/Cache.h b/cachelib/cachebench/cache/Cache.h
-index fc9a13d..3aed65e 100644
+index fc9a13d..d15b97b 100644
 --- a/cachelib/cachebench/cache/Cache.h
 +++ b/cachelib/cachebench/cache/Cache.h
 @@ -125,7 +125,9 @@ class Cache {
@@ -238,7 +238,7 @@ index fc9a13d..3aed65e 100644
    void recordAccess(folly::StringPiece key) {
      if (nvmAdmissionPolicy_) {
        nvmAdmissionPolicy_->trackAccess(key);
-@@ -652,6 +662,75 @@ Cache<Allocator>::Cache(const CacheConfig& config,
+@@ -652,6 +662,76 @@ Cache<Allocator>::Cache(const CacheConfig& config,
                           .setCleanRegions(config_.navyCleanRegions,
                                            config_.navyCleanRegionThreads)
                           .setRegionSize(config_.navyRegionSizeMB * MB);
@@ -290,6 +290,7 @@ index fc9a13d..3aed65e 100644
 +        ru.capacityPolicy = "static"; // floors alone imply static
 +      }
 +      ru.capacityFloors = config_.navyPlacementCapacityFloors;
++      ru.sfifoHitThresholds = config_.navySfifoReinsertHitThresholds;
 +      ru.superRegionFromDevice = config_.navySuperRegionFromDevice;
 +      ru.trimOnReclaim = config_.navyTrimOnReclaim;
 +      ru.ruhUpdate = config_.navyRuhUpdate;
@@ -314,7 +315,7 @@ index fc9a13d..3aed65e 100644
  
      // by default lru. if more than one fifo ratio is present, we use
      // segmented fifo. otherwise, simple fifo.
-@@ -897,13 +976,21 @@ bool Cache<Allocator>::insert(WriteHandle& handle) {
+@@ -897,13 +977,21 @@ bool Cache<Allocator>::insert(WriteHandle& handle) {
  }
  
  template <typename Allocator>
@@ -967,10 +968,10 @@ index 1b0e4b4..67ced80 100644
    // from each  thread
    ThroughputStats& operator+=(const ThroughputStats& other);
 diff --git a/cachelib/cachebench/util/CacheConfig.cpp b/cachelib/cachebench/util/CacheConfig.cpp
-index 6d8f408..c414f22 100644
+index 6d8f408..9d25e32 100644
 --- a/cachelib/cachebench/util/CacheConfig.cpp
 +++ b/cachelib/cachebench/util/CacheConfig.cpp
-@@ -80,6 +80,26 @@ CacheConfig::CacheConfig(const folly::dynamic& configJson) {
+@@ -80,6 +80,27 @@ CacheConfig::CacheConfig(const folly::dynamic& configJson) {
    JSONSetVal(configJson, navyQDepth);
    JSONSetVal(configJson, navyEnableIoUring);
    JSONSetVal(configJson, navyCleanRegions);
@@ -989,6 +990,7 @@ index 6d8f408..c414f22 100644
 +  JSONSetVal(configJson, navySimFdpPlacementHandles);
 +  JSONSetVal(configJson, navySimFdpRuSizeMB);
 +  JSONSetVal(configJson, navyPlacementCapacityFloors);
++  JSONSetVal(configJson, navySfifoReinsertHitThresholds);
 +  JSONSetVal(configJson, navyBigHashRuMode);
 +  JSONSetVal(configJson, navyBigHashMode);
 +  JSONSetVal(configJson, navyNemoSetGroupSizeMB);
@@ -997,20 +999,20 @@ index 6d8f408..c414f22 100644
    JSONSetVal(configJson, navyCleanRegionThreads);
    JSONSetVal(configJson, navyAdmissionWriteRateMB);
    JSONSetVal(configJson, navyMaxConcurrentInserts);
-@@ -112,7 +132,7 @@ CacheConfig::CacheConfig(const folly::dynamic& configJson) {
+@@ -112,7 +133,7 @@ CacheConfig::CacheConfig(const folly::dynamic& configJson) {
    // if you added new fields to the configuration, update the JSONSetVal
    // to make them available for the json configs and increment the size
    // below
 -  checkCorrectSize<CacheConfig, 760>();
-+  checkCorrectSize<CacheConfig, 1008>();
++  checkCorrectSize<CacheConfig, 1032>();
  
    if (numPools != poolSizes.size()) {
      throw std::invalid_argument(folly::sformat(
 diff --git a/cachelib/cachebench/util/CacheConfig.h b/cachelib/cachebench/util/CacheConfig.h
-index 0a15696..2cdfd32 100644
+index 0a15696..8bb79fd 100644
 --- a/cachelib/cachebench/util/CacheConfig.h
 +++ b/cachelib/cachebench/util/CacheConfig.h
-@@ -201,6 +201,44 @@ struct CacheConfig : public JSONConfig {
+@@ -201,6 +201,47 @@ struct CacheConfig : public JSONConfig {
    // into navy don't queue behind a reclaim of region.
    uint32_t navyCleanRegions{1};
  
@@ -1043,6 +1045,9 @@ index 0a15696..2cdfd32 100644
 +  uint32_t navySimFdpPlacementHandles{0};
 +  uint64_t navySimFdpRuSizeMB{0};
 +  std::vector<double> navyPlacementCapacityFloors{};
++  // SR mode + SFIFO: II SRs' segment = 1 + #thresholds below the average
++  // hit count of the objects reinserted into them, e.g. [1, 3]
++  std::vector<uint64_t> navySfifoReinsertHitThresholds{};
 +  // BigHash engine: "inplace" (original) | "log" (RU-aligned log, needs
 +  // navySuperRegionSizeMB) | "nemo" (Set-Groups). navyBigHashRuMode=true is
 +  // a legacy alias of "log".
@@ -1695,7 +1700,7 @@ index 6c02f0d..322adbd 100644
    bighash/BucketStorage.cpp
    block_cache/Allocator.cpp
 diff --git a/cachelib/navy/Factory.cpp b/cachelib/navy/Factory.cpp
-index 09a4c57..47f3086 100644
+index 09a4c57..0fd0b34 100644
 --- a/cachelib/navy/Factory.cpp
 +++ b/cachelib/navy/Factory.cpp
 @@ -24,6 +24,7 @@
@@ -1706,7 +1711,15 @@ index 09a4c57..47f3086 100644
  #include "cachelib/navy/block_cache/BlockCache.h"
  #include "cachelib/navy/block_cache/FifoPolicy.h"
  #include "cachelib/navy/block_cache/LruPolicy.h"
-@@ -118,6 +119,21 @@ class BlockCacheProtoImpl final : public BlockCacheProto {
+@@ -81,6 +82,7 @@ class BlockCacheProtoImpl final : public BlockCacheProto {
+       throw std::invalid_argument("There's already an eviction policy set");
+     }
+     config_.numPriorities = static_cast<uint16_t>(segmentRatio.size());
++    config_.sfifoRatio = segmentRatio;
+     config_.evictionPolicy =
+         std::make_unique<SegmentedFifoPolicy>(std::move(segmentRatio));
+   }
+@@ -118,6 +120,22 @@ class BlockCacheProtoImpl final : public BlockCacheProto {
      config_.preciseRemove = preciseRemove;
    }
  
@@ -1716,6 +1729,7 @@ index 09a4c57..47f3086 100644
 +    config_.placementSizeThresholds = ru.placementSizeThresholds;
 +    config_.useSplitThreshold = ru.useSplitThreshold;
 +    config_.placementAccessThresholds = ru.placementAccessThresholds;
++    config_.sfifoHitThresholds = ru.sfifoHitThresholds;
 +    config_.capacityPolicy = ru.capacityPolicy;
 +    config_.capacityFloors = ru.capacityFloors;
 +    if (ru.numPriorities > 0) {
@@ -1728,7 +1742,7 @@ index 09a4c57..47f3086 100644
    std::unique_ptr<Engine> create(JobScheduler& scheduler,
                                   ExpiredCheck checkExpired,
                                   DestructorCallback cb) && {
-@@ -148,6 +164,22 @@ class BigHashProtoImpl final : public BigHashProto {
+@@ -148,6 +166,22 @@ class BigHashProtoImpl final : public BigHashProto {
    // BigHash uses bloom filters (BF) to reduce number of IO. We want to maintain
    // BF for every bucket, because we want to rebuild it on every remove to keep
    // its filtering properties.
@@ -1751,7 +1765,7 @@ index 09a4c57..47f3086 100644
    void setBloomFilter(uint32_t numHashes, uint32_t hashTableBitSize) override {
      // Want to make @setLayout and Bloom filter setup independent.
      bloomFilterEnabled_ = true;
-@@ -162,6 +194,20 @@ class BigHashProtoImpl final : public BigHashProto {
+@@ -162,6 +196,20 @@ class BigHashProtoImpl final : public BigHashProto {
    }
  
    std::unique_ptr<Engine> create(ExpiredCheck checkExpired) && {
@@ -1772,7 +1786,7 @@ index 09a4c57..47f3086 100644
      config_.checkExpired = std::move(checkExpired);
      if (bloomFilterEnabled_) {
        if (config_.bucketSize == 0) {
-@@ -175,6 +221,8 @@ class BigHashProtoImpl final : public BigHashProto {
+@@ -175,6 +223,8 @@ class BigHashProtoImpl final : public BigHashProto {
  
   private:
    BigHash::Config config_;
@@ -2814,7 +2828,7 @@ index 1641b2b..80f1884 100644
    void getCounters(const CounterVisitor& visitor) const;
  
 diff --git a/cachelib/navy/block_cache/BlockCache.cpp b/cachelib/navy/block_cache/BlockCache.cpp
-index c2049dd..8a0a778 100644
+index c2049dd..ba74dcf 100644
 --- a/cachelib/navy/block_cache/BlockCache.cpp
 +++ b/cachelib/navy/block_cache/BlockCache.cpp
 @@ -29,6 +29,11 @@
@@ -3005,7 +3019,7 @@ index c2049dd..8a0a778 100644
        checkExpired_{std::move(config.checkExpired)},
        destructorCb_{std::move(config.destructorCb)},
        checksumData_{config.checksum},
-@@ -138,10 +303,32 @@ BlockCache::BlockCache(Config&& config, ValidConfigTag)
+@@ -138,10 +303,34 @@ BlockCache::BlockCache(Config&& config, ValidConfigTag)
                       std::move(config.evictionPolicy),
                       config.numInMemBuffers,
                       config.numPriorities,
@@ -3013,7 +3027,9 @@ index c2049dd..8a0a778 100644
 +                     config.inMemBufFlushRetryLimit,
 +                     SuperRegionConfig{config.regionsPerSuperRegion,
 +                                       config.numCleanSuperRegions,
-+                                       placementSegments(config)}},
++                                       placementSegments(config),
++                                       config.sfifoRatio,
++                                       config.sfifoHitThresholds}},
        allocator_{regionManager_, config.numPriorities},
        reinsertionPolicy_{makeReinsertionPolicy(config.reinsertionConfig)} {
    validate(config);
@@ -3039,7 +3055,7 @@ index c2049dd..8a0a778 100644
    XLOG(INFO, "Block cache created");
    XDCHECK_NE(readBufferSize_, 0u);
  }
-@@ -175,9 +362,13 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
+@@ -175,9 +364,13 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
      return Status::Rejected;
    }
  
@@ -3055,7 +3071,7 @@ index c2049dd..8a0a778 100644
  
    switch (desc.status()) {
    case OpenStatus::Error:
-@@ -186,6 +377,8 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
+@@ -186,6 +379,8 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
      return Status::Rejected;
    case OpenStatus::Ready:
      insertCount_.inc();
@@ -3064,7 +3080,7 @@ index c2049dd..8a0a778 100644
      break;
    case OpenStatus::Retry:
      allocRetryCount_.inc();
-@@ -209,6 +402,12 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
+@@ -209,6 +404,12 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
        insertHashCollisionCount_.inc();
      }
      succInsertCount_.inc();
@@ -3077,7 +3093,7 @@ index c2049dd..8a0a778 100644
      if (newObjSize < oldObjSize) {
        usedSizeBytes_.sub(oldObjSize - newObjSize);
      } else {
-@@ -449,6 +648,9 @@ uint32_t BlockCache::onRegionReclaim(RegionId rid, BufferView buffer) {
+@@ -449,6 +650,9 @@ uint32_t BlockCache::onRegionReclaim(RegionId rid, BufferView buffer) {
          break;
        case ReinsertionRes::kReinserted:
          break;
@@ -3087,7 +3103,7 @@ index c2049dd..8a0a778 100644
        }
      }
  
-@@ -543,6 +745,14 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
+@@ -543,6 +747,14 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
    }
  
    if (!reinsertionPolicy_ || !reinsertionPolicy_->shouldReinsert(hk.key())) {
@@ -3102,7 +3118,7 @@ index c2049dd..8a0a778 100644
      return removeItem(false);
    }
  
-@@ -554,6 +764,18 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
+@@ -554,6 +766,18 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
        numPriorities_ == 0
            ? kDefaultItemPriority
            : std::min<uint16_t>(lr.currentHits(), numPriorities_ - 1);
@@ -3121,7 +3137,7 @@ index c2049dd..8a0a778 100644
  
    uint32_t size = serializedSize(hk.key().size(), value.size());
    auto [desc, slotSize, addr] =
-@@ -565,11 +787,39 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
+@@ -565,11 +789,40 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
    case OpenStatus::Error:
      allocErrorCount_.inc();
      reinsertionErrorCount_.inc();
@@ -3145,7 +3161,8 @@ index c2049dd..8a0a778 100644
 +        if (index_.removeIfMatch(hk.keyHash(), encodeRelAddress(currAddr))) {
 +          std::lock_guard<TimedMutex> g{deferredMu_};
 +          deferred_.push_back(
-+              Deferred{std::string{hk.key()}, Buffer{value}, priority});
++              Deferred{std::string{hk.key()}, Buffer{value}, priority,
++                       static_cast<uint32_t>(lr.currentHits())});
 +          deferCount_.inc();
 +          return ReinsertionRes::kDeferred;
 +        }
@@ -3162,7 +3179,11 @@ index c2049dd..8a0a778 100644
    auto closeRegionGuard =
        folly::makeGuard([this, desc_2 = std::move(desc)]() mutable {
          allocator_.close(std::move(desc_2));
-@@ -596,6 +846,74 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
+@@ -593,9 +846,79 @@ BlockCache::ReinsertionRes BlockCache::reinsertOrRemoveItem(
+   }
+   reinsertionCount_.inc();
+   reinsertionBytes_.add(entrySize);
++  regionManager_.noteReinsertHits(addr.rid(), lr.currentHits());
    return ReinsertionRes::kReinserted;
  }
  
@@ -3219,6 +3240,7 @@ index c2049dd..8a0a778 100644
 +      reinsertionCount_.inc();
 +      reinsertionBytes_.add(size);
 +      deferReinsertCount_.inc();
++      regionManager_.noteReinsertHits(addr.rid(), d.hits);
 +    } else if (status == Status::Ok) { // lost the race: written but unused
 +      holeCount_.inc();
 +      holeSizeTotal_.add(decodeSizeHint(encodeSizeHint(slotSize)));
@@ -3237,7 +3259,7 @@ index c2049dd..8a0a778 100644
  Status BlockCache::writeEntry(RelAddress addr,
                                uint32_t slotSize,
                                HashedKey hk,
-@@ -722,6 +1040,32 @@ void BlockCache::reset() {
+@@ -722,6 +1045,32 @@ void BlockCache::reset() {
  }
  
  void BlockCache::getCounters(const CounterVisitor& visitor) const {
@@ -3271,7 +3293,7 @@ index c2049dd..8a0a778 100644
    visitor("navy_bc_items", index_.computeSize());
    visitor("navy_bc_inserts", insertCount_.get(),
 diff --git a/cachelib/navy/block_cache/BlockCache.h b/cachelib/navy/block_cache/BlockCache.h
-index 2e45686..9386a80 100644
+index 2e45686..0e249c6 100644
 --- a/cachelib/navy/block_cache/BlockCache.h
 +++ b/cachelib/navy/block_cache/BlockCache.h
 @@ -16,6 +16,7 @@
@@ -3291,7 +3313,7 @@ index 2e45686..9386a80 100644
  #include "cachelib/navy/common/Device.h"
  #include "cachelib/navy/common/SizeDistribution.h"
  #include "cachelib/navy/engine/Engine.h"
-@@ -89,6 +92,45 @@ class BlockCache final : public Engine {
+@@ -89,6 +92,49 @@ class BlockCache final : public Engine {
      // whether to remove an item by checking the full key.
      bool preciseRemove{false};
  
@@ -3314,6 +3336,10 @@ index 2e45686..9386a80 100644
 +    uint8_t reinsertPlacement{0};
 +    // placement ids available to BlockCache (0 = unlimited)
 +    uint16_t maxPlacementIds{0};
++    // segmented FIFO ratio (set together with the SFIFO eviction policy)
++    std::vector<unsigned int> sfifoRatio;
++    // II SRs: SFIFO segment by average reinsert hit count (see RegionManager)
++    std::vector<uint64_t> sfifoHitThresholds;
 +    // per-placement capacity floors (CapacityPolicy.h): type "" = off
 +    std::string capacityPolicy;
 +    std::vector<double> capacityFloors;
@@ -3337,7 +3363,7 @@ index 2e45686..9386a80 100644
      // Calculates the total region number.
      uint32_t getNumRegions() const {
        XDCHECK_EQ(0ul, cacheSize % regionSize);
-@@ -107,11 +149,43 @@ class BlockCache final : public Engine {
+@@ -107,11 +153,43 @@ class BlockCache final : public Engine {
    explicit BlockCache(Config&& config);
    BlockCache(const BlockCache&) = delete;
    BlockCache& operator=(const BlockCache&) = delete;
@@ -3382,7 +3408,7 @@ index 2e45686..9386a80 100644
    // Checks if the key could exist in block cache. This can be used as a
    // pre-check to optimize cache lookups to avoid calling lookup in an async IO
    // environment.
-@@ -321,7 +395,23 @@ class BlockCache final : public Engine {
+@@ -321,7 +399,24 @@ class BlockCache final : public Engine {
      kRemoved,
      // Item wasn't eligible for re-insertion and was evicted
      kEvicted,
@@ -3394,6 +3420,7 @@ index 2e45686..9386a80 100644
 +    std::string key;
 +    Buffer value;
 +    uint16_t priority;
++    uint32_t hits;
 +  };
 +  void drainDeferred(bool last);
 +  // fiber-aware: the reclaim runs on fibers (a std::mutex held while a
@@ -3406,7 +3433,7 @@ index 2e45686..9386a80 100644
    ReinsertionRes reinsertOrRemoveItem(HashedKey hk,
                                        BufferView value,
                                        uint32_t entrySize,
-@@ -342,6 +432,26 @@ class BlockCache final : public Engine {
+@@ -342,6 +437,26 @@ class BlockCache final : public Engine {
  
    const serialization::BlockCacheConfig config_;
    const uint16_t numPriorities_{};
@@ -3584,7 +3611,7 @@ index 787a390..cf5006f 100644
    // and LookupResult.record() returns the record that was just found.
    // If the entry wasn't found, then LookupResult.found() returns false.
 diff --git a/cachelib/navy/block_cache/RegionManager.cpp b/cachelib/navy/block_cache/RegionManager.cpp
-index 6d6c3fd..da229e3 100644
+index 6d6c3fd..2685970 100644
 --- a/cachelib/navy/block_cache/RegionManager.cpp
 +++ b/cachelib/navy/block_cache/RegionManager.cpp
 @@ -14,8 +14,12 @@
@@ -3600,7 +3627,7 @@ index 6d6c3fd..da229e3 100644
  #include "cachelib/common/inject_pause.h"
  #include "cachelib/navy/common/Utils.h"
  #include "cachelib/navy/scheduler/JobScheduler.h"
-@@ -33,8 +37,12 @@ RegionManager::RegionManager(uint32_t numRegions,
+@@ -33,8 +37,14 @@ RegionManager::RegionManager(uint32_t numRegions,
                               std::unique_ptr<EvictionPolicy> policy,
                               uint32_t numInMemBuffers,
                               uint16_t numPriorities,
@@ -3611,10 +3638,12 @@ index 6d6c3fd..da229e3 100644
 +      regionsPerSR_{srConfig.regionsPerSR},
 +      numCleanSRs_{std::max<uint32_t>(srConfig.numCleanSRs, 1)},
 +      placementSegment_{srConfig.placementSegment},
++      sfifoRatio_{srConfig.sfifoRatio},
++      sfifoHitThr_{srConfig.sfifoHitThresholds},
        inMemBufFlushRetryLimit_{inMemBufFlushRetryLimit},
        numRegions_{numRegions},
        regionSize_{regionSize},
-@@ -46,7 +54,7 @@ RegionManager::RegionManager(uint32_t numRegions,
+@@ -46,7 +56,7 @@ RegionManager::RegionManager(uint32_t numRegions,
        evictCb_{evictCb},
        cleanupCb_{cleanupCb},
        numInMemBuffers_{numInMemBuffers},
@@ -3623,7 +3652,7 @@ index 6d6c3fd..da229e3 100644
    XLOGF(INFO, "{} regions, {} bytes each", numRegions_, regionSize_);
    for (uint32_t i = 0; i < numRegions; i++) {
      regions_[i] = std::make_unique<Region>(RegionId{i}, regionSize_);
-@@ -67,9 +75,363 @@ RegionManager::RegionManager(uint32_t numRegions,
+@@ -67,9 +77,436 @@ RegionManager::RegionManager(uint32_t numRegions,
      workers_.back()->addTaskRemote(
          [name]() { XLOGF(INFO, "{} started", name); });
    }
@@ -3763,18 +3792,81 @@ index 6d6c3fd..da229e3 100644
 +  }
 +  if (!capPolicy_) {
 +    lruSel_ = dynamic_cast<LruPolicy*>(policy_.get()) != nullptr;
-+    if (!lruSel_ && dynamic_cast<FifoPolicy*>(policy_.get()) == nullptr) {
-+      XLOG(WARN) << "capacity floors: segmented FIFO not supported, using FIFO";
++    sfifoSel_ = dynamic_cast<SegmentedFifoPolicy*>(policy_.get()) != nullptr &&
++                sfifoRatio_.size() > 1;
++    if (!lruSel_ && !sfifoSel_ &&
++        dynamic_cast<FifoPolicy*>(policy_.get()) == nullptr) {
++      XLOG(WARN) << "capacity floors: unknown eviction policy, using FIFO";
 +    }
 +  }
 +  XLOGF(INFO, "capacity policy '{}' installed ({} selection)", p->name(),
-+        lruSel_ ? "LRU" : "FIFO");
++        lruSel_ ? "LRU" : (sfifoSel_ ? "segmented FIFO" : "FIFO"));
 +  capPolicy_ = std::move(p);
 +}
 +
 +uint32_t RegionManager::ownedSRs(uint16_t placement) const {
 +  std::lock_guard<TimedMutex> lock{cleanRegionsMutex_};
 +  return placement < owned_.size() ? owned_[placement] : 0;
++}
++
++// SFIFO segment of a sealed SR: 0 for SRs of first-insert placements; for
++// reinsertion (II) placements 1 + #thresholds below the average hit count of
++// the objects reinserted into it (B: representative hit count).
++uint16_t RegionManager::segmentOfLocked(uint32_t sr) {
++  const uint16_t pl = getRegion(RegionId{sr * regionsPerSR_}).getPriority();
++  const uint16_t base =
++      pl < placementSegment_.size() ? placementSegment_[pl] : 0;
++  if (base == 0 || sfifoHitThr_.empty()) {
++    return base;
++  }
++  const uint64_t cnt = srHitCnt_[sr].load(std::memory_order_relaxed);
++  const uint64_t avg =
++      cnt ? srHitSum_[sr].load(std::memory_order_relaxed) / cnt : 0;
++  uint16_t cls = 0;
++  while (cls < sfifoHitThr_.size() && avg > sfifoHitThr_[cls]) {
++    cls++;
++  }
++  uint16_t seg = 1 + cls;
++  if (!sfifoRatio_.empty()) {
++    seg = std::min<uint16_t>(seg, sfifoRatio_.size() - 1);
++  }
++  return seg;
++}
++
++// Segmented FIFO at SR granularity (same rule as SegmentedFifoPolicy): from
++// the top segment down, while a segment holds more than its ratio share of
++// the candidate SRs, its oldest SR is demoted to the tail of the segment
++// below. Eviction then takes (segment, age) in ascending order.
++void RegionManager::rebalanceNativeSfifoLocked() {
++  if (!sfifoSel_) {
++    return;
++  }
++  uint64_t tot = 0;
++  for (auto r : sfifoRatio_) {
++    tot += r;
++  }
++  const uint64_t n = srSealedN_;
++  for (size_t seg = sfifoRatio_.size() - 1; seg > 0; seg--) {
++    const uint64_t limit = n * sfifoRatio_[seg] / tot;
++    while (true) {
++      uint64_t count = 0;
++      int64_t oldest = -1;
++      for (uint32_t sr = 0; sr < numSRs_; sr++) {
++        if (srInPool_[sr] && srSeg_[sr] == seg) {
++          count++;
++          if (oldest < 0 || srSegSeq_[sr] < srSegSeq_[oldest]) {
++            oldest = sr;
++          }
++        }
++      }
++      if (count <= limit || oldest < 0) {
++        break;
++      }
++      srSeg_[oldest] = static_cast<uint16_t>(seg - 1);
++      srSegSeq_[oldest] = ++segSeqCounter_; // tail of the lower segment
++      sfifoDemoteCount_.inc();
++    }
++  }
 +}
 +
 +// cleanRegionsMutex_ held. Returns the SR to reclaim or -1.
@@ -3784,7 +3876,10 @@ index 6d6c3fd..da229e3 100644
 +    return v.valid() ? int64_t{superRegionOf(v)} : -1;
 +  }
 +  capPolicy_->observe(CapacitySnapshot{numSRs_, owned_, evictedPl_});
-+  auto key = [this](uint32_t sr) {
++  auto key = [this](uint32_t sr) -> uint64_t {
++    if (sfifoSel_) { // lowest segment first, oldest within the segment
++      return (uint64_t{srSeg_[sr]} << 48) | srSegSeq_[sr];
++    }
 +    return lruSel_ ? srLastAccess_[sr].load(std::memory_order_relaxed)
 +                   : srSealSeq_[sr];
 +  };
@@ -3824,6 +3919,7 @@ index 6d6c3fd..da229e3 100644
 +  if (srOwner_[chosen] >= 0) {
 +    evictedPl_[srOwner_[chosen]]++;
 +  }
++  rebalanceNativeSfifoLocked(); // pool shrank: ratios move
 +  return chosen;
 +}
 +
@@ -3878,8 +3974,11 @@ index 6d6c3fd..da229e3 100644
 +      // region priority, which here is the placement id: present the SR's
 +      // segment instead (insert SR = 0, reinsertion SR = higher) for the
 +      // track() call only, then restore the placement.
++      const uint16_t seg = segmentOfLocked(sr);
 +      if (capPolicy_) {
 +        srInPool_[sr] = 1;
++        srSeg_[sr] = seg;
++        srSegSeq_[sr] = ++segSeqCounter_;
 +        srSealSeq_[sr] = ++sealSeqCounter_;
 +        srLastAccess_[sr].store(getSteadyClock().count(),
 +                                std::memory_order_relaxed);
@@ -3888,11 +3987,12 @@ index 6d6c3fd..da229e3 100644
 +      }
 +      auto& rep = getRegion(RegionId{sr * regionsPerSR_});
 +      const uint16_t pl = rep.getPriority();
-+      rep.setPriority(pl < placementSegment_.size() ? placementSegment_[pl]
-+                                                    : 0);
++      rep.setPriority(seg); // SegmentedFifoPolicy reads the segment from here
 +      if (!capPolicy_) {
 +        policy_->track(rep);
 +        srSealedN_++;
++      } else {
++        rebalanceNativeSfifoLocked();
 +      }
 +      rep.setPriority(pl);
 +      XLOGF(DBG, "[SRDBG] sealed sr={}", sr);
@@ -3910,6 +4010,8 @@ index 6d6c3fd..da229e3 100644
 +  {
 +    std::lock_guard<TimedMutex> lock{cleanRegionsMutex_};
 +    srSealedCnt_[sr] = 0; // adopted subRegions count from here on
++    srHitSum_[sr].store(0, std::memory_order_relaxed);
++    srHitCnt_[sr].store(0, std::memory_order_relaxed);
 +    srCursor_[sr] = 0;
 +    srAdoptedBy_[sr] = -1;
 +    srReclaiming_[sr] = 1;
@@ -3987,7 +4089,7 @@ index 6d6c3fd..da229e3 100644
  RegionId RegionManager::evict() {
    auto rid = policy_->evict();
    if (!rid.valid()) {
-@@ -81,6 +443,19 @@ RegionId RegionManager::evict() {
+@@ -81,6 +518,19 @@ RegionId RegionManager::evict() {
  }
  
  void RegionManager::touch(RegionId rid) {
@@ -4007,7 +4109,7 @@ index 6d6c3fd..da229e3 100644
    auto& region = getRegion(rid);
    XDCHECK_EQ(rid, region.id());
    if (!region.hasBuffer()) {
-@@ -89,6 +464,10 @@ void RegionManager::touch(RegionId rid) {
+@@ -89,6 +539,10 @@ void RegionManager::touch(RegionId rid) {
  }
  
  void RegionManager::track(RegionId rid) {
@@ -4018,7 +4120,7 @@ index 6d6c3fd..da229e3 100644
    auto& region = getRegion(rid);
    XDCHECK_EQ(rid, region.id());
    policy_->track(region);
-@@ -163,6 +542,10 @@ void RegionManager::releaseCleanedupRegion(RegionId rid) {
+@@ -163,6 +617,10 @@ void RegionManager::releaseCleanedupRegion(RegionId rid) {
    // Reset all region internal state, making it ready to be
    // used by a region allocator.
    region.reset();
@@ -4029,7 +4131,7 @@ index 6d6c3fd..da229e3 100644
    {
      std::lock_guard<TimedMutex> lock{cleanRegionsMutex_};
      cleanRegions_.push_back(rid);
-@@ -210,7 +593,12 @@ RegionManager::claimBufferFromPool(bool addWaiter) {
+@@ -210,7 +668,12 @@ RegionManager::claimBufferFromPool(bool addWaiter) {
  }
  
  std::pair<OpenStatus, std::unique_ptr<CondWaiter>>
@@ -4043,7 +4145,7 @@ index 6d6c3fd..da229e3 100644
    auto status = OpenStatus::Retry;
    std::unique_ptr<CondWaiter> waiter;
    uint32_t newSched = 0;
-@@ -497,6 +885,39 @@ void RegionManager::recover(RecordReader& rr) {
+@@ -497,6 +960,49 @@ void RegionManager::recover(RecordReader& rr) {
  }
  
  void RegionManager::resetEvictionPolicy() {
@@ -4072,6 +4174,16 @@ index 6d6c3fd..da229e3 100644
 +    evictedPl_.assign(numPriorities_, 0);
 +    srInPool_.assign(numSRs_, 0);
 +    srSealSeq_.assign(numSRs_, 0);
++    srSeg_.assign(numSRs_, 0);
++    srSegSeq_.assign(numSRs_, 0);
++    if (!srHitSum_) {
++      srHitSum_.reset(new std::atomic<uint64_t>[numSRs_]);
++      srHitCnt_.reset(new std::atomic<uint64_t>[numSRs_]);
++    }
++    for (uint32_t i = 0; i < numSRs_; i++) {
++      srHitSum_[i].store(0, std::memory_order_relaxed);
++      srHitCnt_[i].store(0, std::memory_order_relaxed);
++    }
 +    if (!srLastAccess_) {
 +      srLastAccess_.reset(new std::atomic<uint64_t>[numSRs_]);
 +    }
@@ -4083,7 +4195,7 @@ index 6d6c3fd..da229e3 100644
    XDCHECK_GT(numRegions_, 0u);
  
    policy_->reset();
-@@ -524,11 +945,55 @@ bool RegionManager::isValidIORange(uint32_t offset, uint32_t size) const {
+@@ -524,11 +1030,55 @@ bool RegionManager::isValidIORange(uint32_t offset, uint32_t size) const {
    return static_cast<uint64_t>(offset) + size <= regionSize_;
  }
  
@@ -4140,7 +4252,7 @@ index 6d6c3fd..da229e3 100644
      return false;
    }
    physicalWrittenCount_.add(bufSize);
-@@ -536,10 +1001,15 @@ bool RegionManager::deviceWrite(RelAddress addr, Buffer buf) {
+@@ -536,10 +1086,15 @@ bool RegionManager::deviceWrite(RelAddress addr, Buffer buf) {
  }
  
  bool RegionManager::deviceWrite(RelAddress addr, BufferView view) {
@@ -4157,7 +4269,7 @@ index 6d6c3fd..da229e3 100644
      return false;
    }
    physicalWrittenCount_.add(bufSize);
-@@ -582,6 +1052,28 @@ void RegionManager::flush() {
+@@ -582,6 +1137,40 @@ void RegionManager::flush() {
  }
  
  void RegionManager::getCounters(const CounterVisitor& visitor) const {
@@ -4169,6 +4281,18 @@ index 6d6c3fd..da229e3 100644
 +    visitor("navy_bc_sr_no_free", srNoFreeCount_.get());
 +    visitor("navy_bc_sr_adoptions", srAdoptCount_.get());
 +    visitor("navy_bc_floor_protects", floorProtectCount_.get());
++    visitor("navy_bc_sfifo_demotions", sfifoDemoteCount_.get());
++    if (sfifoSel_) {
++      std::vector<uint64_t> segN(sfifoRatio_.size(), 0);
++      for (uint32_t sr = 0; sr < numSRs_; sr++) {
++        if (srInPool_[sr] && srSeg_[sr] < segN.size()) {
++          segN[srSeg_[sr]]++;
++        }
++      }
++      for (size_t s = 0; s < segN.size(); s++) {
++        visitor(folly::sformat("navy_bc_sr_segment_{}_srs", s), segN[s]);
++      }
++    }
 +    visitor("navy_bc_floor_overrides", floorOverrideCount_.get());
 +    for (uint16_t p = 0; p < owned_.size() && p < 16; p++) {
 +      visitor(folly::sformat("navy_bc_placement_{}_srs", p), owned_[p]);
@@ -4187,7 +4311,7 @@ index 6d6c3fd..da229e3 100644
            CounterVisitor::CounterType::RATE);
    visitor("navy_bc_reclaim_time", reclaimTimeCountUs_.get(),
 diff --git a/cachelib/navy/block_cache/RegionManager.h b/cachelib/navy/block_cache/RegionManager.h
-index 6c6fc74..cead48f 100644
+index 6c6fc74..3f9a3d4 100644
 --- a/cachelib/navy/block_cache/RegionManager.h
 +++ b/cachelib/navy/block_cache/RegionManager.h
 @@ -16,6 +16,9 @@
@@ -4208,7 +4332,7 @@ index 6c6fc74..cead48f 100644
  #include "cachelib/navy/block_cache/EvictionPolicy.h"
  #include "cachelib/navy/block_cache/Region.h"
  #include "cachelib/navy/block_cache/Types.h"
-@@ -59,6 +63,25 @@ using RegionCleanupCallback =
+@@ -59,6 +63,31 @@ using RegionCleanupCallback =
  // Controls the allocation of regions, status (open for read/write), and
  // eviction. Region manager doesn't have internal locks. External caller must
  // take care of locking.
@@ -4229,12 +4353,18 @@ index 6c6fc74..cead48f 100644
 +  // placements fed by first inserts, higher for reinsertion placements.
 +  // Empty = all 0. Independent of what the placement id stores.
 +  std::vector<uint16_t> placementSegment;
++  // segmented FIFO ratio (empty = not SFIFO); needed by the capacity-floor
++  // selector, which re-implements SFIFO at SR granularity
++  std::vector<unsigned int> sfifoRatio;
++  // reinsertion SRs: segment = 1 + #thresholds strictly below the average
++  // hit count of the objects reinserted into the SR (empty = segment 1)
++  std::vector<uint64_t> sfifoHitThresholds;
 +};
 +
  class RegionManager {
   public:
    // Constructs a Region Manager.
-@@ -93,7 +116,8 @@ class RegionManager {
+@@ -93,7 +122,8 @@ class RegionManager {
                  std::unique_ptr<EvictionPolicy> policy,
                  uint32_t numInMemBuffers,
                  uint16_t numPriorities,
@@ -4244,7 +4374,7 @@ index 6c6fc74..cead48f 100644
    RegionManager(const RegionManager&) = delete;
    RegionManager& operator=(const RegionManager&) = delete;
  
-@@ -245,7 +269,45 @@ class RegionManager {
+@@ -245,7 +275,55 @@ class RegionManager {
    // Returns OpenStatus::Ready if all the operations are successful;
    // OpenStatus::Retry otherwise.
    std::pair<OpenStatus, std::unique_ptr<CondWaiter>> getCleanRegion(
@@ -4263,6 +4393,16 @@ index 6c6fc74..cead48f 100644
 +  // eviction policy is LRU) instead of by the EvictionPolicy object.
 +  void setCapacityPolicy(std::shared_ptr<CapacityPolicy> p);
 +  uint32_t ownedSRs(uint16_t placement) const;
++
++  // a reinserted object with `hits` hits was written into region `rid`
++  // (feeds the SR's representative hit count for its SFIFO segment)
++  void noteReinsertHits(RegionId rid, uint32_t hits) {
++    if (superRegionMode() && srHitSum_) {
++      const uint32_t sr = superRegionOf(rid);
++      srHitSum_[sr].fetch_add(hits, std::memory_order_relaxed);
++      srHitCnt_[sr].fetch_add(1, std::memory_order_relaxed);
++    }
++  }
 +
 +  void setSubRegionReclaimedCallback(std::function<void(bool)> cb) {
 +    subRegionReclaimedCb_ = std::move(cb);
@@ -4291,7 +4431,7 @@ index 6c6fc74..cead48f 100644
  
    // Finish all pending jobs
    void drain();
-@@ -285,6 +347,12 @@ class RegionManager {
+@@ -285,6 +363,12 @@ class RegionManager {
    void doReclaim();
    void doFlushInternal(RegionId rid);
  
@@ -4304,7 +4444,7 @@ index 6c6fc74..cead48f 100644
    bool deviceWrite(RelAddress addr, BufferView buf);
  
    bool isValidIORange(uint32_t offset, uint32_t size) const;
-@@ -297,6 +365,60 @@ class RegionManager {
+@@ -297,6 +381,72 @@ class RegionManager {
    void resetEvictionPolicy();
  
    const uint16_t numPriorities_{};
@@ -4347,6 +4487,18 @@ index 6c6fc74..cead48f 100644
 +  std::vector<uint64_t> srSealSeq_;
 +  std::unique_ptr<std::atomic<uint64_t>[]> srLastAccess_;
 +  uint64_t sealSeqCounter_{0};
++  // SFIFO segment per SR (policy object or native selector)
++  uint16_t segmentOfLocked(uint32_t sr);
++  void rebalanceNativeSfifoLocked();
++  const std::vector<unsigned int> sfifoRatio_;
++  const std::vector<uint64_t> sfifoHitThr_;
++  bool sfifoSel_{false};
++  std::vector<uint16_t> srSeg_;
++  std::vector<uint64_t> srSegSeq_;
++  uint64_t segSeqCounter_{0};
++  std::unique_ptr<std::atomic<uint64_t>[]> srHitSum_;
++  std::unique_ptr<std::atomic<uint64_t>[]> srHitCnt_;
++  mutable AtomicCounter sfifoDemoteCount_;
 +  mutable AtomicCounter floorProtectCount_;
 +  mutable AtomicCounter floorOverrideCount_;
 +  mutable AtomicCounter srAdoptCount_;
@@ -5059,10 +5211,10 @@ index 0000000..d3e661b
 +} // namespace facebook::cachelib::navy
 diff --git a/cachelib/navy/common/RuConfig.h b/cachelib/navy/common/RuConfig.h
 new file mode 100644
-index 0000000..218fcda
+index 0000000..bb15a49
 --- /dev/null
 +++ b/cachelib/navy/common/RuConfig.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,55 @@
 +#pragma once
 +#include <cstdint>
 +#include <string>
@@ -5092,6 +5244,9 @@ index 0000000..218fcda
 +  uint8_t reinsertPlacement{0};
 +  // placement ids available to BlockCache (0 = unlimited)
 +  uint16_t maxPlacementIds{0};
++  // SR mode + SFIFO: reinsertion SRs get segment 1 + #thresholds below the
++  // average hit count of their reinserted objects (empty = segment 1)
++  std::vector<uint64_t> sfifoHitThresholds;
 +  // per-placement capacity floors (block_cache/CapacityPolicy.h)
 +  std::string capacityPolicy; // "" = off, "static"
 +  std::vector<double> capacityFloors;
