@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CacheLib RU改造まとめ</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mute:#6b6a65;--line:#d9d6cc;--card:#fff;--acc:#2f5d8a;--acc2:#a4532b;--ok:#3d7a4a;--warn:#a4532b;--code:#f1efe8}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#17181a;--fg:#e9e7e1;--mute:#a19f98;--line:#3a3b3e;--card:#202124;--acc:#7fb0e0;--acc2:#e09a72;--ok:#7cc48a;--warn:#e09a72;--code:#2a2b2e}}
+:root[data-theme="dark"]{--bg:#17181a;--fg:#e9e7e1;--mute:#a19f98;--line:#3a3b3e;--card:#202124;--acc:#7fb0e0;--acc2:#e09a72;--ok:#7cc48a;--warn:#e09a72;--code:#2a2b2e}
+body{background:var(--bg);color:var(--fg);font:15px/1.7 system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;margin:0}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:19px;margin:40px 0 10px;border-bottom:1px solid var(--line);padding-bottom:4px}
+h3{font-size:16px;margin:22px 0 6px}
+p,li{color:var(--fg)}.mute{color:var(--mute)}
+code,pre{background:var(--code);border-radius:4px;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
+code{padding:1px 4px}pre{padding:10px 12px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}
+th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
+.bug{border-left:4px solid var(--warn)}.good{border-left:4px solid var(--ok)}
+svg{width:100%;height:auto}svg text{fill:var(--fg);font:12px system-ui,sans-serif}
+.tw{overflow-x:auto}
+</style>
+</head>
+<body><main>
+<h1>CacheLib v20240621 改造まとめ</h1>
+<p class="mute">統計軸の拡張 / oracleGeneral 再生 / 元サイズの Navy 伝達 / SuperRegion(RU) 管理 / BigHash RU 削除 — 2026-11-09。パッチ: <code>cachelib-v20240621-ru-stats.patch</code>(35 ファイル, +1.8k 行)</p>
+
+<h2>更新 (第 2 版)</h2>
+<div class="card good">
+<ul>
+<li><b>SR 単位の退避で LRU / FIFO / Segmented FIFO を選べるように修正しました。</b> 代表 ID(SR 先頭 subRegion)を既存の EvictionPolicy に track/touch させます。LRU ではヒット時に SR を touch し、SFIFO は SR の placement を segment として使います。実測ヒット率は LRU 21.31% / FIFO 21.12% / SFIFO 21.01%。ただし SR 数が少ないと退避候補が 1 個しかなく、ポリシー差は出ません(§4)。</li>
+<li><b>等価性の確認:</b> Region 256MiB(numPriorities=2)と SR 256MiB / sub 16MiB(II)を比べると、Hit 25.81% / 26.04%、Evicts 3.585M / 3.570M、reinsertion 357,614 / 358,782 で一致しました。<b>clean=1 だと両者とも再挿入が 100% 失敗します</b>(元の CacheLib 自体の性質)。</li>
+<li><b>II = ヒント数 + 1(共有隔離 PID)</b>を既定にしました。ヒントごとに分ける版は <code>"ii_per_hint"</code>。</li>
+<li><b>DRAM アクセス回数ヒント</b>: <code>navyPlacementAccessThresholds</code>。ヒント = サイズクラス × アクセスクラス。ObjectInfo の bit1–15 に DRAM ヒット数を保存します。</li>
+<li><b>PID 統合・再分割 API</b>: <code>BlockCache::instance()-&gt;setHintPlacement(h,p)</code> / <code>closePlacement(p)</code> / <code>placementBytesWritten(p)</code>。使用例として <code>--placement_merge_at_ops</code>。</li>
+<li>全 generator 共通で <code>GET bytes / missBytes / byteMiss%</code> の合計行を追加しました(UserCounters でも出力)。oracle 再生は ampFactor で bytes が正確に 2 倍になることを確認済み。</li>
+<li>Trim 用に <code>RegionManager::superRegionRange(sr)</code> / <code>subRegionRange(sr,n)</code> を追加しました(バイト範囲)。</li>
+<li><b>BigHash をログ構造化しました</b>(<code>navyBigHashRuMode</code>)。旧 LBA wipe 方式は撤去済みです(下記)。</li>
+</ul></div>
+
+<h2>BigHash ログ構造化 (第 3 版)</h2>
+<div class="card">
+<p><b>仕組み:</b> 論理バケット→物理スロットの対応表を持ちます(バケットあたり 14B、1.5GiB の BigHash で約 5.5MB)。バケットの書込は subRegion 大(16MiB = 4096 バケット)のバッチバッファへ追記し、満杯になったら 1 回のデバイス書込で出します。書込ヘッドが次の RU に入ると、最新コピーがその RU にあるバケットだけを空にします(RU 単位の削除)。読出はデバイスを読んだ後に対応表を再確認するので、途中でスロットが再利用されても誤読しません(stale 判定 135 回)。書込は時刻順・連続になるので、FDP の物理 RU 配置と揃います。</p>
+<p><b>実測</b>(小オブジェクト 85%、8M ops、BC は SR モードで同一):</p>
+<table>
+<tr><th></th><th>in-place(元)</th><th>ログ構造</th></tr>
+<tr><td>NVM Hit Ratio</td><td>42.08%</td><td><b>19.84%</b></td></tr>
+<tr><td>BigHash 在中アイテム</td><td>2,460,370</td><td><b>412,720</b></td></tr>
+<tr><td>BigHash 退避</td><td>523,681</td><td>4,157,675</td></tr>
+<tr><td>デバイス書込の単位</td><td>4KiB ランダム</td><td>16MiB 連続 × 1184 回(= physical_written と完全一致)</td></tr>
+</table>
+<p><b>根本原因(容量崩壊):</b> 1 件挿入するたびに 4KiB のバケット全体がヘッドへ移動し、RU 退避は「しばらく書き換えられていないバケット」を丸ごと消します。3 RU 構成だと、生き残るのは直近 2 RU 分の書込(約 26 万回)で触られたバケットだけです。393k バケット中おおよそ 393k×(1−e<sup>−0.67</sup>) ≈ 19 万が上限で、しかも退避後に入った少数のアイテムしか持ちません。in-place 方式は全バケットを常に満たしたまま、バケット内で古いものから押し出すので、利用率が根本的に違います。</p>
+<p><b>選択肢:</b> (a) RU 退避時に生存バケットを先頭へコピーする GC(論理バケット数を減らして過剰領域を確保。WA = 1/(1−利用率)。FairyWREN 型)、(b) DRAM 上でバケットごとに挿入をまとめて書く(Kangaroo の KLog 型。1 回のバケット書込に多数のアイテムを載せる)、(c) 両方。既定(<code>navyBigHashRuMode: false</code>)は in-place のままで、影響はありません。</p>
+</div>
+
+<h2>Nemo (簡易版) — 第 4 版</h2>
+<div class="card good">
+<p>切替: <code>"navyBigHashMode": "inplace" | "log" | "nemo"</code>、<code>navyNemoSetGroupSizeMB</code>(既定 64)、<code>navyNemoFlushThreshold</code>(既定 = SG 内セット数の半分)、<code>navyNemoHotFraction</code>(0.3)。実装は <code>navy/bighash/NemoCache.{h,cpp}</code> で、Engine として BigHash と差し替わります。</p>
+<ul>
+<li>Set-Group(SG): 4KiB のセット(BigHash の Bucket 形式)の集まり。キーはどの SG でも同じ位置 <code>hash % セット数</code> に入ります(小さいハッシュ空間 → 衝突させて充填率を上げる)。</li>
+<li>DRAM に SG を 2 つ持ちます(OLD = 次に flush、NEW = OLD のセットが満杯のときの受け皿)。溢れた挿入の数がしきい値に達したら、OLD を 1 回の連続書込で flash に出します。</li>
+<li>flash 上の SG は FIFO のリングです。書込先スロットにある最古の SG を退避し、古い 30% の区間でヒットした hot オブジェクトは、より新しいコピーが無いことを Bloom filter で確認したうえで、flush 中の SG に再挿入します。</li>
+<li>索引は (SG, セット) ごとの Bloom filter で、全部 DRAM に置きます(論文の flash 上の索引プールは省略)。削除は tombstone で行います。</li>
+</ul>
+<table>
+<tr><th>8M ops / 小オブジェクト 85%</th><th>in-place</th><th>log</th><th>nemo th=256</th><th>nemo th=4096</th><th>nemo th=8192</th></tr>
+<tr><td>NVM Hit</td><td>42.02%</td><td>19.77%</td><td>29.61%</td><td>37.14%</td><td><b>38.93%</b></td></tr>
+<tr><td>セット充填率</td><td>—</td><td>—</td><td>38.2%</td><td>62.6%</td><td><b>69.7%</b></td></tr>
+<tr><td>BigHash の flash 書込量</td><td>16.29 GB</td><td>19.88 GB</td><td>6.51 GB</td><td>3.56 GB</td><td><b>3.02 GB (−81%)</b></td></tr>
+<tr><td>get/s</td><td>177,964</td><td>156,265</td><td>81,608</td><td>93,332</td><td>95,978</td></tr>
+</table>
+<p class="mute">in-place は RU に揃えないため BigHash 容量が 14% 大きい(1.84 vs 1.61 GB)。それを踏まえるとヒット率差はおおむね容量差の範囲です。</p>
+<p><b>未対応・課題:</b> flash 上の索引(PBFG)なし、hotness の冷却なし、永続化なし。</p>
+</div>
+
+<h2>第 6 版: 再挿入・FDP 順序・SFIFO</h2>
+<div class="card good">
+<ul>
+<li><b>PI 再挿入の victim SR 採用:</b> reclaim 中の SR は先頭から空になっていくので、空いた subRegion を reclaim スレッド自身の再挿入先として使い(PID は増やさない)、reclaim が終わったらその PID の open SR として残します。通常の挿入は reclaim が終わるまで待ちます。PI・clean=1 での再挿入失敗率は 8.1% → 4.4〜6.8%(2 回測定、成功 431k → 451k)。buffer を 12 に増やしても 6.4% で、残りの原因は未特定です。</li>
+<li><b>RUH Update の順序保証:</b> SR を開いた時点ではなく、<b>SR の最初の書込の直前</b>に、その PID の直前の SR の全 subRegion が書き終わったことを確認してから <code>updateReclaimUnit(handle)</code> を呼びます(待ちが 200ms を超えたら <code>navy_bc_ruh_order_timeouts</code> に計上。実測 0)。直前の SR の最後の書込が新しい RU に混ざることを防ぎます。</li>
+<li><b>SFIFO のセグメント:</b> PID ではなく「初回挿入の SR = 0 / 再挿入(II)の SR = 上位」にしました。PI ではセグメントは 1 つで FIFO と同じです。</li>
+<li><b>SR 256MiB(退避候補 約 7 個)でのポリシー比較</b>(II, clean=2, 6M ops): LRU 22.67% / FIFO 22.80% / <b>SFIFO 23.05%</b>。SR 単位の LRU は FIFO と差が出ません(どの SR にも常にヒットがあり、最近性が SR 間でほとんど差を持たない)。</li>
+</ul></div>
+
+<h2>Nemo 非同期 flush — 第 5 版</h2>
+<div class="card good">
+<p>DRAM の SG を 3 つ(NEW / OLD / FLUSHING)にし、flusher スレッドが「最古スロットを引退 → 読み出して hot を FLUSHING に再挿入 → 連続書込 → 公開」を行います。排他ロックは役割の入れ替えと公開の一瞬だけで、デバイス I/O 中は取りません。FLUSHING を変更するのは flusher だけで、削除は NEW 側の tombstone で隠します。</p>
+<table>
+<tr><th>同条件 8M ops</th><th>in-place</th><th>nemo 同期</th><th>nemo 非同期</th><th>+ couldExist</th></tr>
+<tr><td>get/s</td><td>177,964</td><td>95,978</td><td>107,484</td><td><b>157,542</b></td></tr>
+<tr><td>NVM Hit</td><td>42.02%</td><td>38.93%</td><td>38.99%</td><td>38.92%</td></tr>
+<tr><td>BigHash の flash 書込量</td><td>16.29 GB</td><td>3.02 GB</td><td>3.02 GB</td><td>3.02 GB</td></tr>
+</table>
+<p><b>計測で分かったボトルネック(perf):</b> CPU 時間の 43% が kernel の futex wake で、発生源は Navy の <code>ThreadPoolExecutor::enqueueWithKey</code> でした。Nemo の <code>couldExist()</code> が常に true を返していたため、ミスになる GET まで全部が非同期ジョブとして投入されていました。in-place BigHash はここで Bloom filter によって門前払いします。DRAM SG と Bloom filter で判定するように直しました。</p>
+<p><b>途中で見つけたデッドロック:</b> eviction コールバック(NvmCache 側)を Nemo のロックを持ったまま呼んでいました。<code>couldExist</code> でロック順が循環し、4.65M ops で停止しました。BigHash と同じく、ロックを解放してからコールバックを呼ぶように修正しました。</p>
+</div>
+
+<h2>0. 結論</h2>
+<table>
+<tr><th>機能</th><th>状態</th><th>検証</th></tr>
+<tr><td>時間 / 書込バイト / Op 回数の 3 軸 progress・warmup・stop(OR 併用, 別ファイル)</td><td>完成</td><td>byte 停止・time 停止・op 停止を実走で確認</td></tr>
+<tr><td>全 generator 共通: GET の 2 のべき乗サイズビン別ヒット率・バイトミス率</td><td>完成</td><td>t1 出力</td></tr>
+<tr><td>oracleGeneral zstd 再生(producer/consumer, SPSC, 32 オブジェクトバッチ, 固定長キー)</td><td>完成</td><td>単体テスト + トレース総和と bytes / chunks が完全一致</td></tr>
+<tr><td>origSize / 代表フラグを CacheValue 経由で Navy へ</td><td>完成</td><td><code>navy_bc_header_miss = 0</code></td></tr>
+<tr><td>BlockCache SuperRegion 管理・placement ヒント・PI/II・FDP RU API</td><td>完成(永続化非対応)</td><td>SR open/seal/reclaim が循環、ユーザー提案サイズで 6M ops 完走</td></tr>
+<tr><td>BigHash RU 単位削除(≥2 RU 必須)</td><td>完成</td><td>wipe 8 回、wipe 済みアイテム数 ≈ 退避数</td></tr>
+<tr><td>Placement ID の統合・縮小</td><td>未実装(言及のみ)</td><td>§6</td></tr>
+</table>
+<div class="card"><b>main と v20240621、どちらを使うか:</b> v20240621 を推奨します。論文の再現性は「固定タグ + パッチ」で担保でき、Navy の挿入経路(<code>insert()</code> の中に value がある)も改造しやすいからです。main は <code>allocateForInsert</code> 分離や <code>allocatorsPerPriority</code> などで構造が変わっていて、移植コストが大きくなります。なお Ubuntu 24.04 では <code>contrib/build.sh</code> に OS 判定を 1 語足す必要がありました(パッチに含めています)。</div>
+
+<h2>1. 構造: SuperRegion = 旧 Region、subRegion = バッファ単位</h2>
+<svg viewBox="0 0 940 300" role="img" aria-label="SuperRegion diagram">
+ <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mute)"/></marker></defs>
+ <text x="10" y="18">NVMe デバイス (例: 4608MiB, SR=512MiB, subRegion=16MiB)</text>
+ <rect x="10" y="28" width="40" height="40" fill="none" stroke="var(--mute)"/><text x="14" y="52">meta</text>
+ <g>
+  <rect x="52" y="28" width="110" height="40" fill="var(--acc)" opacity=".25" stroke="var(--acc)"/><text x="60" y="52">SR0 open p=0</text>
+  <rect x="164" y="28" width="110" height="40" fill="var(--acc)" opacity=".25" stroke="var(--acc)"/><text x="172" y="52">SR1 open p=1</text>
+  <rect x="276" y="28" width="110" height="40" fill="var(--acc)" opacity=".25" stroke="var(--acc)"/><text x="284" y="52">SR2 open p=2</text>
+  <rect x="388" y="28" width="110" height="40" fill="var(--acc2)" opacity=".25" stroke="var(--acc2)"/><text x="396" y="52">SR3 sealed</text>
+  <rect x="500" y="28" width="110" height="40" fill="none" stroke="var(--ok)"/><text x="508" y="52">SR4 free</text>
+ </g>
+ <rect x="612" y="28" width="318" height="40" fill="var(--code)" stroke="var(--mute)"/><text x="620" y="52">BigHash 3 RU (placement 0) — RU 単位で wipe</text>
+ <text x="52" y="90" class="mute">↓ SR1 の中身: 32 subRegion を先頭から順に使う</text>
+ <g transform="translate(52,100)">
+  <rect width="26" height="34" fill="var(--acc)" opacity=".55"/><rect x="28" width="26" height="34" fill="var(--acc)" opacity=".55"/><rect x="56" width="26" height="34" fill="var(--acc)" opacity=".55"/>
+  <rect x="84" width="26" height="34" fill="none" stroke="var(--acc)" stroke-dasharray="3 2"/><text x="86" y="22">buf</text>
+  <rect x="112" width="26" height="34" fill="none" stroke="var(--line)"/><rect x="140" width="26" height="34" fill="none" stroke="var(--line)"/><text x="172" y="22">… ×32</text>
+ </g>
+ <text x="300" y="118">書込: subRegion 大の in-mem buffer に詰め、満杯で flush</text>
+ <text x="300" y="136">読出: subRegion 内オフセットで 1 件ずつ(元の CacheLib と同じ)</text>
+ <text x="10" y="180">ライフサイクル(SR 単位)</text>
+ <g transform="translate(10,192)">
+  <rect width="120" height="34" rx="6" fill="none" stroke="var(--ok)"/><text x="30" y="22">free</text>
+  <line x1="122" y1="17" x2="178" y2="17" stroke="var(--mute)" marker-end="url(#a)"/><text x="126" y="10">open(pid)</text>
+  <rect x="180" width="160" height="34" rx="6" fill="none" stroke="var(--acc)"/><text x="190" y="22">open: subRegion 払出</text>
+  <line x1="342" y1="17" x2="398" y2="17" stroke="var(--mute)" marker-end="url(#a)"/><text x="344" y="10">全 flush</text>
+  <rect x="400" width="120" height="34" rx="6" fill="none" stroke="var(--acc2)"/><text x="424" y="22">sealed(FIFO)</text>
+  <line x1="522" y1="17" x2="578" y2="17" stroke="var(--mute)" marker-end="url(#a)"/><text x="524" y="10">reclaim</text>
+  <rect x="580" width="240" height="34" rx="6" fill="none" stroke="var(--warn)"/><text x="588" y="22">32 subRegion を一括退避 / PI 再挿入</text>
+  <path d="M700,36 C700,80 60,80 60,36" fill="none" stroke="var(--mute)" marker-end="url(#a)"/><text x="330" y="78">updateReclaimUnit / onReclaimUnitFreed (FDP フック)</text>
+ </g>
+</svg>
+<ul>
+<li>1 つの placement が同時に開ける SR は 1 個。全 subRegion を払い出し終えると次の free SR を開きます(<code>RegionManager::getCleanRegionSR</code>)。</li>
+<li>退避は SR 単位の FIFO で行い、元の LRU/FIFO policy は SR モードでは使いません。<b>R=1・placement 1 個の SR モード = Region 単位 FIFO</b> になります。SR モードを off にすれば既存コードには一切入らず、priority も容量配分も元のままです。</li>
+<li>subRegion サイズは SR の約数かつ 16〜256MiB に自動補正します(指定値に最も近いもの。例: 20MiB → 16MiB)。</li>
+<li>FDP: placement ごとに <code>allocatePlacementHandle()</code> を取り、書込にはその SR の handle を使います。<code>Device::updateReclaimUnit(handle)</code> と <code>onReclaimUnitFreed(off,len)</code> は既定では何もしない仮想関数なので、ioctl を差し込んでください。</li>
+</ul>
+
+<h2>2. 元サイズの伝達経路</h2>
+<svg viewBox="0 0 940 120" role="img" aria-label="origSize flow">
+ <defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mute)"/></marker></defs>
+ <g font-size="12">
+ <rect x="5" y="30" width="150" height="50" rx="6" fill="none" stroke="var(--acc)"/><text x="14" y="52">generator</text><text x="14" y="70">req.origSize / isRep</text>
+ <rect x="190" y="30" width="160" height="50" rx="6" fill="none" stroke="var(--acc)"/><text x="198" y="52">setKey → Cache::allocate</text><text x="198" y="70">CacheValue 先頭 8B</text>
+ <rect x="385" y="30" width="160" height="50" rx="6" fill="none" stroke="var(--acc)"/><text x="393" y="52">NvmItem blob0 offset0</text><text x="393" y="70">(DRAM→NVM 無変換)</text>
+ <rect x="580" y="30" width="170" height="50" rx="6" fill="none" stroke="var(--acc2)"/><text x="588" y="52">BlockCache::insert</text><text x="588" y="70">probe → hint → placement</text>
+ <rect x="785" y="30" width="150" height="50" rx="6" fill="none" stroke="var(--acc2)"/><text x="793" y="52">rep だけ 1 と数える</text><text x="793" y="70">SplitThreshold 集積</text>
+ <line x1="157" y1="55" x2="188" y2="55" stroke="var(--mute)" marker-end="url(#b)"/><line x1="352" y1="55" x2="383" y2="55" stroke="var(--mute)" marker-end="url(#b)"/><line x1="547" y1="55" x2="578" y2="55" stroke="var(--mute)" marker-end="url(#b)"/><line x1="752" y1="55" x2="783" y2="55" stroke="var(--mute)" marker-end="url(#b)"/>
+ </g>
+</svg>
+<p>カナリア(flags の上位 16bit)で自己検証します。レイアウトがずれると <code>navy_bc_header_miss</code> が増えるので、誤分類が黙って続くことはありません。<code>sizeof(CacheValue)</code> は 24→32B になりますが、<code>getSize()=max(size,32)</code> なので割当サイズは変わりません。</p>
+
+<h2>3. 実測で見つけた 3 つの不具合と根本原因</h2>
+<div class="card bug"><h3>① in-mem buffer 枯渇デッドロック</h3>
+<p><b>現象:</b> II(3 ヒント×2 = 6 placement)で 0.04M ops のまま停止し、<code>Failed to assign buffers. All buffers(2)</code> が出続けた。<br>
+<b>根本原因:</b> 開いている region は満杯になるまで buffer を 1 つ専有する。placement 数 &gt; buffer 数だと、全 buffer が「半端に開いた region」に握られて誰も flush できない。元の CacheLib でも <code>numPriorities</code> を増やすと起きる潜在問題。<br>
+<b>修正:</b> <code>numInMemBuffers ≥ 2 × placements</code> に自動で引き上げる。</p></div>
+<div class="card bug"><h3>② reset 時に全 SR が「sealed」扱いになる</h3>
+<p><b>計測ログ:</b> 起動直後、どの SR も open されていないのに <code>sealed sr=0..4</code> が出ていた。<br>
+<b>根本原因:</b> <code>RegionManager::reset()</code> → <code>resetEvictionPolicy()</code> が全 region に <code>track()</code> を呼ぶ(元実装では「空 region を policy に登録する」意味)。SR モードでは track = 「flush 完了」なので、全 SR が free と sealed の両方に入り、<b>開いている SR を回収</b>して状態が壊れた。<br>
+<b>修正:</b> SR モードの <code>resetEvictionPolicy</code> は SR 状態の初期化だけを行い、track しない。</p></div>
+<div class="card bug"><h3>③ seal されても reclaim が起動しない</h3>
+<p><b>根本原因:</b> reclaim の予約を「領域要求時」にしか行っていなかった。全 writer が free SR 待ちで寝た後に SR が seal されても、起こす人がいない。<br>
+<b>修正:</b> <code>markRegionSealedSR</code> 自体が不足分の reclaim を予約する。</p></div>
+<div class="card good"><b>修正後(ユーザー提案サイズ, 6M ops):</b> SR open 82 / reclaim 77、header_miss 0、BigHash wipe 8 回 = 831,536 アイテム(BigHash 退避 831,583 とほぼ一致)。ヒット率 23.5%。</div>
+
+<h2>4. ご提案のサイズ設定について</h2>
+<table>
+<tr><th>項目</th><th>提案</th><th>実際に必要だった調整</th></tr>
+<tr><td>DRAM</td><td>512MiB</td><td>そのまま OK</td></tr>
+<tr><td>SR</td><td>512MiB</td><td>OK(subRegion は 16MiB に自動補正)</td></tr>
+<tr><td>NVM</td><td>4GiB</td><td><b>4608MiB</b>(4GiB + 1 SR)。先頭のメタデータ(約 20〜23MB)が BC から引かれるため、BC 2.5GiB が 2.0GiB(4 SR)に切り下がり、条件 <code>SR数 ≥ placement数 + clean + 1 = 5</code> を満たせずエラーになった</td></tr>
+<tr><td>BigHash:BC</td><td>3:5</td><td><code>navyBigHashSizePct</code> は整数なので 37.5% は指定できない。<b>38</b> を指定すると RU 境界に切り下げられ、ちょうど 3 RU = 1.5GiB になる</td></tr>
+<tr><td>reinsert</td><td>—</td><td>3 ヒントで II にすると 6 placement → BC 5 SR では足りない。<b>PI</b> にするか SR を増やす</td></tr>
+</table>
+<pre>"cacheSizeMB": 512, "nvmCacheSizeMB": 4608, "navyBigHashSizePct": 38,
+"navySuperRegionSizeMB": 512, "navyRegionSizeMB": 16, "navyCleanSuperRegions": 1,
+"navyPlacementSizeThresholds": [2048, 12000], "navyReinsertPlacement": "pi",
+"navyMaxPlacementIds": 7, "navyBigHashRuMode": true, "printNvmCounters": true,
+"nvmCachePaths": ["/dev/shm/navy.dev"]   ← 評価はメモリ上(SSD に負荷をかけない)</pre>
+
+<h2>5. 使い方</h2>
+<h3>統計軸(cachebench 引数)</h3>
+<table>
+<tr><th>軸</th><th>progress</th><th>warmup</th><th>stop(正常終了)</th><th>出力ファイル</th></tr>
+<tr><td>時間</td><td><code>--progress</code> (秒)</td><td><code>--warmup_seconds</code></td><td><code>--stop_seconds</code></td><td><code>--progress_stats_file</code></td></tr>
+<tr><td>書込バイト</td><td><code>--progress_bytes</code></td><td><code>--warmup_bytes</code></td><td><code>--stop_bytes</code></td><td><code>--progress_bytes_stats_file</code></td></tr>
+<tr><td>Op</td><td><code>--progress_ops</code></td><td><code>--warmup_ops</code></td><td><code>--stop_ops</code></td><td><code>--progress_ops_stats_file</code></td></tr>
+</table>
+<p>byte 軸は既定で logical bytes(<code>--byte_axis_device</code> で device bytes)。サンプリング周期は <code>--progress_poll_ms</code>(既定 1000)。各ブロックは「Allocator Stats / Since Last / Since Warmup / Throughput(サイズビン別 GET を含む) / generator 統計」で、各ファイルの最後に FINAL を書く。stop はどの軸でも先に到達したもので止まる(OR)。既存の <code>--timeout_seconds</code> は従来どおり「異常終了」扱い。</p>
+<h3>oracleGeneral 再生</h3>
+<pre>"generator": "oracle-general-replay", "traceFileName": "x.oracleGeneral.zst",
+"cachePieceSize": 65536, "enableLookaside": true, "timestampFactor": 1,
+"replayGeneratorConfig": { "oracleTrackUnique": true, "oracleFastForward": 0 }</pre>
+<p>出力: オブジェクト単位の full / partial ヒット、chunk・byte ヒット、head/tail ヒット、log2 ビン別の表、トレースの distinct 個数・バイト量(<code>oracleTrackUnique</code>, distinct 1 件あたり約 16B)、io(展開バイト数、キュー待ち回数)、NVM warmup 後の差分。</p>
+
+<h2>6. 未対応・今後の課題(正直に)</h2>
+<ul>
+<li><b>Placement ID の統合・縮小</b>(PID ごとの書込帯域が RU の Open 時間上限に満たない場合に、ヒントを PID に束ねる機能): 未実装。<code>navy_bc_placement_N_inserts</code> を時間軸で見ると、帯域判定の入力になる。</li>
+<li><b>PI の「待つ」</b>: reclaim スレッドの中で free SR を待つと、自分しか作れない SR を待つ自己デッドロックになる。そのため現状は再挿入失敗(<code>navy_bc_reinsertion_errors</code>, 実測 8.8%)として数えている。<code>navyCleanSuperRegions</code> を増やせば減る。</li>
+<li><b>DRAM 上のアクセス回数をヒントに使う</b>: NvmItem にその情報が無い。CacheValue の空き領域に載せる設計は可能だが未実装。</li>
+<li><b>BigHash の一括書込</b>: BigHash はバケット単位の in-place 更新が本質で、未対応。RU 削除は世代番号を上げる方式なので書込は 0。ただし wipe と同時に走っていた挿入 1 件が失われうる(統計上は無視できる)。</li>
+<li>SR モードは <b>persist/recover 非対応</b>(再起動時は空から開始)。</li>
+<li>リクエスト単位のヒント(SplitThreshold の拡張)は API を分けてあり、<code>BlockCache::hintOf</code> の 1 箇所を差し替えればよい。</li>
+</ul>
+</main></body></html>
