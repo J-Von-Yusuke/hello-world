@@ -1,3 +1,43 @@
+diff --git a/libCacheSim/bin/cachesim/sim.c b/libCacheSim/bin/cachesim/sim.c
+index 3a96cd4..84e9db2 100644
+--- a/libCacheSim/bin/cachesim/sim.c
++++ b/libCacheSim/bin/cachesim/sim.c
+@@ -41,6 +41,13 @@ void simulate(reader_t *reader, cache_t *cache, int report_interval,
+       print_head_requests(req, req_cnt);
+     }
+ 
++    if (req_is_special_delete(reader)) {
++      /* a request of delete-obj-size: the object goes, nothing is counted */
++      cache->remove(cache, req->obj_id);
++      read_one_req(reader, req);
++      continue;
++    }
++
+     req->clock_time -= start_ts;
+     if (req->clock_time <= warmup_sec) {
+       cache->get(cache, req);
+diff --git a/libCacheSim/bin/cli_reader_utils.c b/libCacheSim/bin/cli_reader_utils.c
+index 4b36a6f..5c7e5ff 100644
+--- a/libCacheSim/bin/cli_reader_utils.c
++++ b/libCacheSim/bin/cli_reader_utils.c
+@@ -154,6 +154,17 @@ void parse_reader_params(const char *reader_params_str,
+     } else if (strcasecmp(key, "obj-id-is-num") == 0) {
+       params->obj_id_is_num_set = true;
+       params->obj_id_is_num = is_true(value);
++    } else if (strcasecmp(key, "drop-obj-size") == 0 ||
++               strcasecmp(key, "delete-obj-size") == 0) {
++      /* e.g. drop-obj-size=4294967295 (or -1): requests of this size are
++       * removed from the trace; delete-obj-size: they are deletes */
++      params->special_size_op =
++          strncasecmp(key, "drop", 4) == 0 ? SIZE_OP_DROP : SIZE_OP_DELETE;
++      params->special_obj_size = strtoll(value, &end, 0);
++      if (end == value || *end != '\0') {
++        ERROR("%s=%s is not a number\n", key, value);
++        exit(1);
++      }
+     } else if (strcasecmp(key, "block-size") == 0) {
+       params->block_size = (int)(strtol(value, &end, 0));
+     } else if (strcasecmp(key, "header") == 0 ||
 diff --git a/libCacheSim/cache/CMakeLists.txt b/libCacheSim/cache/CMakeLists.txt
 index 49968ff..422135f 100644
 --- a/libCacheSim/cache/CMakeLists.txt
@@ -476,10 +516,10 @@ index 9c32668..fdeb31f 100644
  #ifdef __cplusplus
 diff --git a/libCacheSim/cache/eviction/flash/RegionFlash.c b/libCacheSim/cache/eviction/flash/RegionFlash.c
 new file mode 100644
-index 0000000..976520b
+index 0000000..e02b113
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/RegionFlash.c
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,449 @@
 +//
 +//  RegionFlash.c — DRAM (object unit) + SSD two-tier flash cache, ported from
 +//  cachesim (docs/re-DESIGN.md §1, §6).
@@ -728,7 +768,9 @@ index 0000000..976520b
 +static bool RegionFlash_remove(cache_t *cache, obj_id_t obj_id) {
 +  cache_obj_t *o = hashtable_find_obj_id(cache->hashtable, obj_id);
 +  if (o == NULL) return false;
-+  rf_invalidate_all((rf_params_t *)cache->eviction_params, o);
++  rf_params_t *p = (rf_params_t *)cache->eviction_params;
++  CNT(p, delete_objs, MD(o).cls, 1);  // a delete op (reader delete-obj-size): not a request
++  rf_invalidate_all(p, o);
 +  return true;
 +}
 +
@@ -5868,7 +5910,7 @@ index 0000000..8cd7a6a
 +    on_evict, epoch, bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/regionflash_internal.h b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 new file mode 100644
-index 0000000..6267e59
+index 0000000..ab878ba
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 @@ -0,0 +1,270 @@
@@ -5961,7 +6003,7 @@ index 0000000..6267e59
 +  X(chunk_pieces) X(chunk_write_aborts) X(chunk_loss_head)                     \
 +  X(chunk_loss_other) X(chunk_orphan_bytes) X(fdp_gc_copy_bytes)              \
 +  X(fdp_ru_erases) X(nand_write_bytes) X(reinsert_objs) X(reinsert_bytes)      \
-+  X(reinsert_stops)
++  X(reinsert_stops) X(delete_objs)
 +
 +typedef struct {
 +#define X(n) uint64_t n;
@@ -7998,6 +8040,167 @@ index 322b97d..96b1703 100644
  cache_t *GDSF_init(const common_cache_params_t ccache_params,
                     const char *cache_specific_params);
  
+diff --git a/libCacheSim/include/libCacheSim/reader.h b/libCacheSim/include/libCacheSim/reader.h
+index f7db219..9b2e79c 100644
+--- a/libCacheSim/include/libCacheSim/reader.h
++++ b/libCacheSim/include/libCacheSim/reader.h
+@@ -35,9 +35,19 @@ extern "C" {
+ 
+ /* this provides the info about each field or col in csv and binary trace
+  * the field index start with 1 */
++/* what to do with a request whose obj_size is special_obj_size. Some traces
++ * store -1 (4294967295 as uint32) in the size of operations that are not a GET
++ * (e.g. Meta CDN): DROP removes the request from the trace, DELETE hands it to
++ * the simulator as OP_DELETE (the object is removed from the cache and the
++ * request is not counted). Set with the reader parameters
++ * "drop-obj-size=4294967295" or "delete-obj-size=4294967295". */
++typedef enum { SIZE_OP_NONE = 0, SIZE_OP_DROP = 1, SIZE_OP_DELETE = 2 } size_op_e;
++
+ typedef struct {
+   bool ignore_obj_size;
+   bool ignore_size_zero_req;
++  int special_size_op;      // size_op_e
++  int64_t special_obj_size; // the size value; -1 also matches UINT32_MAX
+   bool obj_id_is_num;
+   bool obj_id_is_num_set;  // whether the user has passed this parameter
+   int64_t cap_at_n_req;    // only process at most n_req requests
+@@ -132,6 +142,14 @@ typedef struct reader {
+   /* if true, ignore the obj_size in the trace, and use size one */
+   bool ignore_obj_size;
+ 
++  /* requests of special_obj_size: see size_op_e. special_hit: the request
++   * read last is one (set by read_one_req); n_special: requests dropped or
++   * turned into a delete so far */
++  int special_size_op;
++  int64_t special_obj_size;
++  bool special_hit, special_prev_delete;
++  uint64_t n_special;
++
+   // used by block cache trace to split a large request into multiple requests
+   // to multiple blocks
+   int32_t block_size;
+@@ -233,6 +251,12 @@ static inline bool obj_id_is_num(const reader_t *const reader) {
+  */
+ int read_one_req(reader_t *reader, request_t *req);
+ 
++/* true if the request read last is a delete made from special_obj_size
++ * ("delete-obj-size=": the simulator removes the object, not a request) */
++static inline bool req_is_special_delete(const reader_t *reader) {
++  return reader->special_hit && reader->special_size_op == SIZE_OP_DELETE;
++}
++
+ /**
+  * read one request from reader/trace, stored the info in pre-allocated req
+  * @param reader
+diff --git a/libCacheSim/traceReader/reader.c b/libCacheSim/traceReader/reader.c
+index 7705e57..2b08b03 100644
+--- a/libCacheSim/traceReader/reader.c
++++ b/libCacheSim/traceReader/reader.c
+@@ -71,6 +71,10 @@ reader_t *setup_reader(const char *const trace_path,
+   reader->n_read_req = 0;
+   reader->ignore_size_zero_req = true;
+   reader->ignore_obj_size = false;
++  reader->special_size_op = SIZE_OP_NONE;
++  reader->special_obj_size = 0;
++  reader->special_hit = reader->special_prev_delete = false;
++  reader->n_special = 0;
+   reader->cloned = false;
+   reader->item_size = 0;
+   reader->obj_id_is_num = false;
+@@ -89,6 +93,8 @@ reader_t *setup_reader(const char *const trace_path,
+       reader->init_params.binary_fmt_str = strdup(init_params->binary_fmt_str);
+ 
+     reader->ignore_obj_size = init_params->ignore_obj_size;
++    reader->special_size_op = init_params->special_size_op;
++    reader->special_obj_size = init_params->special_obj_size;
+     reader->ignore_size_zero_req = init_params->ignore_size_zero_req;
+     reader->obj_id_is_num = init_params->obj_id_is_num;
+     reader->obj_id_is_num_set = init_params->obj_id_is_num_set;
+@@ -233,7 +239,7 @@ reader_t *setup_reader(const char *const trace_path,
+  * @param req
+  * @return 0 if success, 1 if end of file
+  */
+-int read_one_req(reader_t *const reader, request_t *const req) {
++static int read_one_req_impl(reader_t *const reader, request_t *const req) {
+   if (reader->mmap_offset >= reader->file_size) {
+     DEBUG("read_one_req: end of file, current mmap_offset %zu, file size %zu\n",
+           reader->mmap_offset, reader->file_size);
+@@ -331,6 +337,12 @@ int read_one_req(reader_t *const reader, request_t *const req) {
+     reader->sampler = sampler;
+   }
+ 
++  /* a request of the special size (before ignore_obj_size changes it) */
++  reader->special_hit =
++      reader->special_size_op != SIZE_OP_NONE && status == 0 && req->valid &&
++      (req->obj_size == reader->special_obj_size ||
++       (reader->special_obj_size == -1 && req->obj_size == UINT32_MAX));
++
+   if (reader->ignore_obj_size) {
+     req->obj_size = 1;
+   }
+@@ -440,7 +452,7 @@ int go_back_two_req(reader_t *const reader) {
+  * @param c
+  * @return 0 on success
+  */
+-int read_one_req_above(reader_t *const reader, request_t *req) {
++static int read_one_req_above_impl(reader_t *const reader, request_t *req) {
+   if (reader->n_req_left > 0) {
+     reader->n_req_left -= 1;
+     req->clock_time = reader->last_req_clock_time;
+@@ -448,13 +460,52 @@ int read_one_req_above(reader_t *const reader, request_t *req) {
+   }
+ 
+   if (go_back_two_req(reader) == 0) {
+-    return read_one_req(reader, req);
++    return read_one_req_impl(reader, req);
+   } else {
+     req->valid = false;
+     return 1;
+   }
+ }
+ 
++/* requests of the special size (reader.h, size_op_e): SIZE_OP_DROP reads on
++ * (in the same direction) until a request is not one, SIZE_OP_DELETE keeps it
++ * and marks it OP_DELETE. A loop, not recursion: a long run of them must not
++ * overflow the stack. */
++static int special_size_filter(reader_t *const reader, request_t *req,
++                               int status) {
++  while (reader->special_hit && reader->special_size_op == SIZE_OP_DROP) {
++    reader->n_special += 1;
++    reader->n_read_req -= 1; /* a dropped request is not a request read */
++    status = reader->read_direction == READ_FORWARD
++                 ? read_one_req_impl(reader, req)
++                 : read_one_req_above_impl(reader, req);
++  }
++  if (reader->special_hit) {
++    req->op = OP_DELETE;
++    reader->special_prev_delete = true;
++    reader->n_special += 1;
++  }
++  return status;
++}
++
++static inline void special_size_reset_op(reader_t *const reader,
++                                         request_t *req) {
++  if (reader->special_prev_delete) {
++    req->op = OP_NOP;
++    reader->special_prev_delete = false;
++  }
++}
++
++int read_one_req(reader_t *const reader, request_t *const req) {
++  special_size_reset_op(reader, req);
++  return special_size_filter(reader, req, read_one_req_impl(reader, req));
++}
++
++int read_one_req_above(reader_t *const reader, request_t *req) {
++  special_size_reset_op(reader, req);
++  return special_size_filter(reader, req, read_one_req_above_impl(reader, req));
++}
++
+ /**
+  * skip the next following N elements in the trace,
+  * @param reader
 diff --git a/scripts/regionflash/diff_ref.py b/scripts/regionflash/diff_ref.py
 new file mode 100644
 index 0000000..81f2703
