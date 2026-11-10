@@ -1,0 +1,19 @@
+#  ★ ここにトレースのパスを書く。タブ区切り（スペースではなく Tab）。先頭が # の行と空行は無視。
+#  列:
+#    name      半角英数と _ だけの短い名前（結果フォルダ名になる。重複不可）
+#    path      トレースファイルの絶対パス（このキットを動かす PC 上のパス）
+#    format    oracleGeneral | csv | twr | lcs ... （libCacheSim が読める形式名。空 = oracleGeneral）
+#              oracleGeneral 以外は traceConv で oracleGeneral(.zst) に変換してから使う（work/traces/ に保存）
+#    params    format が csv などのときの読み方（traceConv の --trace-type-params。例: time-col=1,obj-id-col=2,obj-size-col=3,delimiter=,）。不要なら空
+#    category  種類のまとめ単位。例: CDN / KV / Block / Object
+#    source    出典（会社・データセット名）。例: Meta / Tencent / Wikimedia / Twitter / MSR / Alibaba
+#    ssd       この SSD 容量だけ個別指定。例: 240G（固定）/ 30%（トレースのフットプリント比）。空 = config.sh の SSD_DEFAULT
+#    note      メモ（集計には使わない）
+#  集計は category と source ごとに行う（列を足せば、その列でもまとめられる: ./run.sh aggregate --by category,source,<列名>）
+name	path	format	params	category	source	ssd	note
+#meta_nha	/data/meta_rnha.oracleGeneral.zst	oracleGeneral		CDN	Meta	240G	size=2^32-1 は埋め値（自動で fix 変換される）
+#wiki_cdn	/data/wikimedia_cdn.oracleGeneral.zst	oracleGeneral		CDN	Wikimedia
+#tencent_cdn	/data/tencent_cdn.oracleGeneral.zst	oracleGeneral		CDN	Tencent
+#twitter_kv	/data/twitter_cluster52.oracleGeneral.zst	oracleGeneral		KV	Twitter
+#alibaba_blk	/data/alibaba_block.oracleGeneral.zst	oracleGeneral		Block	Alibaba
+#my_csv	/data/x.csv	csv	time-col=1,obj-id-col=2,obj-size-col=3,delimiter=,	KV	MyCompany
