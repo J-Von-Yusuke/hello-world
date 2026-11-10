@@ -444,10 +444,22 @@ index ddc0568..e97bd01 100644
                 : 1;
    } catch (const std::exception& e) {
 diff --git a/cachelib/cachebench/runner/CacheStressor.h b/cachelib/cachebench/runner/CacheStressor.h
-index cbc8204..97b84f6 100644
+index cbc8204..71083a5 100644
 --- a/cachelib/cachebench/runner/CacheStressor.h
 +++ b/cachelib/cachebench/runner/CacheStressor.h
-@@ -340,7 +340,8 @@ class CacheStressor : public Stressor {
+@@ -223,6 +223,11 @@ class CacheStressor : public Stressor {
+   }
+ 
+  private:
++  static uint64_t steadyNs() {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++               std::chrono::steady_clock::now().time_since_epoch())
++        .count();
++  }
+   static std::string genHardcodedString() {
+     const std::string s = "The quick brown fox jumps over the lazy dog. ";
+     std::string val;
+@@ -340,13 +345,15 @@ class CacheStressor : public Stressor {
            }
            auto lock = chainedItemAcquireUniqueLock(*key);
            result = setKey(pid, stats, key, *(req.sizeBegin), req.ttlSecs,
@@ -457,7 +469,14 @@ index cbc8204..97b84f6 100644
  
            break;
          }
-@@ -370,11 +371,14 @@ class CacheStressor : public Stressor {
+         case OpType::kLoneGet:
+         case OpType::kGet: {
+           ++stats.get;
++          const uint64_t reqT0 = steadyNs(); // request latency (all chunks)
+ 
+           auto slock = chainedItemAcquireSharedLock(*key);
+           auto xlock = decltype(chainedItemAcquireUniqueLock(*key)){};
+@@ -370,11 +377,18 @@ class CacheStressor : public Stressor {
                slock = {};
                xlock = chainedItemAcquireUniqueLock(*key);
                setKey(pid, stats, key, *(req.sizeBegin), req.ttlSecs,
@@ -470,10 +489,22 @@ index cbc8204..97b84f6 100644
 +            cache_->recordHit(it);
            }
 +          stats.recordGet(*(req.sizeBegin), result == OpResultType::kGetHit);
++          stats.recordRequestChunk(req.isRep, req.isLast, req.origSize,
++                                   *(req.sizeBegin),
++                                   result == OpResultType::kGetHit, reqT0,
++                                   steadyNs());
  
            break;
          }
-@@ -480,7 +484,9 @@ class CacheStressor : public Stressor {
+@@ -461,6 +475,7 @@ class CacheStressor : public Stressor {
+         break;
+       }
+     }
++    stats.closeRequest(); // a request still open when the thread stops
+     wg_->markFinish();
+   }
+ 
+@@ -480,7 +495,9 @@ class CacheStressor : public Stressor {
        size_t size,
        uint32_t ttlSecs,
        const std::unordered_map<std::string, std::string>& featureMap,
@@ -484,7 +515,7 @@ index cbc8204..97b84f6 100644
      // check the admission policy first, and skip the set operation
      // if the policy returns false
      if (config_.admPolicy && !config_.admPolicy->accept(featureMap)) {
-@@ -488,7 +494,7 @@ class CacheStressor : public Stressor {
+@@ -488,7 +505,7 @@ class CacheStressor : public Stressor {
      }
  
      ++stats.set;
@@ -494,10 +525,10 @@ index cbc8204..97b84f6 100644
        ++stats.setFailure;
        return OpResultType::kSetFailure;
 diff --git a/cachelib/cachebench/runner/ProgressTracker.cpp b/cachelib/cachebench/runner/ProgressTracker.cpp
-index 68703c7..ad00815 100644
+index 68703c7..e12ffc7 100644
 --- a/cachelib/cachebench/runner/ProgressTracker.cpp
 +++ b/cachelib/cachebench/runner/ProgressTracker.cpp
-@@ -16,70 +16,175 @@
+@@ -16,70 +16,185 @@
  
  #include "cachelib/cachebench/runner/ProgressTracker.h"
  
@@ -646,6 +677,14 @@ index 68703c7..ad00815 100644
 +      st.render(s.warm, o);
 +      o << "== Ops Since Warmup == " << (tp.ops - s.warmTp.ops) << std::endl;
 +    }
++    if (tp.reqs.req > 0) {
++      o << "== Request Stats Since Last ==" << std::endl;
++      (tp.reqs - s.prevReq).render((elapsedNs - s.prevNs) / 1e9, o);
++      if (s.warmed) {
++        o << "== Request Stats Since Warmup ==" << std::endl;
++        (tp.reqs - s.warmTp.reqs).render(0, o);
++      }
++    }
 +    o << "== Throughput Stats ==" << std::endl;
 +    tp.render(elapsedNs, o);
 +    stressor_.renderWorkloadGeneratorStats(elapsedNs, o);
@@ -656,6 +695,8 @@ index 68703c7..ad00815 100644
 +  // extra snapshots that report relative to the last PROGRESS
 +  if (std::strcmp(tag, "PROGRESS") == 0) {
 +    s.prev = st;
++    s.prevReq = tp.reqs;
++    s.prevNs = elapsedNs;
 +  }
 +}
  
@@ -719,7 +760,7 @@ index 68703c7..ad00815 100644
  } // namespace cachebench
  } // namespace cachelib
 diff --git a/cachelib/cachebench/runner/ProgressTracker.h b/cachelib/cachebench/runner/ProgressTracker.h
-index 34005bc..17d4d0a 100644
+index 34005bc..1c305c3 100644
 --- a/cachelib/cachebench/runner/ProgressTracker.h
 +++ b/cachelib/cachebench/runner/ProgressTracker.h
 @@ -15,6 +15,9 @@
@@ -732,7 +773,7 @@ index 34005bc..17d4d0a 100644
  #include <string>
  
  #include "cachelib/cachebench/runner/Stressor.h"
-@@ -23,24 +26,72 @@
+@@ -23,24 +26,74 @@
  namespace facebook {
  namespace cachelib {
  namespace cachebench {
@@ -790,6 +831,8 @@ index 34005bc..17d4d0a 100644
 +    Stats prev{};
 +    Stats warm{};
 +    ThroughputStats warmTp{};
++    RequestStats prevReq{}; // request stats at the last PROGRESS
++    uint64_t prevNs{0};
 +  };
 +
    void work() override;
@@ -865,7 +908,7 @@ index 6e2629f..fb64bd5 100644
    // for testings using folly::Benchmark
    // in addition to running time, cachebench has several metrics
 diff --git a/cachelib/cachebench/runner/Stressor.cpp b/cachelib/cachebench/runner/Stressor.cpp
-index 3852bee..6798450 100644
+index 3852bee..649970f 100644
 --- a/cachelib/cachebench/runner/Stressor.cpp
 +++ b/cachelib/cachebench/runner/Stressor.cpp
 @@ -21,6 +21,7 @@
@@ -876,7 +919,7 @@ index 3852bee..6798450 100644
  #include "cachelib/cachebench/workload/BlockChunkReplayGenerator.h"
  #include "cachelib/cachebench/workload/KVReplayGenerator.h"
  #include "cachelib/cachebench/workload/OnlineGenerator.h"
-@@ -44,6 +45,12 @@ ThroughputStats& ThroughputStats::operator+=(const ThroughputStats& other) {
+@@ -44,11 +45,81 @@ ThroughputStats& ThroughputStats::operator+=(const ThroughputStats& other) {
    addChainedFailure += other.addChainedFailure;
    couldExistOp += other.couldExistOp;
    couldExistOpFalse += other.couldExistOpFalse;
@@ -887,9 +930,78 @@ index 3852bee..6798450 100644
 +    binMissBytes[b] += other.binMissBytes[b];
 +  }
    ops += other.ops;
++  reqs += other.reqs;
++
++  return *this;
++}
  
++RequestStats& RequestStats::operator+=(const RequestStats& o) {
++  req += o.req;
++  split += o.split;
++  chunks += o.chunks;
++  hitChunks += o.hitChunks;
++  bytes += o.bytes;
++  missBytes += o.missBytes;
++  fullHit += o.fullHit;
++  partialHit += o.partialHit;
++  headHit += o.headHit;
++  tailHit += o.tailHit;
++  zeroSize += o.zeroSize;
++  maxSize = std::max(maxSize, o.maxSize);
++  lat += o.lat;
    return *this;
-@@ -101,6 +108,37 @@ void ThroughputStats::render(uint64_t elapsedTimeNs, std::ostream& out) const {
+ }
+ 
++RequestStats RequestStats::operator-(const RequestStats& o) const {
++  RequestStats r = *this;
++  r.req -= o.req;
++  r.split -= o.split;
++  r.chunks -= o.chunks;
++  r.hitChunks -= o.hitChunks;
++  r.bytes -= o.bytes;
++  r.missBytes -= o.missBytes;
++  r.fullHit -= o.fullHit;
++  r.partialHit -= o.partialHit;
++  r.headHit -= o.headHit;
++  r.tailHit -= o.tailHit;
++  r.zeroSize -= o.zeroSize;
++  r.lat = lat - o.lat;
++  return r;
++}
++
++void RequestStats::render(double secs, std::ostream& out) const {
++  auto p = [](uint64_t a, uint64_t b) { return b ? 100.0 * a / b : 0.0; };
++  const double headP = p(headHit, split), tailP = p(tailHit, split);
++  out << folly::sformat(
++      "requests         : {:,} (split >1 chunk: {:,} = {:.2f}%)\n"
++      "chunks           : {:,} ({:.2f} chunk/request)",
++      req, split, p(split, req), chunks, req ? double(chunks) / req : 0.0);
++  if (secs > 0) {
++    out << folly::sformat("  {:,} requests/s  {:,} chunks/s",
++                          static_cast<uint64_t>(req / secs),
++                          static_cast<uint64_t>(chunks / secs));
++  }
++  out << folly::sformat(
++      "\nchunkHit         : {:.2f}% ({:,} hit chunks / {:,} chunks)\n"
++      "byteHit          : {:.2f}% ({:,} hit B / {:,} GET B)  byteMiss {:.2f}%\n"
++      "requestFullHit   : {:.2f}% (all chunks hit)\n"
++      "requestPartialHit: {:.2f}% (some chunks hit, not all)\n"
++      "head vs tail     : head {:.2f}% tail {:.2f}% delta {:+.2f}%pt "
++      "(split requests)\n"
++      "missBytes        : {:.3f} GB ({:,} B)\n"
++      "anomaly          : zeroSize {:,} (requests of 0 B) maxRequestSize {:,} B\n"
++      "request latency (us):\n",
++      p(hitChunks, chunks), hitChunks, chunks, p(bytes - missBytes, bytes),
++      bytes - missBytes, bytes, p(missBytes, bytes), p(fullHit, req),
++      p(partialHit, req), headP, tailP, headP - tailP, missBytes / 1e9,
++      missBytes, zeroSize, maxSize);
++  lat.render(out);
++}
++
+ void ThroughputStats::render(uint64_t elapsedTimeNs, std::ostream& out) const {
+   const double elapsedSecs = elapsedTimeNs / static_cast<double>(1e9);
+ 
+@@ -101,6 +172,41 @@ void ThroughputStats::render(uint64_t elapsedTimeNs, std::ostream& out) const {
    if (addChained > 0) {
      outFn("addChained", addChainedPerSec, "success", addChainedSuccessRate);
    }
@@ -924,10 +1036,14 @@ index 3852bee..6798450 100644
 +          << std::endl;
 +    }
 +  }
++  if (reqs.req > 0) {
++    out << "== Request Stats (cumulative) ==" << std::endl;
++    reqs.render(elapsedSecs, out);
++  }
  }
  
  void ThroughputStats::render(uint64_t elapsedTimeNs,
-@@ -135,12 +173,22 @@ void ThroughputStats::render(uint64_t elapsedTimeNs,
+@@ -135,12 +241,22 @@ void ThroughputStats::render(uint64_t elapsedTimeNs,
    counters["addChain_per_sec"] = addChainedPerSec;
    counters["addChain_suc_rate"] =
        util::narrow_cast<uint64_t>(addChainedSuccessRate);
@@ -951,10 +1067,41 @@ index 3852bee..6798450 100644
      return std::make_unique<KVReplayGenerator>(config);
    } else if (config.generator == "block-replay") {
 diff --git a/cachelib/cachebench/runner/Stressor.h b/cachelib/cachebench/runner/Stressor.h
-index 1b0e4b4..67ced80 100644
+index 1b0e4b4..ce5ef53 100644
 --- a/cachelib/cachebench/runner/Stressor.h
 +++ b/cachelib/cachebench/runner/Stressor.h
-@@ -46,6 +46,22 @@ struct ThroughputStats {
+@@ -23,6 +23,7 @@
+ 
+ #include "cachelib/cachebench/cache/Cache.h"
+ #include "cachelib/cachebench/util/Config.h"
++#include "cachelib/cachebench/util/LatencyHistogram.h"
+ 
+ namespace facebook {
+ namespace cachelib {
+@@ -30,6 +31,22 @@ namespace cachebench {
+ 
+ // Stats to track the throughput of the stress run. This is updated on every
+ // stressor thread and aggregated once the stress test finishes.
++// GET requests as the client sees them. A request (one trace record / one
++// block IO / one synthetic op) may be split into several chunk GETs; the
++// generator marks the first and last chunk with Request::isRep / isLast.
++struct RequestStats {
++  uint64_t req{0}, split{0}, chunks{0}, hitChunks{0};
++  uint64_t bytes{0}, missBytes{0};
++  uint64_t fullHit{0}, partialHit{0}, headHit{0}, tailHit{0};
++  uint64_t zeroSize{0}, maxSize{0}; // maxSize: running max (not windowed)
++  LatencyHistogram lat;
++
++  RequestStats& operator+=(const RequestStats& o);
++  RequestStats operator-(const RequestStats& o) const;
++  // secs > 0 adds requests/s and chunks/s
++  void render(double secs, std::ostream& out) const;
++};
++
+ struct ThroughputStats {
+   uint64_t set{0}; // number of set operations
+   uint64_t setFailure{0};
+@@ -46,6 +63,72 @@ struct ThroughputStats {
    // current number of ops executed. Read periodically to track progress
    uint64_t ops{0};
  
@@ -972,6 +1119,56 @@ index 1b0e4b4..67ced80 100644
 +      ++binGetMiss[b];
 +      binMissBytes[b] += size;
 +    }
++  }
++
++  RequestStats reqs;
++  // per-thread state of the request in progress (not aggregated)
++  struct InFlight {
++    bool open{false};
++    uint64_t t0{0}, tEnd{0}, bytes{0};
++    uint32_t chunks{0}, hits{0}, origSize{0};
++    bool headHit{false}, lastHit{false};
++  } cur;
++
++  // one chunk GET of a request: [t0, t1] in ns
++  void recordRequestChunk(bool isRep, bool isLast, uint32_t origSize,
++                          uint64_t size, bool hit, uint64_t t0, uint64_t t1) {
++    if (isRep) {
++      closeRequest(); // generators that do not know the last chunk
++      cur = InFlight{};
++      cur.open = true;
++      cur.t0 = t0;
++      cur.origSize = origSize;
++      cur.headHit = hit;
++    } else if (!cur.open) {
++      return; // started before the stats (should not happen)
++    }
++    ++cur.chunks;
++    cur.hits += hit;
++    cur.bytes += size;
++    cur.lastHit = hit;
++    cur.tEnd = t1;
++    ++reqs.chunks;
++    reqs.hitChunks += hit;
++    reqs.bytes += size;
++    reqs.missBytes += hit ? 0 : size;
++    if (isLast) closeRequest();
++  }
++  void closeRequest() {
++    if (!cur.open) return;
++    cur.open = false;
++    ++reqs.req;
++    const uint64_t sz = cur.origSize ? cur.origSize : cur.bytes;
++    reqs.zeroSize += sz == 0;
++    reqs.maxSize = std::max(reqs.maxSize, sz);
++    if (cur.hits == cur.chunks) ++reqs.fullHit;
++    else if (cur.hits > 0) ++reqs.partialHit;
++    if (cur.chunks > 1) {
++      ++reqs.split;
++      reqs.headHit += cur.headHit;
++      reqs.tailHit += cur.lastHit;
++    }
++    reqs.lat.add(cur.tEnd - cur.t0);
 +  }
 +
    // operator overload to aggregate multiple instances of ThroughputStats, one
@@ -1117,6 +1314,102 @@ index 96c5967..65f744d 100644
    // For each aggregation field, we track the statistics broken down by
    // specific aggregation values. this map specifies the values for which
    // stats are aggregated by per field.
+diff --git a/cachelib/cachebench/util/LatencyHistogram.h b/cachelib/cachebench/util/LatencyHistogram.h
+new file mode 100644
+index 0000000..0abff3d
+--- /dev/null
++++ b/cachelib/cachebench/util/LatencyHistogram.h
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <folly/Format.h>
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <ostream>
++
++namespace facebook {
++namespace cachelib {
++namespace cachebench {
++
++// Latency histogram in ns: 16 linear bins per power of two, so a bin is at
++// most 1/16 of its value wide (midpoint error <= ~3%). Plain counters, so
++// snapshots can be added and subtracted (cumulative / since warmup / window).
++struct LatencyHistogram {
++  static constexpr uint32_t kBins = 976; // covers 0 .. 2^64 ns
++  std::array<uint64_t, kBins> v{};
++
++  static uint32_t bin(uint64_t ns) {
++    if (ns < 16) return static_cast<uint32_t>(ns);
++    const uint32_t e = 63 - __builtin_clzll(ns);
++    return (e - 3) * 16 + static_cast<uint32_t>((ns >> (e - 4)) & 15);
++  }
++  static double mid(uint32_t i) { // bin midpoint in ns
++    if (i < 16) return i;
++    const uint32_t e = i / 16 + 3;
++    return double((16ull + i % 16) << (e - 4)) + double(1ull << (e - 4)) / 2;
++  }
++  void add(uint64_t ns) { ++v[bin(ns)]; }
++  LatencyHistogram& operator+=(const LatencyHistogram& o) {
++    for (uint32_t i = 0; i < kBins; i++) v[i] += o.v[i];
++    return *this;
++  }
++  LatencyHistogram operator-(const LatencyHistogram& o) const {
++    LatencyHistogram r;
++    for (uint32_t i = 0; i < kBins; i++) r.v[i] = v[i] - o.v[i];
++    return r;
++  }
++
++  // one percentile per line, in microseconds
++  void render(std::ostream& out) const {
++    static constexpr std::array<double, 13> kQ{
++        0, 5, 10, 25, 50, 75, 90, 99, 99.9, 99.99, 99.999, 99.9999, 100};
++    static constexpr std::array<const char*, 13> kName{
++        "p0",  "p5",   "p10",   "p25",    "p50",     "p75", "p90",
++        "p99", "p999", "p9999", "p99999", "p999999", "p100"};
++    uint64_t n = 0, cum = 0;
++    for (auto x : v) n += x;
++    if (n == 0) {
++      out << "  (no samples)\n";
++      return;
++    }
++    size_t q = 0;
++    for (uint32_t i = 0; i < kBins && q < kQ.size(); i++) {
++      if (!v[i]) continue;
++      cum += v[i];
++      while (q < kQ.size()) {
++        const uint64_t rank = std::max<uint64_t>(
++            1, static_cast<uint64_t>(std::ceil(kQ[q] / 100.0 * n)));
++        if (rank > cum) break;
++        out << folly::sformat("  {:<8} {:>9}%  {:>14.1f}\n", kName[q],
++                              folly::sformat("{}", kQ[q]), mid(i) / 1e3);
++        q++;
++      }
++    }
++  }
++};
++
++} // namespace cachebench
++} // namespace cachelib
++} // namespace facebook
 diff --git a/cachelib/cachebench/util/NandWrites.cpp b/cachelib/cachebench/util/NandWrites.cpp
 index 91e5c49..8d4e3c3 100644
 --- a/cachelib/cachebench/util/NandWrites.cpp
@@ -1231,10 +1524,10 @@ index fe8f6d5..95f682d 100644
  //                             specified as nvme1n1 or nvme2n1 etc.
  // @param[in] nvmePath         Path to the `nvme` tool. Most users should leave
 diff --git a/cachelib/cachebench/util/Request.h b/cachelib/cachebench/util/Request.h
-index 23d8220..2946d67 100644
+index 23d8220..f09c29a 100644
 --- a/cachelib/cachebench/util/Request.h
 +++ b/cachelib/cachebench/util/Request.h
-@@ -134,6 +134,12 @@ struct Request {
+@@ -134,6 +134,17 @@ struct Request {
    std::vector<size_t>::iterator sizeBegin;
    std::vector<size_t>::iterator sizeEnd;
  
@@ -1243,6 +1536,11 @@ index 23d8220..2946d67 100644
 +  // CacheValue -> visible to Navy (see navy/common/ObjectInfo.h).
 +  uint32_t origSize{0};
 +  bool isRep{true};
++  // last piece of the request (request stats close here). Generators that
++  // only learn this after the op leave it false: the request then closes
++  // when the next isRep op starts. Default isRep = isLast = true: 1 op = 1
++  // request (KV replay, synthetic generators).
++  bool isLast{true};
 +
    // TTL in seconds.
    uint32_t ttlSecs{0};
@@ -1352,12 +1650,27 @@ index af09593..3f78bee 100644
 +
  } // namespace hw
  } // namespace facebook
+diff --git a/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp b/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp
+index 7decd82..308df5e 100644
+--- a/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp
++++ b/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp
+@@ -56,6 +56,10 @@ const Request& BlockChunkReplayGenerator::getReq(
+   if (isNewReq) {
+     blockCacheAdapter_.recordNewReq(*reqWrapper);
+   }
++  // request stats: the last chunk is only known after the op (processReq),
++  // so the request closes when the next one starts
++  reqWrapper->req.isRep = isNewReq;
++  reqWrapper->req.isLast = false;
+ 
+   return reqWrapper->req;
+ }
 diff --git a/cachelib/cachebench/workload/OracleGeneralReplayGenerator.h b/cachelib/cachebench/workload/OracleGeneralReplayGenerator.h
 new file mode 100644
-index 0000000..b00652a
+index 0000000..7d3558f
 --- /dev/null
 +++ b/cachelib/cachebench/workload/OracleGeneralReplayGenerator.h
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,394 @@
 +#pragma once
 +
 +// oracleGeneral zstd trace replay with chunking.
@@ -1394,33 +1707,16 @@ index 0000000..b00652a
 +namespace cachebench {
 +
 +// ------------------------------------------------------------------ stats
-+// Request latency histogram (ns): 16 linear bins per power of two, so a
-+// bin is at most 1/16 of its value wide (midpoint error <= ~3%).
-+struct OgLat {
-+  static constexpr uint32_t kBins = 976; // covers 0 .. 2^64 ns
-+  static uint32_t bin(uint64_t ns) {
-+    if (ns < 16) return static_cast<uint32_t>(ns);
-+    const uint32_t e = 63 - __builtin_clzll(ns);
-+    return (e - 3) * 16 + static_cast<uint32_t>((ns >> (e - 4)) & 15);
-+  }
-+  static double mid(uint32_t i) { // bin midpoint in ns
-+    if (i < 16) return i;
-+    const uint32_t e = i / 16 + 3;
-+    return double((16ull + i % 16) << (e - 4)) + double(1ull << (e - 4)) / 2;
-+  }
-+};
-+
 +struct OgSnap {
 +  static constexpr uint32_t kBins = 33; // 2^0 .. 2^32 (obj_size is uint32)
 +  // Request = one trace record (one GET of one object). A request of size S
-+  // becomes ceil(S / cachePieceSize) chunk GETs; split = more than 1 chunk.
-+  // HeadHit / TailHit / SplitReq count split requests only.
++  // becomes ceil(S / cachePieceSize) chunk GETs. Request totals, head/tail
++  // and latency are in the stressor's RequestStats; this is the by-size view.
 +  enum F {
 +    kObjReq, kObjBytes, kChunkReq, kChunkHit, kHitBytes, kMissBytes,
-+    kFullHit, kPartialHit, kHeadHit, kSplitReq, kTailHit, kNumF
++    kFullHit, kPartialHit, kNumF
 +  };
 +  std::array<std::array<uint64_t, kBins>, kNumF> v{};
-+  std::array<uint64_t, OgLat::kBins> lat{};
 +  uint64_t total(F f) const {
 +    uint64_t s = 0;
 +    for (auto x : v[f]) s += x;
@@ -1430,7 +1726,6 @@ index 0000000..b00652a
 +    OgSnap r;
 +    for (int f = 0; f < kNumF; f++)
 +      for (uint32_t b = 0; b < kBins; b++) r.v[f][b] = v[f][b] - o.v[f][b];
-+    for (uint32_t i = 0; i < OgLat::kBins; i++) r.lat[i] = lat[i] - o.lat[i];
 +    return r;
 +  }
 +};
@@ -1439,18 +1734,14 @@ index 0000000..b00652a
 +struct OgCounters {
 +  std::array<std::array<std::atomic<uint64_t>, OgSnap::kBins>, OgSnap::kNumF>
 +      v{};
-+  std::array<std::atomic<uint64_t>, OgLat::kBins> lat{};
-+  static void inc(std::atomic<uint64_t>& a, uint64_t x) {
++  void add(OgSnap::F f, uint32_t b, uint64_t x) {
++    auto& a = v[f][b];
 +    a.store(a.load(std::memory_order_relaxed) + x, std::memory_order_relaxed);
 +  }
-+  void add(OgSnap::F f, uint32_t b, uint64_t x) { inc(v[f][b], x); }
-+  void addLat(uint64_t ns) { inc(lat[OgLat::bin(ns)], 1); }
 +  void addTo(OgSnap& s) const {
 +    for (int f = 0; f < OgSnap::kNumF; f++)
 +      for (uint32_t b = 0; b < OgSnap::kBins; b++)
 +        s.v[f][b] += v[f][b].load(std::memory_order_relaxed);
-+    for (uint32_t i = 0; i < OgLat::kBins; i++)
-+      s.lat[i] += lat[i].load(std::memory_order_relaxed);
 +  }
 +};
 +
@@ -1501,12 +1792,12 @@ index 0000000..b00652a
 +    if (s.chunk == s.nChunks) {
 +      nextObject(s);
 +    }
-+    if (s.chunk == 0) s.t0 = nowNs(); // request latency starts at chunk 0
 +    OgKey::write(s.key.data(), s.cur.amp, s.cur.objId, s.chunk);
 +    s.lastBytes = ogChunkBytes(s.cur.objSize, s.chunk, chunkSize_);
 +    s.sizes[0] = s.lastBytes;
 +    s.req.origSize = std::max<uint32_t>(s.cur.objSize, 1);
 +    s.req.isRep = (s.chunk == 0);
++    s.req.isLast = (s.chunk + 1 == s.nChunks);
 +    s.req.timestamp = s.cur.ts;
 +    return s.req;
 +  }
@@ -1521,17 +1812,11 @@ index 0000000..b00652a
 +      c.add(OgSnap::kChunkHit, b, 1);
 +      c.add(OgSnap::kHitBytes, b, s.lastBytes);
 +      ++s.objHits;
-+      if (s.chunk == 0 && s.nChunks > 1) c.add(OgSnap::kHeadHit, b, 1);
-+      if (s.chunk > 0 && s.chunk + 1 == s.nChunks) {
-+        c.add(OgSnap::kTailHit, b, 1);
-+      }
 +    } else {
 +      c.add(OgSnap::kMissBytes, b, s.lastBytes);
 +    }
 +    if (++s.chunk == s.nChunks) { // request complete (all its chunk ops)
-+      c.addLat(nowNs() - s.t0);
 +      c.add(OgSnap::kObjReq, b, 1);
-+      if (s.nChunks > 1) c.add(OgSnap::kSplitReq, b, 1);
 +      c.add(OgSnap::kObjBytes, b, std::max<uint32_t>(s.cur.objSize, 1));
 +      if (s.objHits == s.nChunks) c.add(OgSnap::kFullHit, b, 1);
 +      else if (s.objHits > 0) c.add(OgSnap::kPartialHit, b, 1);
@@ -1548,7 +1833,7 @@ index 0000000..b00652a
 +
 +  void renderStats(uint64_t ns, std::ostream& out) const override {
 +    const OgSnap all = aggregate();
-+    out << "== oracleGeneral replay stats (cumulative) ==\n";
++    out << "== oracleGeneral replay by request size (cumulative) ==\n";
 +    renderSnap(all, ns / 1e9, out);
 +    const uint64_t recs = nRecords_.load(), maxSz = maxObjSize_.load();
 +    out << folly::sformat(
@@ -1559,7 +1844,7 @@ index 0000000..b00652a
 +    {
 +      std::lock_guard<std::mutex> g(snapMu_);
 +      if (warmed_) {
-+        out << "== oracleGeneral replay stats (since NVM warmup) ==\n";
++        out << "== oracleGeneral replay by request size (since NVM warmup) ==\n";
 +        renderSnap(all - warm_, 0, out);
 +      }
 +    }
@@ -1588,7 +1873,6 @@ index 0000000..b00652a
 +    c["og_get_bytes"] =
 +        s.total(OgSnap::kHitBytes) + s.total(OgSnap::kMissBytes);
 +    c["og_miss_bytes"] = s.total(OgSnap::kMissBytes);
-+    c["og_split_requests"] = s.total(OgSnap::kSplitReq);
 +    c["og_hit_chunks"] = s.total(OgSnap::kChunkHit);
 +  }
 +
@@ -1620,7 +1904,6 @@ index 0000000..b00652a
 +    Obj cur{};
 +    uint32_t chunk{0}, nChunks{0}, objHits{0}, bin{0};
 +    uint64_t lastBytes{0};
-+    uint64_t t0{0}; // start of the current request (ns)
 +    std::string key = std::string(OgKey::kKeyLen, '0');
 +    std::vector<size_t> sizes{1};
 +    Request req{key, sizes.begin(), sizes.end(), OpType::kGet, 0};
@@ -1738,60 +2021,10 @@ index 0000000..b00652a
 +
 +  static double pct(uint64_t a, uint64_t b) { return b ? 100.0 * a / b : 0.0; }
 +
-+  static uint64_t nowNs() {
-+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-+               std::chrono::steady_clock::now().time_since_epoch())
-+        .count();
-+  }
-+
-+  static void renderSnap(const OgSnap& s, double secs, std::ostream& out) {
++  static void renderSnap(const OgSnap& s, double, std::ostream& out) {
 +    using F = OgSnap;
-+    const uint64_t req = s.total(F::kObjReq), ch = s.total(F::kChunkReq);
-+    const uint64_t split = s.total(F::kSplitReq), hc = s.total(F::kChunkHit);
 +    const uint64_t hb = s.total(F::kHitBytes), mb = s.total(F::kMissBytes);
-+    const double headP = pct(s.total(F::kHeadHit), split);
-+    const double tailP = pct(s.total(F::kTailHit), split);
-+    out << folly::sformat(
-+        "  requests {} (split >1 chunk: {} = {:.2f}%)\n"
-+        "  chunks {} ({:.2f} chunk/request)",
-+        req, split, pct(split, req), ch, req ? double(ch) / req : 0.0);
-+    if (secs > 0) {
-+      out << folly::sformat("  {:.0f} requests/s  {:.0f} chunks/s",
-+                            req / secs, ch / secs);
-+    }
-+    out << folly::sformat(
-+        "\n  chunkHit {:.2f}% ({} hit chunks / {} chunks)\n"
-+        "  byteHit {:.2f}% ({} hit B / {} GET B)  byteMiss {:.2f}%\n"
-+        "  requestFullHit {:.2f}% (all chunks hit)  "
-+        "requestPartialHit {:.2f}% (some, not all)\n"
-+        "  head vs tail (split requests): head {:.2f}% tail {:.2f}% "
-+        "delta {:+.2f}%pt\n"
-+        "  missBytes {:.3f} GB ({} B)\n",
-+        pct(hc, ch), hc, ch, pct(hb, hb + mb), hb, hb + mb, pct(mb, hb + mb),
-+        pct(s.total(F::kFullHit), req), pct(s.total(F::kPartialHit), req),
-+        headP, tailP, headP - tailP, mb / 1e9, mb);
-+    // one request = all of its chunk ops (GET, plus the fill on a miss)
-+    static constexpr std::array<double, 13> kQ{
-+        0, 5, 10, 25, 50, 75, 90, 99, 99.9, 99.99, 99.999, 99.9999, 100};
-+    static constexpr std::array<const char*, 13> kName{
-+        "p0",  "p5",   "p10",   "p25",    "p50",     "p75", "p90",
-+        "p99", "p999", "p9999", "p99999", "p999999", "p100"};
-+    uint64_t n = 0, cum = 0;
-+    for (auto x : s.lat) n += x;
-+    out << "  request latency (us):";
-+    size_t q = 0;
-+    for (uint32_t i = 0; i < OgLat::kBins && q < kQ.size() && n; i++) {
-+      if (!s.lat[i]) continue;
-+      cum += s.lat[i];
-+      while (q < kQ.size()) {
-+        const uint64_t rank = std::max<uint64_t>(
-+            1, static_cast<uint64_t>(std::ceil(kQ[q] / 100.0 * n)));
-+        if (rank > cum) break;
-+        out << folly::sformat(" {} {:.1f}", kName[q], OgLat::mid(i) / 1e3);
-+        q++;
-+      }
-+    }
-+    out << "\n  -- by object size (floor log2) --\n"
++    out << "  -- by request size (floor log2) --\n"
 +        << "  bin      request     reqBytes%  fullHit%  partHit%  chunkHit%  "
 +           "byteHit%  byteMiss%      missBytes\n";
 +    const uint64_t allB = hb + mb;
@@ -2008,6 +2241,21 @@ index 0000000..f37e6f2
 +} // namespace cachebench
 +} // namespace cachelib
 +} // namespace facebook
+diff --git a/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp b/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp
+index 59289bb..3e0edef 100644
+--- a/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp
++++ b/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp
+@@ -57,6 +57,10 @@ const Request& PieceWiseReplayGenerator::getReq(
+   if (isNewReq) {
+     pieceCacheAdapter_.recordNewReq(*reqWrapper);
+   }
++  // request stats: the last piece is only known after the op, so the
++  // request closes when the next one starts
++  reqWrapper->req.isRep = isNewReq;
++  reqWrapper->req.isLast = false;
+ 
+   return reqWrapper->req;
+ }
 diff --git a/cachelib/navy/CMakeLists.txt b/cachelib/navy/CMakeLists.txt
 index 6c02f0d..322adbd 100644
 --- a/cachelib/navy/CMakeLists.txt
