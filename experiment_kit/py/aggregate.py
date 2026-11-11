@@ -52,7 +52,11 @@ for n, v in res.items():
     r["_j"] = j
     r["_v"] = v   # すべての変種（感度の表用）
     rows.append(r)
-if not rows: sys.exit("results/*.json が無い。先に ./run.sh validity")
+if not rows:   # トレース実験の結果が無くても、合成トレースの図だけは作る
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import figures
+    os.makedirs(R, exist_ok=True); fo, nf, png = figures.build(R, [], work, {}, None)
+    sys.exit(f"results/*.json が無い（./run.sh validity がまだ）。合成トレースの図だけ作った: {nf} 枚 → {fo}/index.html" if nf else
+             "results/*.json も合成トレースの結果も無い。先に ./run.sh validity か ./run.sh synth")
 rows.sort(key=lambda r: (r.get("category", ""), r.get("source", ""), r["name"]))
 effkeys = sorted({k[4:] for r in rows for k in r if k.startswith("eff_") and not k.startswith("eff_asis_")},
                  key=lambda k: (k.startswith("d"), k))
@@ -296,3 +300,10 @@ for sec, (nm, ttl) in enumerate((("scaled", "縮小した SSD 想定の負荷（
 H.append("</main></body></html>")
 open(f"{R}/report.html", "w", encoding="utf-8").write("\n".join(H))
 print(f"集計: {len(rows)} 本 → {R}/report.html, per_trace.csv, by_*.csv" + (", synth_summary.csv" if sj else ""))
+
+# ---------------------------------------------------------------- スライド用の図と説明（figs/）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import figures
+fo, nf, png = figures.build(R, rows, work, groups, spearman)
+print(f"図: {nf} 枚 → {fo}/index.html（説明つき）, *.svg" + (", *.png, slides.pptx" if png else
+      "（PNG と slides.pptx は作れなかった: rsvg-convert / cairosvg / inkscape / soffice のどれかを入れる）"))
