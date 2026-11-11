@@ -14,11 +14,13 @@ config.sh  ─┼→ run.sh validity ─────┤
 synth_workloads.txt → run.sh synth → work/synth/*.json
                                       ↓
                        run.sh aggregate → work/results/report.html, per_trace.csv, by_*.csv, synth_summary.csv
+                                          work/results/figs/  スライド用の図（SVG・PNG）、説明（index.html・captions.md）、slides.pptx
 ```
 
 ## 1. 必要なもの
 
 Linux（Windows なら WSL2 の Ubuntu）。`gcc cmake make git python3 libzstd-dev libglib2.0-dev`（Python は標準ライブラリだけ）。
+スライド用の PNG と `slides.pptx` も欲しければ、SVG を PNG にする道具を 1 つと日本語フォントを入れる: `sudo apt install librsvg2-bin fonts-noto-cjk`（`rsvg-convert` の代わりに `cairosvg` / `inkscape` / LibreOffice の `soffice` でもよい）。無くても SVG と説明は出る。
 メモリ: 同時実行数 `P` は既定 `auto` で、変種ごとに空きメモリとトレースの物の数から自動で決まる（§4.1）。ディスクは `work/` に、変換したトレースと出力（トレース 1 本あたり数百 MB〜数 GB）。
 
 ## 2. 手順
@@ -174,6 +176,43 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜nproc に収める
 | `work/results/<name>.<変種>.json` | 1 本の詳細（先頭 N の曲線を含む） |
 | `work/results/synth_summary.csv` | 合成負荷の理論と実測（OHR/BHR） |
 | `work/out/<name>/<変種>/<id>/` | cachesim の生の出力（`P.json` `P.interval.csv` `P.class.csv` `P.sizebin.csv`） |
+| `work/results/figs/` | **スライド用の図と説明**（§6.1） |
+
+### 6.1 スライド用の図（`work/results/figs/`）
+
+`./run.sh aggregate` を実行すると、結果から図がすべて作り直されます。トレースの結果が無く合成トレースの結果だけでも、その分の図は出ます。
+
+| ファイル | 中身 |
+|---|---|
+| `NN_名前.svg` | 図。1600×900（16:9）の白地で、文字はスライドで読める大きさ。PowerPoint に挿入しても拡大で劣化しない |
+| `NN_名前.png` | 同じ図の画像(変換器があるとき) |
+| `index.html` | 全部の図を並べ、図ごとに **要点**(結果の数値から自動で書いた一言)・**読み方**・**定義** を付けたページ |
+| `captions.md` | 説明だけのテキスト(スライドのノートや本文に貼る用) |
+| `slides.pptx` | 1 図 1 枚のスライド。左に図(SVG、古い PowerPoint では PNG)、右に要点と読み方。PNG ができたときだけ作る |
+
+出る図は次のとおりです。トレースが 1 本でも作れる図は、その 1 本で作ります。
+
+| 区分 | 図 | 何が分かるか |
+|---|---|---|
+| 妥当性検証 | BMR の内訳 | 初回アクセス・容量不足・Region 化の余分(collateral)に分けたミス。分類で取り戻せる上限の目安 |
+| | 分類の効果(条件ごとに 1 枚) | トレース × 分類の効果 [pt]。全受け入れ / 予算 3・1 DWPD × 再挿入の有無 |
+| | 条件 × 分類の表(トレースごと) | どの条件でどの分類が効くかを色で一覧 |
+| | 先頭 N 要求での効果の推移(分類ごと) | 部分トレースで全量の値に落ち着くか |
+| | 書いた量で測った効果の推移(分類ごと) | 先頭 W TB の時点(縦の破線)で全量と同じ向きか |
+| | 先頭 W TB 時点と全量(トレースごと、全構成) | 印ごとの効果と全量をつないだ線。予算つきも含む |
+| | 符号が定まる書き込み量(トレースごと) | 何 TB 書けば効果の向きが以後変わらないか。1.5 TB の線との比較 |
+| | 収束に要る割合(トレースごと) | ±0.1 / ±0.02 pt に収まる先頭の割合 |
+| | collateral の推移 | Region 化の損を短いトレースで測れるか |
+| | SSD 書き込み量(トレースごと) | 受け入れと再挿入の内訳、構成ごとの寿命の負担 |
+| | 埋め値の扱いの比較(変種が 2 つ以上のとき) | drop / delete で結論が変わらないか |
+| | グループごとの傾向(`--by` の列ごと) | 種類・出典ごとの効果の平均と最小〜最大 |
+| | 特徴と効果の順位相関(4 本以上のとき) | どんなトレースで分類が効くか |
+| 合成トレース | 理論と実測 | Che 近似のモデルが実測にどこまで合うか(OHR・BHR) |
+| | 負荷ごとの容量とヒット率 | 方式ごとの OHR・BHR の実測(実線)と理論(破線) |
+| | サイズ分類の利得 | OHR は上がるが BHR は下がる、を実測と理論で |
+| | 240 GiB 想定:BMR(`SYNTH_SCALED=1`) | 分類・再挿入の BMR と物単位 LRU、モデルの予測 |
+| | 240 GiB 想定:BMR の時間変化 | 定常に入っているか |
+| | 240 GiB 想定:書き込みの内訳 | 受け入れと再挿入、大物の容量の下限ごと |
 
 ## 7. 制約と注意
 
@@ -187,3 +226,18 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜nproc に収める
 ## 8. 確かめたこと（作成時、WSL）
 
 手元の 4 トレース（Block 3 本と CDN 1 本、`NREQ=2000000`）で `setup → validity → synth → aggregate` を通し、`report.html` と CSV が出ることを確認した。meta は埋め値（size = 2^32−1）を検出して fix 変換し、フットプリントが 19.97 TB（以前の測定の 20.0 TB と一致）になった。CSV を `traceConv` で変換する経路、`SYNTH_SCALED=1` の経路も 200 万要求で通した。**全長のトレースでの所要時間と結果の一致は未確認。**
+
+スライド用の図(2026-11-11)は、次の結果で 45 枚が出ることを確認しました。
+
+- meta nha の全量(drop / delete)
+- msr と tencent の先頭 500 万要求
+- 合成 6 負荷(200 万要求)
+- 縮小版(400 万要求)
+
+| 確認したこと | 結果 |
+|---|---|
+| PNG への変換(LibreOffice) | 1 回約 3 秒 |
+| `slides.pptx` | LibreOffice で PDF に変換でき、45 枚がそろった |
+| 合成トレースの結果だけのとき | 合成トレースの図だけが出た |
+
+見本は `../docs/kit_figs_sample/` にあります。合成トレースは短い長さで回した見本なので、数値は本番の結果ではありません。PowerPoint 本体で開いて確かめたことは、まだありません。
