@@ -27,11 +27,12 @@ EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext
 SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT else [])   # 結果を読む場所（同じ構成は後の場所が優先）
 D = SRC[-1]                                                          # 図と表を書く場所
 BASE = "r256_base"
-ORDER = (["r256_base", "r256_n0", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto"] if EXT else   # ext: CacheLib の閾値違いと提案
+ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto"] if EXT else   # ext: CacheLib の閾値違いと提案
          ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"])   # 図と表に並べる順
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
     "r256_n0": ("CacheLib n=0（書き直しなし）", "CacheLib n=0 (no rewrite)"),
+    "r256_n2": ("CacheLib n=2", "CacheLib n=2"),
     "r256_n3": ("CacheLib n=3", "CacheLib n=3"),
     "ru_base": ("R=RU", "R=RU"),
     "ru_none_auto": ("R=RU＋n=auto（分類なし）", "R=RU + auto n (no class.)"),
@@ -41,7 +42,7 @@ NAME = {
     "r256_ff90_h3": ("R=256MiB＋分類（手動）", "R=256MiB + class. (manual)"),
     "r256_auto": ("R=256MiB＋分類（自動）", "R=256MiB + class. (auto)"),
 }
-COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
+COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
        "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a"}
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
@@ -247,7 +248,45 @@ for n in names:
         svg = tl_fig(n, xkey)
         if svg:
             slug = f"fig_{xkey}_{n}"; open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(svg); tl.append(slug)
-png = to_png(D, list(FIGS) + tl)
+
+# ---------------------------------------------------------------- 交換関係の図（--ext のみ）：横 = SSD 書き込み（CacheLib n=1 = 1）、縦 = ΔBMR [pt]
+#   CacheLib の n=0..3 を線でつなぐ（書き直しを増やすほど書き込みが増え BMR が下がる、という交換関係）。
+#   提案の点がその線の左下にあれば、同じ BMR を少ない書き込みで（同じ書き込みで低い BMR を）出している
+CURVE = [("r256_n0", "n=0"), ("r256_base", "n=1"), ("r256_n2", "n=2"), ("r256_n3", "n=3")]
+PTS = [("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True)]
+
+
+def tradeoff(keys):
+    f = Fig()
+    f.add_legend([(T("CacheLib（R=256MiB）n=0〜3", "CacheLib (R=256MiB) n=0..3"), "#4d4d4d", "line")] +
+                 [(nm(c), COL.get(c, "#888"), "hollow" if hol else "dot") for c, _, hol in PTS if any(c in runs[n]["runs"] for n in keys)])
+    top = f.legend_h() + 50; cols = min(3, len(keys)); rows_ = (len(keys) + cols - 1) // cols
+    W = (1600 - 110 - 30 - 115 * (cols - 1)) // cols; H = (870 - top - 70 * (rows_ - 1)) // rows_
+    for i, n in enumerate(keys):
+        R = runs[n]["runs"]; b = R[BASE]
+        if not TB(b): continue
+        P = lambda c: (TB(R[c]) / TB(b), BMR(R[c]) - BMR(b))
+        cur = [(P(c), lab) for c, lab in CURVE if c in R]
+        dots = [(P(c), c, r, hol) for c, r, hol in PTS if c in R]
+        xs = [p[0] for p, *_ in cur + dots]; ys = [p[1] for p, *_ in cur + dots]
+        cx, cy = i % cols, i // cols
+        box = (110 + cx * (W + 115), top + cy * (H + 70), 110 + cx * (W + 115) + W, top + cy * (H + 70) + H)
+        a = Ax(f, box, xr=(0, max(xs + [1]) * 1.08), yr=span(ys), title=n,
+               xlabel=T("SSD 書き込み（CacheLib n=1 = 1）", "SSD writes (CacheLib n=1 = 1)") if cy == rows_ - 1 and cx == cols // 2 else "",
+               ylabel=T("ΔBMR [pt]（下 = 良い）", "ΔBMR [pt] (lower is better)") if cx == 0 else "")
+        cur.sort(key=lambda t: t[0][0])
+        a.line([p[0] for p, _ in cur], [p[1] for p, _ in cur], "#4d4d4d", w=3, marker=True)
+        for p, lab in cur: f.t(a.X(p[0]) + 10, a.Y(p[1]) - 10, lab, 18, "start", "#4d4d4d")
+        for p, c, r, hol in dots: a.dot(p[0], p[1], COL.get(c, "#888"), r, hollow=hol)
+    return f.svg()
+
+
+tr = []
+if EXT and any("r256_n3" in runs[n]["runs"] or "r256_n0" in runs[n]["runs"] for n in names):
+    open(f"{D}/fig_tradeoff.svg", "w", encoding="utf-8").write(tradeoff(names)); tr.append("fig_tradeoff")
+    for n in names:
+        open(f"{D}/fig_tradeoff_{n}.svg", "w", encoding="utf-8").write(tradeoff([n])); tr.append(f"fig_tradeoff_{n}")
+png = to_png(D, list(FIGS) + tl + tr)
 
 # ---------------------------------------------------------------- 説明のページ
 def mean_of(fn, c):
@@ -260,7 +299,10 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
 <h1>{"追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
-<h2>図：fig_main.svg（3 面まとめ）{" / .png" if png else ""}</h2><img src="fig_main.svg" alt="BMR・SSD 書き込み量・OHR の比較"><h2>図：fig_rel.svg（CacheLib 比の 3 面まとめ）</h2><img src="fig_rel.svg" alt="CacheLib 比の BMR・書き込み・OHR"><p class="m">左 = ΔBMR（構成 − CacheLib、0 = CacheLib、負が良い）。中 = SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い）。右 = ΔOHR（参考）。1 面ずつの図：fig_bmr / fig_write / fig_ohr（値そのもの）、fig_dbmr / fig_nwrite / fig_dohr（CacheLib 比）。</p>
+""" + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
+       "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
+       "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"
+       "点が灰の線より左下にあれば、同じ BMR を少ない書き込みで出している。</p>" if tr else "") + f"""<h2>図：fig_main.svg（3 面まとめ）{" / .png" if png else ""}</h2><img src="fig_main.svg" alt="BMR・SSD 書き込み量・OHR の比較"><h2>図：fig_rel.svg（CacheLib 比の 3 面まとめ）</h2><img src="fig_rel.svg" alt="CacheLib 比の BMR・書き込み・OHR"><p class="m">左 = ΔBMR（構成 − CacheLib、0 = CacheLib、負が良い）。中 = SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い）。右 = ΔOHR（参考）。1 面ずつの図：fig_bmr / fig_write / fig_ohr（値そのもの）、fig_dbmr / fig_nwrite / fig_dohr（CacheLib 比）。</p>
 <p><b>要点</b>（BMR・OHR はトレースの平均、書き込みは合計）：{pts}。</p>
 <p class="m">左 = BMR（低いほど良い）。中 = SSD に書いたバイト（受け入れ＋再挿入＋詰め物、低いほど良い。トレースごとに規模が違うので平均は出さない）。右 = OHR（参考）。
 濃い灰 = 基準（CacheLib 相当、Region 256 MiB、分類なし、再挿入 n=1）。薄い灰 = Region を RU（626.5 MiB）に合わせただけ（DLWA = 1 だが、Region が大きいぶん道連れと書き直しが増える）。
@@ -270,4 +312,4 @@ img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}
        + "".join(f'<h3>{s}</h3><img src="{s}.svg" alt="{s}">' for s in tl) if tl else "") + f"""
 <h2>表：table_main.md / .tex / .csv</h2><pre>{open(f"{D}/table_main.md", encoding="utf-8").read()}</pre></main></body></html>"""
 open(f"{D}/index.html", "w", encoding="utf-8").write(html)
-print(f"paper: {len(names)} 本 → {D}/fig_main.svg・fig_rel.svg（と 1 面ずつ 6 枚）, 時間変化 {len(tl)} 枚（fig_ops_* / fig_wr_*）{'（.png も）' if png else ''}, table_main.(md|tex|csv), index.html")
+print(f"paper: {len(names)} 本 → {D}/fig_main.svg・fig_rel.svg（と 1 面ずつ 6 枚）, 時間変化 {len(tl)} 枚（fig_ops_* / fig_wr_*）{f'、交換関係 {len(tr)} 枚（fig_tradeoff*）' if tr else ''}{'（.png も）' if png else ''}, table_main.(md|tex|csv), index.html")

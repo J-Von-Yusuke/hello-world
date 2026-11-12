@@ -270,7 +270,7 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 | `ru_ff90_h3` / `ru_auto` | RU | 同上の手動 / 自動 |
 | `ru_none_auto` / `r256_none_auto`（切り分け） | RU / 256 MiB | 分類なしで再挿入の閾値の自動化（n=auto）だけ。`*_auto` との差が「分類＋下限」の効果、`*_base` との差が n=auto の効果 |
 
-**追加の比較（paper-ext）**：CacheLib（R=256 MiB、分類なし）の再挿入なし `r256_n0` と `r256_n3`（`config.sh` の `PAPER_EXT_JOBS`）。「書き直しの閾値だけ上げた CacheLib」と比べても、分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。
+**追加の比較（paper-ext）**：CacheLib（R=256 MiB、分類なし）の再挿入なし `r256_n0`・`r256_n2`・`r256_n3`（n=1 は基準 `r256_base`。`config.sh` の `PAPER_EXT_JOBS`）。「書き直しの閾値だけ上げた CacheLib」と比べても、分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。
 
 ```bash
 ./run.sh paper-ext           # 足りない構成だけ回す（P.json がある構成は飛ばす）。結果・図・表は work/paper/ext/
@@ -278,7 +278,24 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 python3 py/paper_check.py work --ext   # ext の構成も並べて確かめる
 ```
 
-`work/paper/ext/` の図と表には、基準・n=0・n=3・分類なしの n=auto（`r256_none_auto`・`ru_none_auto`）・提案（`ru_ff90_h3`・`ru_auto`）を並べる（`work/paper/` の結果も読み込む。`work/paper/` の図と表は変えない）。
+`work/paper/ext/` には、**交換関係の図** `fig_tradeoff.svg`（全トレースを並べた 1 枚）と `fig_tradeoff_<trace>.svg`（1 面ずつ）も出す。横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。CacheLib の n=0〜3 を線でつなぎ（書き直しを増やすほど書き込みが増えて BMR が下がる交換関係）、提案（RU＋分類の自動・手動）と分類なしの n=auto を点で重ねる。点が線の左下なら、同じ BMR を少ない書き込みで出している。
+
+また `work/paper/ext/` の図と表には、基準・n=0・n=3・分類なしの n=auto（`r256_none_auto`・`ru_none_auto`）・提案（`ru_ff90_h3`・`ru_auto`）を並べる（`work/paper/` の結果も読み込む。`work/paper/` の図と表は変えない）。
+
+**頑健性の確認（paper-robust）**：結論が RegionFlash の作りや乱数に頼っていないかを見る（`PAPER_ROBUST_JOBS`、1 トレース 10 本、結果は `work/paper/robust/`）。背景は `../docs/regionflash_callgraph.html`（1 要求のコールグラフと、CacheLib との違いの一覧）。
+
+| 条件 | 指定 | 確かめること |
+|---|---|---|
+| `_c0` | `chunk=0`（物を 1 Region の中に連続で置く） | 片を 1 つ失うと物全体のミスになる RegionFlash の扱いが、基準を不利にしていないか |
+| `_f1` | 再挿入の上限なし（`max_frac=1`、既定は追い出す Region あたり R×0.5） | 候補の多い n=1 の基準が上限で損をしていないか |
+| `_s2`・`_s3` | 乱数の種 2・3 | 差がゆれより大きいか |
+
+```bash
+./run.sh paper-robust                       # 回して、そのまま paper_check.py --robust の表を出す
+python3 py/paper_check.py work --robust     # 表だけ出し直す
+```
+
+どの条件でも「提案の ΔBMR ≤ 0（または CacheLib n=3 より小さい）」と「書き込みの比 < 1」の向きが既定と同じなら、結論は作りや乱数に頼っていない。
 
 **結果の確かめ方**：`python3 py/paper_check.py work [トレース名..]`。構成ごとに、Region・chunk・分類の閾値が意図どおりか、全要求を回したか（`info.json` の要求数と一致）、書き込み = 受け入れ＋再挿入＋詰め物 が成り立つか、基準からの書き込みの差の内訳（受け入れ・再挿入・詰め物、TB）、受け入れの差が BMR の差 × 要求バイトと合うか、n=auto が選んだ閾値と下限 ff を一覧にする。
 
@@ -304,6 +321,8 @@ python3 py/paper_check.py work --ext   # ext の構成も並べて確かめる
 `REGION_BYTES` の既定を RU（656932864）にしたので、validity と tune も Region = RU で走る。以前の「SSD ÷ 392」に戻すには `REGION_BYTES= ./run.sh …`（空にする）。`CHUNK` の既定は 64 KiB（piece-wise 書き込みの幅。validity・tune・paper 共通）。
 
 ## 7. 制約と注意
+
+- `/bin/bash^M: bad interpreter` が出たら、ファイルの改行が Windows 形式（CRLF）になっている。キットのフォルダで次を実行して LF に戻す（中身は変わらない）: `sed -i 's/\r$//' run.sh config.sh traces.tsv synth_workloads.txt py/*.py src/*.c`
 
 - 物の数の上限: `cdn_prefix_check` と `og_xform` は物が約 6,700 万個まで（超えると `NN overflow`。`src/*.c` を `-DNN=` 付きでコンパイルし直す）。`og_info` は無制限。
 - 先頭 N 要求の値は **LRU 系の構成だけ**に成り立つ。未来を使う分類（`oracle_*` など）を `HINTS` に足すと、先頭 N の曲線は意味を持たない。

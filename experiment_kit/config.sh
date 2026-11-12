@@ -102,9 +102,23 @@ PAPER_JOBS=(
   "ru_none_auto|hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
   "r256_none_auto|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
 )
-# 追加の比較（./run.sh paper-ext → work/paper/ext/）: CacheLib（R=256MiB、分類なし）の再挿入なし（n=0）と n=3。
+# 追加の比較（./run.sh paper-ext → work/paper/ext/）: CacheLib（R=256MiB、分類なし）の再挿入なし（n=0）・n=2・n=3（n=1 = 基準）。
 # 「書き直しの閾値だけ上げた CacheLib」と比べて、分類の効果が残るかを見る。既にある結果は回さない
 PAPER_EXT_JOBS=(
   "r256_n0|region-size=$PAPER_R256,hint=none,region-evict=lru"
+  "r256_n2|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=2"
   "r256_n3|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=3"
+)
+# 頑健性の確認（./run.sh paper-robust → work/paper/robust/）。結果が RegionFlash の作りに頼っていないかを見る
+#   _c0 : chunk=0（CacheLib と同じ置き方：物を 1 Region の中に連続で置き、入らなければ Region を閉じる。Region より大きい物は入れない）
+#         既定の chunk は大きい物を片に分けて Region をまたいで置き、片を 1 つ失うと物ごと消える（CacheLib には無い損）
+#   _f1 : 再挿入の上限なし（max_frac=1。既定は追い出す Region あたり R×0.5 まで。n=1 の基準ほど強く当たる）
+#   _s2, _s3 : 乱数の種を変える（差がゆれより大きいか）
+B256="region-size=$PAPER_R256,hint=none,region-evict=lru"
+PROP="hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1"
+PAPER_ROBUST_JOBS=(
+  "r256_base_c0|$B256,reinsert=hits:n=1,chunk=0"  "r256_n3_c0|$B256,reinsert=hits:n=3,chunk=0"  "ru_auto_c0|$PROP,reinsert=hits:n=auto/target=0.5,chunk=0"
+  "r256_base_f1|$B256,reinsert=hits:n=1/max_frac=1" "r256_n3_f1|$B256,reinsert=hits:n=3/max_frac=1" "ru_auto_f1|$PROP,reinsert=hits:n=auto/target=0.5/max_frac=1"
+  "r256_base_s2|$B256,reinsert=hits:n=1,seed=2"   "ru_auto_s2|$PROP,reinsert=hits:n=auto/target=0.5,seed=2"
+  "r256_base_s3|$B256,reinsert=hits:n=1,seed=3"   "ru_auto_s3|$PROP,reinsert=hits:n=auto/target=0.5,seed=3"
 )
