@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """paper_check.py — ./run.sh paper の結果が正しく測れているかを確かめる（work/paper/<trace>/<config>/P.json を読む）。
 
-  python3 paper_check.py <WORK> [trace..]
+  python3 paper_check.py <WORK> [trace..] [--ext]     --ext で paper-ext（CacheLib の n=0・n=3）の結果も並べる
 
 トレースごとに、構成ごとに次を出す（基準 = r256_base）:
   1. 設定   region_size・chunk・分類の閾値 taus・分類数 k が意図どおりか
@@ -13,15 +13,22 @@
 標準ライブラリだけ。"""
 import json, os, sys
 
-WORK = sys.argv[1]; want = sys.argv[2:]
+WORK = sys.argv[1]; want = [a for a in sys.argv[2:] if a != "--ext"]
 D = f"{WORK}/paper"; BASE = "r256_base"
+DIRS = [D] + ([f"{D}/ext"] if "--ext" in sys.argv else [])   # --ext: paper-ext の結果（work/paper/ext/）も並べる
 TB = 1e12
 
 
+def where(n, c):  # その構成の出力フォルダ（後の場所を優先）
+    for dd in reversed(DIRS):
+        if os.path.exists(f"{dd}/{n}/{c}/P.json"): return f"{dd}/{n}/{c}"
+    return None
+
+
 def load(n, c):
-    p = f"{D}/{n}/{c}/P.json"
-    if not os.path.exists(p): return None
-    d = json.load(open(p)); ra = f"{D}/{n}/{c}/P.reauto.json"
+    w = where(n, c)
+    if not w: return None
+    d = json.load(open(f"{w}/P.json")); ra = f"{w}/P.reauto.json"
     d["_reauto"] = json.load(open(ra)) if os.path.exists(ra) else None
     return d
 
@@ -47,7 +54,7 @@ traces = sorted(x for x in os.listdir(D) if os.path.isdir(f"{D}/{x}") and (not w
 if not traces: sys.exit(f"{D} に結果が無い")
 bad = 0
 for n in traces:
-    cfgs = sorted(c for c in os.listdir(f"{D}/{n}") if os.path.exists(f"{D}/{n}/{c}/P.json"))
+    cfgs = sorted({c for dd in DIRS if os.path.isdir(f"{dd}/{n}") for c in os.listdir(f"{dd}/{n}") if os.path.exists(f"{dd}/{n}/{c}/P.json")})
     b = load(n, BASE)
     nr, var = n_reqs(n)
     print(f"\n=== {n}（変種 {var}、要求数 {nr:,}）" if nr else f"\n=== {n}")

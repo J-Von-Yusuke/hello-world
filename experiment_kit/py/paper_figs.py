@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """paper_figs.py — 論文用の比較（./run.sh paper の結果 work/paper/<name>.json）から、図 1 枚と表 1 つを作る。
 
-  python3 paper_figs.py <WORK>          PAPER_LANG=en で英語の文字
+  python3 paper_figs.py <WORK> [--ext]  PAPER_LANG=en で英語の文字。--ext = paper-ext の結果を足して work/paper/ext/ に出す
 
 比べる構成（config.sh の PAPER_JOBS）:
   r256_base     Region 256 MiB（CacheLib の上限）・分類なし・再挿入 n=1        ← 基準（いまの CacheLib）
@@ -23,11 +23,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from figures import Fig, Ax, PAL, span, to_png
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
-D = f"{WORK}/paper"
+EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext/）を足した比較。図と表は work/paper/ext/ に出す
+SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT else [])   # 結果を読む場所（同じ構成は後の場所が優先）
+D = SRC[-1]                                                          # 図と表を書く場所
 BASE = "r256_base"
-ORDER = ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"]   # 図と表に並べる順
+ORDER = (["r256_base", "r256_n0", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto"] if EXT else   # ext: CacheLib の閾値違いと提案
+         ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"])   # 図と表に並べる順
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
+    "r256_n0": ("CacheLib n=0（書き直しなし）", "CacheLib n=0 (no rewrite)"),
+    "r256_n3": ("CacheLib n=3", "CacheLib n=3"),
     "ru_base": ("R=RU", "R=RU"),
     "ru_none_auto": ("R=RU＋n=auto（分類なし）", "R=RU + auto n (no class.)"),
     "r256_none_auto": ("R=256MiB＋n=auto（分類なし）", "R=256MiB + auto n (no class.)"),
@@ -36,16 +41,22 @@ NAME = {
     "r256_ff90_h3": ("R=256MiB＋分類（手動）", "R=256MiB + class. (manual)"),
     "r256_auto": ("R=256MiB＋分類（自動）", "R=256MiB + class. (auto)"),
 }
-COL = {"r256_base": "#4d4d4d", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
+COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
        "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a"}
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
 
-runs = {}
-for f in sorted(glob.glob(f"{D}/*.json")):
-    d = json.load(open(f))
-    if isinstance(d, dict) and BASE in d.get("runs", {}): runs[d["name"]] = d
-if not runs: sys.exit(f"{D}/*.json に {BASE} を含む結果が無い（./run.sh paper がまだ）")
+runs, rundir = {}, {}   # rundir[(trace, config)] = その構成の出力のフォルダ（P.interval.csv の場所）
+for src in SRC:
+    for f in sorted(glob.glob(f"{src}/*.json")):
+        d = json.load(open(f))
+        if not (isinstance(d, dict) and "runs" in d): continue
+        cur = runs.setdefault(d["name"], {k: v for k, v in d.items() if k != "runs"} | {"runs": {}})
+        cur["runs"].update(d["runs"])
+        for c in d["runs"]: rundir[(d["name"], c)] = f"{src}/{d['name']}/{c}"
+runs = {n: d for n, d in runs.items() if BASE in d["runs"]}
+os.makedirs(D, exist_ok=True)
+if not runs: sys.exit(f"{SRC[0]}/*.json に {BASE} を含む結果が無い（./run.sh paper がまだ）")
 names = sorted(runs, key=lambda n: (runs[n].get("category", ""), runs[n].get("source", ""), n))
 cfgs = [c for c in ORDER if any(c in runs[n]["runs"] for n in names)]
 others = [c for c in cfgs if c != BASE]
@@ -188,7 +199,7 @@ K = ("reqs", "req_bytes", "dram_hits", "ssd_hits", "hit_bytes", "miss_bytes", "f
 
 
 def interval_rows(n, c):  # P.interval.csv の区間の行（累積でない方）。無ければ None
-    p = f"{D}/{n}/{c}/P.interval.csv"
+    p = f"{rundir.get((n, c), f'{D}/{n}/{c}')}/P.interval.csv"
     if not os.path.exists(p): return None
     return [{k: int(r[k]) for k in K} for r in csv.DictReader(open(p)) if r["kind"] == "interval"]
 
@@ -248,7 +259,7 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 <style>:root{{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}}@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
-<h1>論文用の比較（図 1 枚・表 1 つ）</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
+<h1>{"追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
 <h2>図：fig_main.svg（3 面まとめ）{" / .png" if png else ""}</h2><img src="fig_main.svg" alt="BMR・SSD 書き込み量・OHR の比較"><h2>図：fig_rel.svg（CacheLib 比の 3 面まとめ）</h2><img src="fig_rel.svg" alt="CacheLib 比の BMR・書き込み・OHR"><p class="m">左 = ΔBMR（構成 − CacheLib、0 = CacheLib、負が良い）。中 = SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い）。右 = ΔOHR（参考）。1 面ずつの図：fig_bmr / fig_write / fig_ohr（値そのもの）、fig_dbmr / fig_nwrite / fig_dohr（CacheLib 比）。</p>
 <p><b>要点</b>（BMR・OHR はトレースの平均、書き込みは合計）：{pts}。</p>
 <p class="m">左 = BMR（低いほど良い）。中 = SSD に書いたバイト（受け入れ＋再挿入＋詰め物、低いほど良い。トレースごとに規模が違うので平均は出さない）。右 = OHR（参考）。

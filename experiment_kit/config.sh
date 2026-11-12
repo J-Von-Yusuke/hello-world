@@ -102,3 +102,9 @@ PAPER_JOBS=(
   "ru_none_auto|hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
   "r256_none_auto|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
 )
+# 追加の比較（./run.sh paper-ext → work/paper/ext/）: CacheLib（R=256MiB、分類なし）の再挿入なし（n=0）と n=3。
+# 「書き直しの閾値だけ上げた CacheLib」と比べて、分類の効果が残るかを見る。既にある結果は回さない
+PAPER_EXT_JOBS=(
+  "r256_n0|region-size=$PAPER_R256,hint=none,region-evict=lru"
+  "r256_n3|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=3"
+)

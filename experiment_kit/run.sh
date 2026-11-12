@@ -10,6 +10,8 @@
 #   ./run.sh tune-figs          tune の図だけ作り直す → work/tune/figs/
 #   ./run.sh paper [name..]     論文用の比較（Region 256 MiB / RU × 方式 3 通り。PAPER_JOBS）→ work/paper/（図 1 枚・表 1 つ）
 #   ./run.sh paper-figs         paper の図と表だけ作り直す
+#   ./run.sh paper-ext [name..] CacheLib の n=0・n=3 を追加で回す（PAPER_EXT_JOBS）→ work/paper/ext/（図と表も）。既にある結果は回さない
+#   ./run.sh paper-figs --ext   paper-ext の図と表だけ作り直す
 #   ./run.sh all                setup → validity → synth → aggregate
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
@@ -284,6 +286,7 @@ case $cmd in
   tune-figs) tune_figs "$@" ;;
   paper) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper"; RUN_JOBS=PAPER_JOBS RUN_ROOT=$WORK/paper each_trace tune_one "$@"; paper_figs ;;
   paper-figs) paper_figs "$@" ;;
+  paper-ext) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/ext"; RUN_JOBS=PAPER_EXT_JOBS RUN_ROOT=$WORK/paper/ext each_trace tune_one "$@"; paper_figs --ext ;;
   all) setup && check && each_trace validity_one && synth && aggregate ;;
   *) sed -n '2,9p' "$0" ;;
 esac
