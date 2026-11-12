@@ -268,7 +268,10 @@ EOF
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
 paper_figs() {  # --robust なら頑健性の図（work/paper/robust/）、それ以外は paper_figs.py（--ext を渡せば ext）
-  if [[ " $* " == *" --robust "* ]]; then python3 "$KIT/py/paper_robust_figs.py" "$WORK"; else python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
+  if [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
+    python3 "$KIT/py/paper_robust_figs.py" "$WORK"
+    local c; for c in c0 f1 s2 s3; do python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
+  else python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
 }
 
 aggregate() { TUNE_W=$TUNE_W python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """paper_figs.py — 論文用の比較（./run.sh paper の結果 work/paper/<name>.json）から、図 1 枚と表 1 つを作る。
 
-  python3 paper_figs.py <WORK> [--ext]  PAPER_LANG=en で英語の文字。--ext = paper-ext の結果を足して work/paper/ext/ に出す
+  python3 paper_figs.py <WORK> [--ext | --cond c0|f1|s2|s3]  PAPER_LANG=en で英語の文字。--ext = paper-ext の結果を足して work/paper/ext/ に出す。
+                                       --cond = paper-robust のその条件の構成だけで同じ一式を work/paper/robust/<条件>/ に出す
 
 比べる構成（config.sh の PAPER_JOBS）:
   r256_base     Region 256 MiB（CacheLib の上限）・分類なし・再挿入 n=1        ← 基準（いまの CacheLib）
@@ -24,10 +25,16 @@ from figures import Fig, Ax, PAL, span, to_png
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext/）を足した比較。図と表は work/paper/ext/ に出す
-SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT else [])   # 結果を読む場所（同じ構成は後の場所が優先）
-D = SRC[-1]                                                          # 図と表を書く場所
+COND = sys.argv[sys.argv.index("--cond") + 1] if "--cond" in sys.argv else ""   # 頑健性の条件（c0 / f1 / s2 / s3）
+if COND:   # work/paper/robust の <構成>_<条件> だけを <構成> として読み、work/paper/robust/<条件>/ に同じ一式を出す
+    SRC = [f"{WORK}/paper/robust"]; D = f"{WORK}/paper/robust/{COND}"
+else:
+    SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT else [])   # 結果を読む場所（同じ構成は後の場所が優先）
+    D = SRC[-1]                                                          # 図と表を書く場所
 BASE = "r256_base"
 ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto"] if EXT else   # ext: CacheLib の閾値違いと提案
+         ["r256_base", "r256_n0", "r256_n2", "r256_n3", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"]
+         if COND else   # 条件ごと: その条件で回した構成を全部
          ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"])   # 図と表に並べる順
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
@@ -53,11 +60,15 @@ for src in SRC:
         d = json.load(open(f))
         if not (isinstance(d, dict) and "runs" in d): continue
         cur = runs.setdefault(d["name"], {k: v for k, v in d.items() if k != "runs"} | {"runs": {}})
-        cur["runs"].update(d["runs"])
-        for c in d["runs"]: rundir[(d["name"], c)] = f"{src}/{d['name']}/{c}"
+        for c, r in d["runs"].items():
+            if COND:   # r256_base_c0 → r256_base（その条件の構成だけ）
+                if not c.endswith("_" + COND): continue
+                key = c[: -len(COND) - 1]
+            else: key = c
+            cur["runs"][key] = r; rundir[(d["name"], key)] = f"{src}/{d['name']}/{c}"
 runs = {n: d for n, d in runs.items() if BASE in d["runs"]}
+if not runs: sys.exit(f"{SRC[0]}/*.json に {BASE}{'_' + COND if COND else ''} を含む結果が無い")
 os.makedirs(D, exist_ok=True)
-if not runs: sys.exit(f"{SRC[0]}/*.json に {BASE} を含む結果が無い（./run.sh paper がまだ）")
 names = sorted(runs, key=lambda n: (runs[n].get("category", ""), runs[n].get("source", ""), n))
 cfgs = [c for c in ORDER if any(c in runs[n]["runs"] for n in names)]
 others = [c for c in cfgs if c != BASE]
@@ -282,7 +293,7 @@ def tradeoff(keys):
 
 
 tr = []
-if EXT and any("r256_n3" in runs[n]["runs"] or "r256_n0" in runs[n]["runs"] for n in names):
+if (EXT or COND) and any("r256_n3" in runs[n]["runs"] or "r256_n0" in runs[n]["runs"] for n in names):
     open(f"{D}/fig_tradeoff.svg", "w", encoding="utf-8").write(tradeoff(names)); tr.append("fig_tradeoff")
     for n in names:
         open(f"{D}/fig_tradeoff_{n}.svg", "w", encoding="utf-8").write(tradeoff([n])); tr.append(f"fig_tradeoff_{n}")
@@ -298,7 +309,7 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 <style>:root{{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}}@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
-<h1>{"追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
+<h1>{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
 """ + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
        "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
        "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"

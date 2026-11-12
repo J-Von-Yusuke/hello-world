@@ -292,11 +292,13 @@ python3 py/paper_check.py work --ext   # ext の構成も並べて確かめる
 
 ```bash
 ./run.sh paper-robust                       # 回して、paper_check.py --robust の表と、図・表（work/paper/robust/）を出す
-./run.sh paper-figs --robust                # 図と表だけ作り直す
+./run.sh paper-figs --robust                # 図と表だけ作り直す（条件をまたいだ図と、条件ごとの一式の両方）
 python3 py/paper_check.py work --robust     # 確認の表だけ出し直す
 ```
 
-図（`work/paper/robust/`）：`fig_robust.svg` = 提案（RU＋分類の自動）− CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3（n=3 のある条件だけ）。どちらも左 = ΔBMR [pt]（0 = CacheLib、下が良い）、右 = 書き込みの比（CacheLib = 1、1 未満が良い）。横軸 = トレース（2 本以上なら平均も）、色 = 条件（既定・chunk=0・上限なし・種 2・種 3）。数値は `table_robust.csv` / `.md`。
+条件ごとの一式（`work/paper/robust/c0/`・`f1/`・`s2/`・`s3/`）：`paper-figs` と同じ図と表（3 面まとめ・CacheLib 比・1 面ずつ・時間変化・`table_main`。CacheLib n=3 がある条件は交換関係の図も）を、その条件で回した構成だけで作る（`r256_base_c0` → `r256_base` のように読み替え）。`PAPER_ROBUST_JOBS` に `<構成名>_<条件>` の名前で足せば、その構成も加わる。
+
+条件をまたいだ図（`work/paper/robust/` 直下）：`fig_robust.svg` = 提案（RU＋分類の自動）− CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3（n=3 のある条件だけ）。どちらも左 = ΔBMR [pt]（0 = CacheLib、下が良い）、右 = 書き込みの比（CacheLib = 1、1 未満が良い）。横軸 = トレース（2 本以上なら平均も）、色 = 条件（既定・chunk=0・上限なし・種 2・種 3）。数値は `table_robust.csv` / `.md`。
 
 どの条件でも「提案の ΔBMR ≤ 0（または CacheLib n=3 より小さい）」と「書き込みの比 < 1」の向きが既定と同じなら、結論は作りや乱数に頼っていない。
 
