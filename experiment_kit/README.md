@@ -278,10 +278,15 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 
 | ファイル | 中身 |
 |---|---|
-| `fig_main.svg` | 3 面まとめ：BMR [%]（低いほど良い）・SSD 書き込み量 [TB]（受け入れ＋再挿入＋詰め物、低いほど良い）・OHR [%]（参考）。横軸 = トレース（BMR・OHR は 2 本以上なら最後に平均） |
-| `fig_bmr.svg` / `fig_write.svg` / `fig_ohr.svg` | 同じ図の 1 面ずつ（1 つだけ載せるとき用）。`.png` は rsvg-convert などがあれば |
-| `table_main.tex` / `.md` / `.csv` | トレースごとに、基準の BMR・書き込み [TB]・OHR・アプリ層の書き込み増幅（書いたバイト ÷ 受け入れたバイト）と、各構成の基準との差「BMR [pt]（負が良い）/ 書き込み [%]（負が良い）/ OHR [pt]」。CSV は全構成の全指標 |
-| `index.html` | 図と表と要点 |
+| `fig_main.svg` | 値そのものの 3 面まとめ：BMR [%]（低いほど良い）・SSD 書き込み量 [TB]（受け入れ＋再挿入＋詰め物、低いほど良い）・OHR [%]（参考）。**縦軸は 0 から**。横軸 = トレース（BMR・OHR は 2 本以上なら最後に平均） |
+| `fig_rel.svg` | CacheLib（R=256 MiB、基準）比の 3 面まとめ：ΔBMR [pt]（構成 − CacheLib、負が良い）・SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い、1.0 に線）・ΔOHR [pt]（参考）。基準の棒は出さない |
+| `fig_bmr` / `fig_write` / `fig_ohr` / `fig_dbmr` / `fig_nwrite` / `fig_dohr`（.svg） | 上の 2 枚の 1 面ずつ（1 つだけ載せるとき用）。`.png` は rsvg-convert などがあれば |
+| `table_main.tex` / `.md` / `.csv` | トレースごとに、基準の BMR・書き込み [TB]・OHR・アプリ層の書き込み増幅（書いたバイト ÷ 受け入れたバイト）と、各構成の「ΔBMR [pt]（負が良い）/ 書き込み（CacheLib = 1）/ ΔOHR [pt]」。CSV は全構成の全指標（`write_norm` = 正規化した書き込み） |
+| `fig_ops_<trace>.svg`（補足） | 時間変化。横軸 = 処理した要求数。BMR・OHR は区間ごと（約 `PAPER_BINS`=100 区間にまとめる）、SSD 書き込みは累積 TB。キャッシュが埋まるまでの期間と、その後の定常の差が見える |
+| `fig_wr_<trace>.svg`（補足） | 横軸 = その構成の累積 SSD 書き込み量 [TB]。BMR・OHR はそこまでの累積。同じ量を書いた時点（SSD の寿命の消費が同じ時点）での比較 |
+| `index.html` | 図と表と要点、補足の図 |
+
+時間変化の図は各構成の `P.interval.csv`（区間の刻み = `INTERVAL`、既定 1 万要求）から作る。`./run.sh paper-figs` で作り直せる。
 
 `REGION_BYTES` の既定を RU（656932864）にしたので、validity と tune も Region = RU で走る。以前の「SSD ÷ 392」に戻すには `REGION_BYTES= ./run.sh …`（空にする）。`CHUNK` の既定は 64 KiB（piece-wise 書き込みの幅。validity・tune・paper 共通）。
 
