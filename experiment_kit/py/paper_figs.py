@@ -9,6 +9,7 @@
   ru_ff90_h3    Region = RU・サイズ分類・大物の下限 0.9・再挿入 n=3（手で調整）  ← 提案
   ru_auto       Region = RU・サイズ分類（SplitThreshold）・下限の山登り・再挿入 n=auto（全部自動） ← 提案
   r256_ff90_h3, r256_auto  同じ方式を 256 MiB で                              ← 分類の効果が Region の大きさによらないか
+  ru_none_auto, r256_none_auto  分類なしで再挿入の閾値の自動化（n=auto）だけ     ← 切り分け：*_auto との差が分類＋下限の効果
 指標（図は値そのもの、表は基準との差 = 構成 − 基準）:
   BMR   バイトミス率 [%]（低いほど良い：元サーバへの転送）
   書き込み SSD に書いたバイト [TB]（受け入れ＋再挿入＋詰め物。低いほど良い）
@@ -24,16 +25,18 @@ from figures import Fig, Ax, PAL, span, to_png
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 D = f"{WORK}/paper"
 BASE = "r256_base"
-ORDER = ["r256_base", "ru_base", "ru_ff90_h3", "ru_auto", "r256_ff90_h3", "r256_auto"]   # 図と表に並べる順
+ORDER = ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"]   # 図と表に並べる順
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
     "ru_base": ("R=RU", "R=RU"),
+    "ru_none_auto": ("R=RU＋n=auto（分類なし）", "R=RU + auto n (no class.)"),
+    "r256_none_auto": ("R=256MiB＋n=auto（分類なし）", "R=256MiB + auto n (no class.)"),
     "ru_ff90_h3": ("R=RU＋分類（手動）", "R=RU + class. (manual)"),
     "ru_auto": ("R=RU＋分類（自動）", "R=RU + class. (auto)"),
     "r256_ff90_h3": ("R=256MiB＋分類（手動）", "R=256MiB + class. (manual)"),
     "r256_auto": ("R=256MiB＋分類（自動）", "R=256MiB + class. (auto)"),
 }
-COL = {"r256_base": "#4d4d4d", "ru_base": "#a6a6a6", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
+COL = {"r256_base": "#4d4d4d", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
        "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a"}
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
@@ -50,7 +53,9 @@ others = [c for c in cfgs if c != BASE]
 # 指標（図は値そのもの）
 BMR = lambda r: 100 * r["bmr"]
 OHR = lambda r: 100 * r["ohr"]
-TB = lambda r: r["write"] * r["req_bytes"] / 1e12            # SSD に書いたバイト [TB]
+TB = lambda r: r["write"] * r["req_bytes"] / 1e12            # SSD に書いたバイト [TB]（取得＋再書き込み＋詰め物）
+ATB = lambda r: r["admit"] * r["req_bytes"] / 1e12           # 取得：ミスして受け入れたバイト [TB]
+RTB = lambda r: r["reinsert"] * r["req_bytes"] / 1e12        # 再書き込み：追い出しの際に書き直したバイト [TB]（アプリ層の GC）
 AWAF = lambda r: r["write"] / r["admit"] if r.get("admit") else None
 
 # ---------------------------------------------------------------- 表（CSV は全部、MD / TeX は主な列）
@@ -61,7 +66,7 @@ for n in names:
         if c not in R: continue
         r = R[c]
         rows.append(dict(trace=n, category=runs[n].get("category", ""), source=runs[n].get("source", ""), config=c, label=nm(c),
-                         bmr_pct=BMR(r), ohr_pct=OHR(r), ssd_write_TB=TB(r), write_per_req_byte=r["write"],
+                         bmr_pct=BMR(r), ohr_pct=OHR(r), ssd_write_TB=TB(r), admit_TB=ATB(r), reinsert_TB=RTB(r), pad_TB=TB(r) - ATB(r) - RTB(r), write_per_req_byte=r["write"],
                          reinsert_per_req_byte=r["reinsert"], app_waf=AWAF(r),
                          d_bmr_pt=BMR(r) - BMR(b), write_norm=TB(r) / TB(b) if TB(b) else None, d_ohr_pt=OHR(r) - OHR(b)))
 with open(f"{D}/table_main.csv", "w", newline="") as f:
@@ -77,7 +82,7 @@ def cell(n, c, tex=False):
     return " / ".join(f"${x}$" for x in s) if tex else " / ".join(s)
 
 
-hdr = [T("トレース", "Trace"), T("基準 BMR [%]", "Base BMR [%]"), T("基準 書込 [TB]", "Base writes [TB]"),
+hdr = [T("トレース", "Trace"), T("基準 BMR [%]", "Base BMR [%]"), T("基準 書込 [TB]（取得＋再書込）", "Base writes [TB] (admit + rewrite)"),
        T("基準 OHR [%]", "Base OHR [%]"), T("基準 書込増幅", "Base app. WAF")] + [nm(c) for c in others]
 md = ["| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
 tex = [r"\begin{table*}[t]", r"\centering\small", r"\setlength{\tabcolsep}{4pt}",
@@ -85,7 +90,7 @@ tex = [r"\begin{table*}[t]", r"\centering\small", r"\setlength{\tabcolsep}{4pt}"
        " & ".join(hdr).replace("%", r"\%").replace("＋", "+") + r" \\", r"\midrule"]
 for n in names:
     b = runs[n]["runs"][BASE]
-    base = [f"{BMR(b):.2f}", f"{TB(b):.1f}", f"{OHR(b):.1f}", f"{AWAF(b):.2f}" if AWAF(b) else "–"]
+    base = [f"{BMR(b):.2f}", f"{TB(b):.1f}（{ATB(b):.1f}＋{RTB(b):.1f}）" if not EN else f"{TB(b):.1f} ({ATB(b):.1f}+{RTB(b):.1f})", f"{OHR(b):.1f}", f"{AWAF(b):.2f}" if AWAF(b) else "–"]
     md.append("| " + " | ".join([n] + base + [cell(n, c) for c in others]) + " |")
     tex.append(" & ".join([n.replace("_", r"\_")] + base + [cell(n, c, True) for c in others]) + r" \\")
 cap = T("各セル = ΔBMR [pt]（構成 − 基準、負 = 良い）/ SSD 書き込み（基準 = 1 に正規化、1 未満 = 良い）/ ΔOHR [pt]（構成 − 基準、正 = 良い）。"
@@ -112,16 +117,39 @@ PANELS = {  # slug: (題, 縦軸, 値の関数 (r, b), 平均をつけるか, �
     "write": (T("SSD 書き込み量（低いほど良い）", "SSD writes (lower is better)"), T("書き込み [TB]", "Writes [TB]"), lambda r, b: TB(r), False, 1, "abs"),
     "ohr": (T("OHR（参考。高いほど良い）", "OHR (for reference)"), "OHR [%]", lambda r, b: OHR(r), True, 1, "abs"),
     "dbmr": (T("ΔBMR（CacheLib 比。低いほど良い）", "ΔBMR vs. CacheLib (lower is better)"), "ΔBMR [pt]", lambda r, b: BMR(r) - BMR(b), True, 2, "diff"),
-    "nwrite": (T("SSD 書き込み量（CacheLib = 1。低いほど良い）", "SSD writes (CacheLib = 1; lower is better)"),
+    "nwrite": (T("SSD 書き込み量（CacheLib の合計 = 1。低いほど良い）", "SSD writes (CacheLib total = 1; lower is better)"),
                T("書き込み（正規化）", "Normalized writes"), lambda r, b: TB(r) / TB(b) if TB(b) else None, True, 3, "ratio"),
     "dohr": (T("ΔOHR（CacheLib 比。参考）", "ΔOHR vs. CacheLib (for reference)"), "ΔOHR [pt]", lambda r, b: OHR(r) - OHR(b), True, 1, "diff"),
 }
+
+
+def stacked(a, key, shown, mean):
+    """書き込みの棒を 取得（濃い）＋ 再書き込み（薄い）に分けて積む。nwrite は基準の書き込み全体 = 1 で割る。詰め物は描かない（表に残す）"""
+    k = len(shown); w = a.bw * 0.8 / max(k, 1)
+    for gi, c in enumerate(shown):
+        col = COL.get(c, PAL[cfgs.index(c) % len(PAL)])
+        parts = []
+        for n in names:
+            R = runs[n]["runs"]
+            if c not in R: parts.append(None); continue
+            z = TB(R[BASE]) if key == "nwrite" else 1
+            parts.append((ATB(R[c]) / z, RTB(R[c]) / z) if z else None)
+        if mean and multi:
+            ok = [p for p in parts if p]; parts.append((sum(p[0] for p in ok) / len(ok), sum(p[1] for p in ok) / len(ok)) if ok else None)
+        for i, p in enumerate(parts):
+            if not p: continue
+            x = a.x0 + a.bw * i + a.bw * 0.1 + w * gi
+            y0, y1, y2 = a.Y(0), a.Y(p[0]), a.Y(p[0] + p[1])
+            a.f.e.append(f'<rect x="{x+2:.1f}" y="{y1:.1f}" width="{max(w-4, 1):.1f}" height="{y0-y1:.1f}" fill="{col}"/>')
+            a.f.e.append(f'<rect x="{x+2:.1f}" y="{y2:.1f}" width="{max(w-4, 1):.1f}" height="{y1-y2:.1f}" fill="{col}" fill-opacity="0.35" stroke="{col}" stroke-width="1.5"/>')
 
 
 def draw(keys):  # keys の面を横に並べた 1 枚の図
     kinds = {PANELS[k][5] for k in keys}
     shown = cfgs if "abs" in kinds else others          # 差・比の図には基準の棒を出さない（基準 = 0 / 1 の線）
     f = Fig(); f.add_legend([(nm(c), COL.get(c, PAL[i % len(PAL)]), "box") for i, c in enumerate(cfgs) if c in shown])
+    if {"write", "nwrite"} & set(keys):
+        f.add_legend([(T("書き込み：濃い = 取得（ミス）、薄い = 再書き込み", "Writes: solid = admitted (misses), light = rewrites"), "#bbbbbb", "box")])
     top, x0, gap = f.legend_h() + 50, 110, 115
     W = (1600 - x0 - 30 - gap * (len(keys) - 1)) // len(keys)
     for k, key in enumerate(keys):
@@ -133,11 +161,15 @@ def draw(keys):  # keys の面を横に並べた 1 枚の図
                 ok = [x for x in v if x is not None]; v.append(sum(ok) / len(ok) if ok else None)
             data[c] = v
         vals = [x for v in data.values() for x in v if x is not None] or [0]
+        if key in ("write", "nwrite"):
+            vals = [(ATB(runs[n]["runs"][c]) + RTB(runs[n]["runs"][c])) / (TB(runs[n]["runs"][BASE]) if key == "nwrite" else 1)
+                    for c in shown for n in names if c in runs[n]["runs"]] or [0]
         if kind == "diff": yr = span(vals)                           # 0 を含む（正負の差）
         else: yr = (0, max(vals + ([1] if kind == "ratio" else [])) * 1.1 or 1)   # 0 から
         a = Ax(f, (x0 + k * (W + gap), top, x0 + k * (W + gap) + W, 760), yr=yr, cats=cats_m if mean else names, ylabel=ylab, title=title)
-        a.bars([(nm(c), COL.get(c, PAL[i % len(PAL)]), data[c], None) for i, c in enumerate(cfgs) if c in shown],
-               d=d, sign=kind == "diff")
+        if key in ("write", "nwrite"): stacked(a, key, shown, mean)
+        else: a.bars([(nm(c), COL.get(c, PAL[i % len(PAL)]), data[c], None) for i, c in enumerate(cfgs) if c in shown],
+                     d=d, sign=kind == "diff")
         if kind == "ratio": a.hline(1.0, col="#4d4d4d", label=T("CacheLib = 1", "CacheLib = 1"))
     return f.svg()
 
@@ -149,10 +181,10 @@ for slug, keys in FIGS.items():
 
 
 # ---------------------------------------------------------------- 時間変化（補足の図。トレースごとに 2 枚）
-#   fig_ops_<trace>: 横軸 = 処理した要求数。BMR・OHR = 区間ごと（約 BINS 区間にまとめる）、SSD 書き込み = 累積 TB
+#   fig_ops_<trace>: 横軸 = 処理した要求数。BMR・OHR = 区間ごと（約 BINS 区間にまとめる）、取得・再書き込み = それぞれの累積 TB
 #   fig_wr_<trace> : 横軸 = その構成の累積 SSD 書き込み [TB]。BMR・OHR = そこまでの累積（同じ量を書いた時点の比較）
 BINS = int(os.environ.get("PAPER_BINS", "100"))
-K = ("reqs", "req_bytes", "dram_hits", "ssd_hits", "hit_bytes", "miss_bytes", "flash_region_write_bytes")
+K = ("reqs", "req_bytes", "dram_hits", "ssd_hits", "hit_bytes", "miss_bytes", "flash_region_write_bytes", "ssd_admit_bytes", "reinsert_bytes")
 
 
 def interval_rows(n, c):  # P.interval.csv の区間の行（累積でない方）。無ければ None
@@ -161,7 +193,7 @@ def interval_rows(n, c):  # P.interval.csv の区間の行（累積でない方�
     return [{k: int(r[k]) for k in K} for r in csv.DictReader(open(p)) if r["kind"] == "interval"]
 
 
-def timeline(rows):  # → [(累積要求, 区間 BMR, 区間 OHR, 累積書込 TB, 累積 BMR, 累積 OHR)]
+def timeline(rows):  # → [(累積要求, 区間 BMR, 区間 OHR, 累積書込 TB, 累積 BMR, 累積 OHR, 累積取得 TB, 累積再書込 TB)]
     g = max(1, len(rows) // BINS); out = []; cum = dict.fromkeys(K, 0)
     for i in range(0, len(rows), g):
         w = {k: sum(r[k] for r in rows[i:i + g]) for k in K}
@@ -169,7 +201,7 @@ def timeline(rows):  # → [(累積要求, 区間 BMR, 区間 OHR, 累積書込 
         if not w["reqs"] or not w["req_bytes"]: continue
         out.append((cum["reqs"], 100 * w["miss_bytes"] / w["req_bytes"], 100 * (w["dram_hits"] + w["ssd_hits"]) / w["reqs"],
                     cum["flash_region_write_bytes"] / 1e12, 100 * cum["miss_bytes"] / cum["req_bytes"],
-                    100 * (cum["dram_hits"] + cum["ssd_hits"]) / cum["reqs"]))
+                    100 * (cum["dram_hits"] + cum["ssd_hits"]) / cum["reqs"], cum["ssd_admit_bytes"] / 1e12, cum["reinsert_bytes"] / 1e12))
     return out
 
 
@@ -180,7 +212,9 @@ def tl_fig(n, xkey):
     top, x0, gap = f.legend_h() + 50, 110, 115
     if xkey == "ops":
         X = lambda p: p[0] / 1e6; xlab = T("処理した要求 [百万]", "Requests processed [M]")
-        panel = [(T("BMR（区間ごと）", "BMR (per interval)"), "BMR [%]", 1), (T("SSD 書き込み（累積）", "SSD writes (cumulative)"), "TB", 3),
+        panel = [(T("BMR（区間ごと）", "BMR (per interval)"), "BMR [%]", 1),
+                 (T("取得の書き込み（累積）", "Admitted bytes (cumulative)"), "TB", 6),
+                 (T("再書き込み（累積）", "Rewritten bytes (cumulative)"), "TB", 7),
                  (T("OHR（区間ごと）", "OHR (per interval)"), "OHR [%]", 2)]
     else:
         X = lambda p: p[3]; xlab = T("SSD に書いた量 [TB]（その構成の累積）", "Bytes written to SSD [TB] (cumulative)")

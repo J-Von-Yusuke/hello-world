@@ -98,4 +98,7 @@ PAPER_JOBS=(
   "ru_base|hint=none,region-evict=lru,reinsert=hits:n=1"
   "ru_ff90_h3|hint=split_threshold,region-evict=lru,region-params=fc=1/ff=0.9,reinsert=hits:n=3"
   "ru_auto|hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1,reinsert=hits:n=auto/target=0.5"
+  # 切り分け: 分類なしで再挿入の閾値の自動化（n=auto）だけ。*_auto との差が「分類＋下限」の効果
+  "ru_none_auto|hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
+  "r256_none_auto|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
 )

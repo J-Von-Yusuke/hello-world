@@ -268,6 +268,9 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 | `r256_ff90_h3` / `r256_auto` | 256 MiB | サイズ分類＋大物の下限 0.9＋n=3（手動） / 下限の山登り＋n=auto（自動） |
 | `ru_base` | RU = `REGION_BYTES`（既定 656932864 = 626.5 MiB） | 分類なし、再挿入 n=1 |
 | `ru_ff90_h3` / `ru_auto` | RU | 同上の手動 / 自動 |
+| `ru_none_auto` / `r256_none_auto`（切り分け） | RU / 256 MiB | 分類なしで再挿入の閾値の自動化（n=auto）だけ。`*_auto` との差が「分類＋下限」の効果、`*_base` との差が n=auto の効果 |
+
+**結果の確かめ方**：`python3 py/paper_check.py work [トレース名..]`。構成ごとに、Region・chunk・分類の閾値が意図どおりか、全要求を回したか（`info.json` の要求数と一致）、書き込み = 受け入れ＋再挿入＋詰め物 が成り立つか、基準からの書き込みの差の内訳（受け入れ・再挿入・詰め物、TB）、受け入れの差が BMR の差 × 要求バイトと合うか、n=auto が選んだ閾値と下限 ff を一覧にする。
 
 ```bash
 ./run.sh paper               # traces.tsv の全部（名前を並べればそれだけ）。SSD・DRAM・chunk は validity と同じ。変種は埋め値を除いた主の変種
@@ -278,11 +281,11 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 
 | ファイル | 中身 |
 |---|---|
-| `fig_main.svg` | 値そのものの 3 面まとめ：BMR [%]（低いほど良い）・SSD 書き込み量 [TB]（受け入れ＋再挿入＋詰め物、低いほど良い）・OHR [%]（参考）。**縦軸は 0 から**。横軸 = トレース（BMR・OHR は 2 本以上なら最後に平均） |
-| `fig_rel.svg` | CacheLib（R=256 MiB、基準）比の 3 面まとめ：ΔBMR [pt]（構成 − CacheLib、負が良い）・SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い、1.0 に線）・ΔOHR [pt]（参考）。基準の棒は出さない |
+| `fig_main.svg` | 値そのものの 3 面まとめ：BMR [%]（低いほど良い）・SSD 書き込み量 [TB]（低いほど良い。棒を **取得（ミスして受け入れたバイト、濃い）＋ 再書き込み（再挿入、薄い）** に分けて積む。詰め物はごく小さいので表と CSV のみ）・OHR [%]（参考）。**縦軸は 0 から**。横軸 = トレース（BMR・OHR は 2 本以上なら最後に平均） |
+| `fig_rel.svg` | CacheLib（R=256 MiB、基準）比の 3 面まとめ：ΔBMR [pt]（構成 − CacheLib、負が良い）・SSD 書き込み（CacheLib の合計 = 1 に正規化、1 未満が良い、1.0 に線。同じく取得＋再書き込みに分けて積む）・ΔOHR [pt]（参考）。基準の棒は出さない |
 | `fig_bmr` / `fig_write` / `fig_ohr` / `fig_dbmr` / `fig_nwrite` / `fig_dohr`（.svg） | 上の 2 枚の 1 面ずつ（1 つだけ載せるとき用）。`.png` は rsvg-convert などがあれば |
-| `table_main.tex` / `.md` / `.csv` | トレースごとに、基準の BMR・書き込み [TB]・OHR・アプリ層の書き込み増幅（書いたバイト ÷ 受け入れたバイト）と、各構成の「ΔBMR [pt]（負が良い）/ 書き込み（CacheLib = 1）/ ΔOHR [pt]」。CSV は全構成の全指標（`write_norm` = 正規化した書き込み） |
-| `fig_ops_<trace>.svg`（補足） | 時間変化。横軸 = 処理した要求数。BMR・OHR は区間ごと（約 `PAPER_BINS`=100 区間にまとめる）、SSD 書き込みは累積 TB。キャッシュが埋まるまでの期間と、その後の定常の差が見える |
+| `table_main.tex` / `.md` / `.csv` | トレースごとに、基準の BMR・書き込み [TB]・OHR・アプリ層の書き込み増幅（書いたバイト ÷ 受け入れたバイト）と、各構成の「ΔBMR [pt]（負が良い）/ 書き込み（CacheLib = 1）/ ΔOHR [pt]」。基準の書き込みは「合計（取得＋再書き込み）」で示す。CSV は全構成の全指標（`admit_TB`・`reinsert_TB`・`pad_TB`、`write_norm` = 正規化した書き込み） |
+| `fig_ops_<trace>.svg`（補足） | 時間変化。横軸 = 処理した要求数。BMR・OHR は区間ごと（約 `PAPER_BINS`=100 区間にまとめる）、取得と再書き込みはそれぞれ累積 TB（4 面）。キャッシュが埋まるまでの期間と、その後の定常の差、再書き込みがいつから増えるかが見える |
 | `fig_wr_<trace>.svg`（補足） | 横軸 = その構成の累積 SSD 書き込み量 [TB]。BMR・OHR はそこまでの累積。同じ量を書いた時点（SSD の寿命の消費が同じ時点）での比較 |
 | `index.html` | 図と表と要点、補足の図 |
 
