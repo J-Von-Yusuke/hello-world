@@ -39,10 +39,10 @@ index 4b36a6f..5c7e5ff 100644
        params->block_size = (int)(strtol(value, &end, 0));
      } else if (strcasecmp(key, "header") == 0 ||
 diff --git a/libCacheSim/cache/CMakeLists.txt b/libCacheSim/cache/CMakeLists.txt
-index 49968ff..422135f 100644
+index 49968ff..34445df 100644
 --- a/libCacheSim/cache/CMakeLists.txt
 +++ b/libCacheSim/cache/CMakeLists.txt
-@@ -71,6 +71,47 @@ set(eviction_sources_c
+@@ -71,6 +71,49 @@ set(eviction_sources_c
          eviction/S3FIFOd.c
          eviction/other/flashProb.c
          eviction/other/S3LRU.c
@@ -59,12 +59,14 @@ index 49968ff..422135f 100644
 +        eviction/flash/evict/region_oracle.c
 +        eviction/flash/evict/region_gl.c
 +        eviction/flash/evict/region_sfifo.c
++        eviction/flash/evict/region_mv.c
 +        eviction/flash/core/gl_model.c
 +        eviction/flash/evict/region_lcs.c
 +        # hint providers (hint/): one file per provider, listed in rf_hint.c
 +        eviction/flash/hint/rf_hint.c
 +        eviction/flash/hint/basic.c
 +        eviction/flash/hint/split_threshold.c
++        eviction/flash/hint/mini.c
 +        eviction/flash/hint/split_threshold_req.c
 +        eviction/flash/hint/hitrate.c
 +        eviction/flash/hint/refine.c
@@ -90,7 +92,7 @@ index 49968ff..422135f 100644
  )
  
  # C++ eviction algorithms
-@@ -150,6 +191,7 @@ set(cache_sources_c
+@@ -150,6 +193,7 @@ set(cache_sources_c
      plugin.c
  )
  
@@ -516,10 +518,10 @@ index 9c32668..fdeb31f 100644
  #ifdef __cplusplus
 diff --git a/libCacheSim/cache/eviction/flash/RegionFlash.c b/libCacheSim/cache/eviction/flash/RegionFlash.c
 new file mode 100644
-index 0000000..e02b113
+index 0000000..c5030bb
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/RegionFlash.c
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,450 @@
 +//
 +//  RegionFlash.c — DRAM (object unit) + SSD two-tier flash cache, ported from
 +//  cachesim (docs/re-DESIGN.md §1, §6).
@@ -858,6 +860,7 @@ index 0000000..e02b113
 +  p->re_n = 1;
 +  p->re_p = 1.0;
 +  p->re_frac = 0.5;
++  p->re_target = 0.5, p->re_eps = 0.02;
 +  p->R = 16 * MiB;
 +  p->inclusion = INC_CACHELIB;
 +  snprintf(p->spec[0], 256, "all");
@@ -909,7 +912,7 @@ index 0000000..e02b113
 +  rng_seed(&p->rng_h, p->seed * 6 + 5);
 +  rng_seed(&p->rng_re, p->seed * 6 + 6);
 +  uint32_t envk = RF_KMAX - (p->re_ii ? 1 : 0);
-+  hint_env_t he = {envk, p->ssd_mode == SSD_REGION ? p->R : 0, &p->rng_h};
++  hint_env_t he = {envk, p->ssd_mode == SSD_REGION ? p->R : 0, &p->rng_h, p->ssd_cap};
 +  p->hops = rf_plugin(1, spec, &p->pv[1]);
 +  if (p->hops->create(&p->hint, &p->pv[1], &he) != 0) rf_die("RegionFlash: cannot create hint\n");
 +  p->khint = p->hops->max_classes(p->hint);
@@ -2146,10 +2149,10 @@ index 0000000..b0dfdd1
 +#endif /* REGIONFLASH_STATS_H */
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_params.c b/libCacheSim/cache/eviction/flash/core/rf_params.c
 new file mode 100644
-index 0000000..2a6b51d
+index 0000000..486fd60
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_params.c
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,110 @@
 +//
 +//  rf_params.c — parsing RegionFlash's -e parameters (see RegionFlash.c).
 +//
@@ -2200,7 +2203,10 @@ index 0000000..2a6b51d
 +    char *val = strchr(kv, '=');
 +    if (val == NULL) rf_die("RegionFlash: reinsert %s has no value\n", kv);
 +    *val++ = '\0';
-+    if (strcasecmp(kv, "n") == 0) p->re_n = (uint32_t)atoi(val), p->re_n_set = true;
++    if (strcasecmp(kv, "n") == 0 && strcasecmp(val, "auto") == 0) p->re_auto = true, p->re_n = 1, p->re_n_set = true;
++    else if (strcasecmp(kv, "n") == 0) p->re_n = (uint32_t)atoi(val), p->re_n_set = true;
++    else if (strcasecmp(kv, "target") == 0) p->re_target = strtod(val, NULL);
++    else if (strcasecmp(kv, "eps") == 0) p->re_eps = strtod(val, NULL);
 +    else if (strcasecmp(kv, "max_size") == 0) p->re_max_size = rf_size(val);
 +    else if (strcasecmp(kv, "p") == 0) p->re_p = strtod(val, NULL);
 +    else if (strcasecmp(kv, "max_frac") == 0) p->re_frac = strtod(val, NULL);
@@ -2259,10 +2265,10 @@ index 0000000..2a6b51d
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_report.c b/libCacheSim/cache/eviction/flash/core/rf_report.c
 new file mode 100644
-index 0000000..0f83397
+index 0000000..41787e3
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_report.c
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,382 @@
 +//
 +//  rf_report.c — RegionFlash's counters out: the end-of-run table, P.json,
 +//  P.class.csv, P.sizebin.csv, the per-interval CSVs, and the size-bin views
@@ -2531,6 +2537,21 @@ index 0000000..0f83397
 +             p->re_recent ? "recent" : p->re_score ? "score" : "hits", p->re_n, (unsigned long long)p->re_max_size, p->re_p, p->re_frac,
 +             p->re_ii ? "ii" : "pi", p->re_reclass ? "reclassify" : "keep",
 +             p->re_hint ? "yes" : "no");
++  if (p->re_on && p->re_auto) {  // n=auto: per class, rewrites tried / hit again by h, and how often each n was in force
++    FILE *g = rf_open(p, ".reauto.json");
++    fprintf(g, "{\"target\": %g, \"eps\": %g, \"class\": [", p->re_target, p->re_eps);
++    for (uint32_t c = 0; c < p->kmax; c++) {
++      fprintf(g, "%s{\"try\": [", c ? ", " : "");
++      for (int h = 1; h <= 8; h++) fprintf(g, "%s%llu", h > 1 ? ", " : "", (unsigned long long)p->re_try[c][h]);
++      fprintf(g, "], \"hit\": [");
++      for (int h = 1; h <= 8; h++) fprintf(g, "%s%llu", h > 1 ? ", " : "", (unsigned long long)p->re_hit[c][h]);
++      fprintf(g, "], \"n_used\": [");  // decisions made while n = 1..9 (9: none)
++      for (int n = 1; n <= 9; n++) fprintf(g, "%s%llu", n > 1 ? ", " : "", (unsigned long long)p->re_auto_n[c][n]);
++      fprintf(g, "]}");
++    }
++    fprintf(g, "]}\n");
++    fclose(g);
++  }
 +  FILE *f = rf_open(p, ".json");
 +  fprintf(f,
 +          "{\"config\": {\"ssd_size\": %llu, \"ssd_mode\": \"%s\", "
@@ -2765,10 +2786,10 @@ index 0000000..212351a
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_basic.c b/libCacheSim/cache/eviction/flash/evict/region_basic.c
 new file mode 100644
-index 0000000..909d50f
+index 0000000..f410223
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_basic.c
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,191 @@
 +//
 +//  region_basic.c — the Region eviction policies ported from cachesim
 +//  (rpolicy/reg_basic.c):
@@ -2781,6 +2802,20 @@ index 0000000..909d50f
 +//  When the LRU tail belongs to class fc and fc holds no more than ff * N
 +//  sealed regions, the oldest region of another class is evicted instead
 +//  (ff = 0, the default, is plain lru).
++//  auto=1 moves ff while running (perturb and observe): every `win` evictions
++//  (default 4N: a window must outlast the time a large object evicted now
++//  takes to come back as a miss, or lowering ff looks good because the small
++//  class's extra hits show at once and the large class's losses only later;
++//  with win = N the floor ran down to 0.1 on the synthetic 3:1) it measures J = hit bytes / requested bytes + w * SSD hits /
++//  requests over the window, and moves ff by `step` (default 0.02) the same
++//  way again if J rose, the other way if it fell; ff starts at the given ff,
++//  or else at class fc's share of the bytes admitted in the first window in
++//  which class fc admits anything (the condition C_fc/C >= B_fc/B; again after
++//  the warm-up reset), and stays in [0, 0.99]. J is concave in the split (static
++//  partition, d mu / dT = -Var_w(lambda)), so ff climbs to the best split and
++//  then wanders by about one step around it. It needs no estimate of the
++//  marginal value, which the LRU tail of a class with many objects per region
++//  does not give (every such region is touched every few hundred requests).
 +//
 +
 +#include <math.h>
@@ -2798,6 +2833,11 @@ index 0000000..909d50f
 +  int mode;
 +  double beta, fc, ff;  // lru: class fc keeps at least ff * N sealed regions
 +  uint64_t *useq, cnt;  // lru / beta: order of the last seal or SSD hit
++  /* lru auto=1: window length, step, OHR weight, direction, the last J, the
++   * counters at the window start, picks in this window, sum of ff over picks */
++  double step, w, dir, jprev, ffsum;
++  uint64_t win, np, picks, r0, rb0, h0, hb0, ab0[256];
++  bool on, ffstart, pend;  // ffstart: no ff given, start from the admitted byte share; pend: not started yet
 +};
 +
 +static rf_rpol_t *mk(const rf_rview_t *v, int mode, double beta) {
@@ -2815,11 +2855,14 @@ index 0000000..909d50f
 +}
 +
 +static rf_rpol_t *lru_create(const rf_rview_t *v, const char *params) {
-+  double fc = 1, ff = 0;
++  double fc = 1, ff = -1, on = 0, w = 0, win = 0, step = 0.02;
 +  rf_rpol_parse("lru", params,
-+                (const rf_kv_t[]){{"fc", &fc, NULL, 0}, {"ff", &ff, NULL, 0}, {NULL, NULL, NULL, 0}});
++                (const rf_kv_t[]){{"fc", &fc, NULL, 0}, {"ff", &ff, NULL, 0}, {"auto", &on, NULL, 0}, {"w", &w, NULL, 0},
++                                  {"win", &win, NULL, 0}, {"step", &step, NULL, 0}, {NULL, NULL, NULL, 0}});
 +  rf_rpol_t *x = mk(v, M_LRU, 0);
-+  x->fc = fc, x->ff = ff;
++  x->on = on != 0;
++  x->fc = fc, x->ff = ff >= 0 ? ff : x->on ? 0.5 : 0, x->ffstart = x->pend = x->on && ff < 0;
++  x->w = w, x->win = win > 0 ? (uint64_t)win : 4 * (uint64_t)v->N, x->step = step, x->dir = 1, x->jprev = NAN;
 +  return x;
 +}
 +
@@ -2853,9 +2896,46 @@ index 0000000..909d50f
 +  return v->admit_n[c] ? (double)v->admit_b[c] / (double)v->admit_n[c] : NAN;
 +}
 +
++static void climb(rf_rpol_t *x) {  // lru auto=1: one step of perturb and observe at each window end
++  const rf_rview_t *v = x->v;
++  x->picks++, x->ffsum += x->ff;
++  if (*v->reqs < x->r0) x->np = 0, x->pend = x->ffstart;  // counters reset (warm-up end): start again from the byte share
++  if (x->np++ == 0) {
++    x->r0 = *v->reqs, x->rb0 = *v->req_bytes, x->h0 = *v->ssd_hits, x->hb0 = *v->hit_bytes;
++    for (uint32_t c = 0; c < v->kmax && c < 256; c++) x->ab0[c] = v->admit_b[c];
++    return;
++  }
++  if (x->pend) {
++    /* no ff given: start from class fc's share of the bytes admitted in this window (C_fc/C >= B_fc/B).
++     * One window, not all time: a learned split (split_threshold) puts everything in class 0 until its first tau */
++    if (x->np <= x->win) return;
++    uint64_t s = 0, a = v->admit_b[(uint32_t)x->fc] - x->ab0[(uint32_t)x->fc];
++    for (uint32_t c = 0; c < v->kmax && c < 256; c++) s += v->admit_b[c] - x->ab0[c];
++    if (a && s) x->ff = fmin(0.99, (double)a / (double)s), x->pend = false, x->jprev = NAN;
++    x->np = 0;
++    return;
++  }
++  if (x->np <= x->win || *v->reqs == x->r0 || *v->req_bytes == x->rb0) return;
++  double j = (double)(*v->hit_bytes - x->hb0) / (double)(*v->req_bytes - x->rb0) +
++             x->w * (double)(*v->ssd_hits - x->h0) / (double)(*v->reqs - x->r0);
++  if (j == j && x->jprev == x->jprev && j < x->jprev) x->dir = -x->dir;
++  x->jprev = j, x->np = 0;
++  x->ff = fmin(0.99, fmax(0, x->ff + x->dir * x->step));
++}
++
++static void lru_report(const rf_rpol_t *x, FILE *f) {
++  if (!x->on) {
++    fputs("null", f);
++    return;
++  }
++  fprintf(f, "{\"auto\": %d, \"w\": %g, \"win\": %llu, \"step\": %g, \"ff_end\": %.4f, \"ff_mean\": %.4f, \"picks\": %llu}", x->on,
++          x->w, (unsigned long long)x->win, x->step, x->ff, x->picks ? x->ffsum / x->picks : x->ff, (unsigned long long)x->picks);
++}
++
 +static uint32_t pick(rf_rpol_t *x) {
 +  const rf_rview_t *v = x->v;
 +  uint32_t tail[256], n[256] = {0};
++  if (x->on) climb(x);
 +  bool per_class = x->mode == M_BETA || x->ff > 0;
 +  for (uint32_t c = 0; c < 256; c++) tail[c] = RF_NONE;
 +  for (uint32_t r = 0; r < v->N; r++) {
@@ -2894,7 +2974,7 @@ index 0000000..909d50f
 +const rf_rpol_ops_t rf_rpol_fifo_ops = {"fifo", fifo_create, destroy, on_seal, on_touch,
 +                                        pick, NULL, NULL, NULL};
 +const rf_rpol_ops_t rf_rpol_lru_ops = {"lru", lru_create, destroy, on_seal, on_touch,
-+                                       pick, NULL, NULL, NULL};
++                                       pick, NULL, NULL, lru_report};
 +const rf_rpol_ops_t rf_rpol_beta_ops = {"beta", beta_create, destroy, on_seal, on_touch,
 +                                        pick, NULL, NULL, NULL};
 +
@@ -3374,6 +3454,135 @@ index 0000000..860b154
 +#ifdef __cplusplus
 +}
 +#endif
+diff --git a/libCacheSim/cache/eviction/flash/evict/region_mv.c b/libCacheSim/cache/eviction/flash/evict/region_mv.c
+new file mode 100644
+index 0000000..c89d940
+--- /dev/null
++++ b/libCacheSim/cache/eviction/flash/evict/region_mv.c
+@@ -0,0 +1,123 @@
++//
++//  region_mv.c — region-evict=mv: the class split of the SSD decided while
++//  running, by equal marginal value (the KKT condition of the static split).
++//
++//  Each class is an LRU list of its sealed regions. The marginal value of a
++//  class is the hit density at its LRU tail: hits on its `tail` oldest regions
++//  per region, decayed with half-life `half` evictions. The objective is
++//  BHR + w * OHR, so a hit is worth s_c / s_req + w (s_c: the class's mean
++//  admitted size, s_req: the mean request size): w = 0 is BHR alone, a large w
++//  OHR alone, w = 1 counts one point of each the same. pick() evicts the tail
++//  of the class with the lowest value; a class whose tail is hit more keeps
++//  more regions. Because each class's hit ratio is concave in its share
++//  (d mu / dT = -Var_w(lambda)), equal tail density is the global optimum,
++//  and this local rule moves toward it. A class keeps at least `min` regions.
++//  Params: region-params=w=<OHR weight>/tail=<regions>/half=<evictions>/min=<regions>
++//  (defaults 0 / 2 / N / 1).
++//
++
++#include <math.h>
++
++#include "region_policy.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define MVK 256
++
++struct rf_rpol {
++  const rf_rview_t *v;
++  double w, half, keep, minr;
++  uint32_t tail;
++  uint64_t *useq, cnt, thr[MVK], picks;
++  double hit[MVK], share[MVK];  // decayed tail hits; sum over picks of the region count
++};
++
++static rf_rpol_t *create(const rf_rview_t *v, const char *params) {
++  double w = 0, tail = 2, half = 0, minr = 1;
++  rf_rpol_parse("mv", params,
++                (const rf_kv_t[]){{"w", &w, NULL, 0}, {"tail", &tail, NULL, 0}, {"half", &half, NULL, 0},
++                                  {"min", &minr, NULL, 0}, {NULL, NULL, NULL, 0}});
++  rf_rpol_t *x = calloc(1, sizeof(*x));
++  x->v = v, x->w = w, x->tail = tail < 1 ? 1 : (uint32_t)tail, x->minr = minr;
++  x->half = half > 0 ? half : v->N;
++  x->keep = pow(0.5, 1.0 / x->half);
++  x->useq = calloc(v->N, sizeof(uint64_t));
++  return x;
++}
++
++static void destroy(rf_rpol_t *x) {
++  free(x->useq);
++  free(x);
++}
++
++static void on_seal(rf_rpol_t *x, uint32_t r) { x->useq[r] = ++x->cnt; }
++
++static double worth(const rf_rpol_t *x, uint32_t c) {  // value of one hit in class c
++  const rf_rview_t *v = x->v;
++  if (!v->admit_n[c] || !*v->req_bytes) return 1;
++  return ((double)v->admit_b[c] / v->admit_n[c]) / ((double)*v->req_bytes / *v->reqs) + x->w;
++}
++
++static void on_touch(rf_rpol_t *x, uint32_t r) {  // a hit on a tail region counts for its class
++  uint32_t c = x->v->reg[r].cls;
++  if (c < MVK && x->useq[r] <= x->thr[c]) x->hit[c] += worth(x, c);
++  x->useq[r] = ++x->cnt;
++}
++
++static uint32_t pick(rf_rpol_t *x) {
++  const rf_rview_t *v = x->v;
++  uint32_t n[MVK] = {0}, K = v->kmax < MVK ? v->kmax : MVK;
++  uint64_t old[MVK][8];  // the `tail` (<= 8) oldest touch orders per class, ascending
++  uint32_t kt = x->tail < 8 ? x->tail : 8, tl[MVK];
++  for (uint32_t r = 0; r < v->N; r++) {
++    if (v->reg[r].state != RF_R_SEALED) continue;
++    uint32_t c = v->reg[r].cls;
++    if (c >= K) continue;
++    uint64_t u = x->useq[r];
++    uint32_t m = n[c] < kt ? n[c] : kt;
++    if (m < kt || u < old[c][kt - 1]) {  // insert u into the sorted list
++      uint32_t j = m < kt ? m : kt - 1;
++      while (j > 0 && old[c][j - 1] > u) old[c][j] = old[c][j - 1], j--;
++      old[c][j] = u;
++      if (j == 0) tl[c] = r;
++    }
++    n[c]++;
++  }
++  uint32_t best = RF_NONE;
++  double bv = INFINITY;
++  for (uint32_t c = 0; c < K; c++) {
++    if (!n[c]) continue;
++    x->thr[c] = old[c][(n[c] < kt ? n[c] : kt) - 1];
++    x->share[c] += n[c];
++    double d = x->hit[c] / (n[c] < kt ? n[c] : kt);  // tail hits per tail region
++    bool floor = n[c] <= x->minr;
++    if (!floor && (d < bv || (d == bv && best != RF_NONE && x->useq[tl[c]] < x->useq[best])))
++      bv = d, best = tl[c];
++  }
++  if (best == RF_NONE)  // every class at its floor: plain LRU
++    for (uint32_t c = 0; c < K; c++)
++      if (n[c] && (best == RF_NONE || x->useq[tl[c]] < x->useq[best])) best = tl[c];
++  for (uint32_t c = 0; c < K; c++) x->hit[c] *= x->keep;
++  x->picks++;
++  return best;
++}
++
++static void report(const rf_rpol_t *x, FILE *f) {  // time-averaged share of the sealed regions per class
++  double tot = 0;
++  for (uint32_t c = 0; c < MVK; c++) tot += x->share[c];
++  fprintf(f, "{\"w\": %g, \"tail\": %u, \"half\": %g, \"picks\": %llu, \"share\": [", x->w, x->tail, x->half,
++          (unsigned long long)x->picks);
++  uint32_t K = x->v->kmax < MVK ? x->v->kmax : MVK;
++  for (uint32_t c = 0; c < K; c++) fprintf(f, "%s%.4f", c ? ", " : "", tot ? x->share[c] / tot : 0);
++  fprintf(f, "], \"tail_value\": [");
++  for (uint32_t c = 0; c < K; c++) fprintf(f, "%s%.4g", c ? ", " : "", x->hit[c]);
++  fprintf(f, "]}");
++}
++
++const rf_rpol_ops_t rf_rpol_mv_ops = {"mv", create, destroy, on_seal, on_touch, pick, NULL, NULL, report};
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_oracle.c b/libCacheSim/cache/eviction/flash/evict/region_oracle.c
 new file mode 100644
 index 0000000..237efa3
@@ -3495,7 +3704,7 @@ index 0000000..237efa3
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_policy.c b/libCacheSim/cache/eviction/flash/evict/region_policy.c
 new file mode 100644
-index 0000000..06e7fd2
+index 0000000..471465b
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_policy.c
 @@ -0,0 +1,144 @@
@@ -3517,10 +3726,10 @@ index 0000000..06e7fd2
 +#endif
 +
 +extern const rf_rpol_ops_t rf_rpol_fifo_ops, rf_rpol_lru_ops, rf_rpol_beta_ops,
-+    rf_rpol_oracle_ops, rf_rpol_gl_ops, rf_rpol_sfifo_ops;
++    rf_rpol_oracle_ops, rf_rpol_gl_ops, rf_rpol_sfifo_ops, rf_rpol_mv_ops;
 +static const rf_rpol_ops_t *const RF_RPOLS[] = {&rf_rpol_fifo_ops,   &rf_rpol_lru_ops,
 +                                                &rf_rpol_beta_ops,   &rf_rpol_oracle_ops,
-+                                                &rf_rpol_gl_ops,     &rf_rpol_sfifo_ops, NULL};
++                                                &rf_rpol_gl_ops,     &rf_rpol_sfifo_ops, &rf_rpol_mv_ops, NULL};
 +
 +const rf_rpol_ops_t *rf_rpol_find(const char *name) {
 +  for (const rf_rpol_ops_t *const *x = RF_RPOLS; *x != NULL; x++)
@@ -3645,10 +3854,10 @@ index 0000000..06e7fd2
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_policy.h b/libCacheSim/cache/eviction/flash/evict/region_policy.h
 new file mode 100644
-index 0000000..c21d382
+index 0000000..28b2a14
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_policy.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,93 @@
 +//
 +//  region_policy.h — which sealed Region RegionFlash evicts next.
 +//
@@ -3682,6 +3891,8 @@ index 0000000..c21d382
 +  uint64_t R;                          // region size
 +  const int64_t *t;                    // the current request, from 0
 +  const uint64_t *admit_n, *admit_b;   // [kmax] objects / bytes admitted, all time
++  const uint64_t *reqs, *req_bytes;    // requests / requested bytes so far (since the warm-up reset)
++  const uint64_t *ssd_hits, *hit_bytes; // SSD hits / hit bytes (DRAM and SSD) so far
 +} rf_rview_t;
 +
 +typedef struct rf_rpol rf_rpol_t;
@@ -4597,6 +4808,235 @@ index 0000000..9bbec84
 +const rf_hint_ops_t rf_hint_key_ops = KEY_OPS("key", P_KEY, key_create);
 +const rf_hint_ops_t rf_hint_oracle_key_ops = KEY_OPS("oracle_key", P_OKEY, okey_create);
 +const rf_hint_ops_t rf_hint_oracle_keyinfo_ops = KEY_OPS("oracle_keyinfo", P_INFO, info_create);
+diff --git a/libCacheSim/cache/eviction/flash/hint/mini.c b/libCacheSim/cache/eviction/flash/hint/mini.c
+new file mode 100644
+index 0000000..305af2b
+--- /dev/null
++++ b/libCacheSim/cache/eviction/flash/hint/mini.c
+@@ -0,0 +1,223 @@
++/* mini.c — hint=mini: the size threshold tau chosen while running by miniature
++ * simulation (Waldspurger et al., ATC'17), not by the shape of the size
++ * distribution.
++ *
++ * Objects whose id hashes to 0 mod M (SHARDS-style spatial sampling) are fed,
++ * request by request (on_get), to one shadow cache per candidate tau: the
++ * octaves 2^lo .. 2^hi and "no split". A shadow is a plain Region LRU with
++ * the main cache's N regions, each R/M bytes, one open region per class, no
++ * DRAM. Every `win` requests the shadows' objective
++ *   J = hit bytes / requested bytes + w * hits / requests
++ * (counters multiplied by `keep` after each window: 0.9 remembers about ten
++ * windows, 5e7 requests; with 0.5 the choice chased window noise on w01) is
++ * compared; tau moves to the best candidate when it beats the current one by
++ * more than `margin` in `hold` windows in a row. The first decision waits four
++ * windows for the shadows to fill and takes the best at once. Objects larger
++ * than a shadow region are left out of J (no candidate can hold them). Objects
++ * are never rewritten when tau moves.
++ *
++ * Why: the statistics rule (split_threshold) puts tau where the admitted-byte
++ * median is, which is not where splitting pays (Meta nha: 1 MiB, best 32 KiB)
++ * and jumps when mass moves between modes of the size distribution (w01:
++ * 2 KiB..64 KiB, best 256 KiB), while the best tau itself barely moves. A 1/16
++ * miniature picked the full-size best tau in 5 of 6 trace x w cases.
++ *
++ * Measured (full traces, Region LRU, no floor, no reinsertion, J at w = 0.1):
++ *   Meta nha: J 0.9941 (best fixed tau 32 KiB 0.9960, split_threshold 0.9864).
++ *   w01: the shadows end at 256-512 KiB (the best fixed tau, 0.3833), but
++ *   only after 6.5e7..2e8 requests, and J is 0.342-0.347: a split adopted
++ *   late does not reach what the same split gives from the start (256 KiB
++ *   adopted at 6.5e7 and kept: 0.3506). With only 256 KiB as candidate (so
++ *   from the start) the result equals hint=fixed exactly. Evicting the regions
++ *   written before the switch first made it worse (0.3222); why the early
++ *   phase matters this long is open.
++ *
++ * Parameters: hint=mini:M=64/lo=10/hi=24/w=0.1/win=5000000/margin=0.003/hold=2/keep=0.9/none=1
++ * (none=0: "no split" is not a candidate; the first candidate is used from the start)
++ */
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "../util/hashmap.h"
++#include "regionflash_hint.h"
++
++#define MCAND 40
++#define RNONE UINT32_MAX
++
++typedef struct {
++  uint64_t *ids;
++  uint32_t n, cap;
++  uint64_t used, seq;
++  uint8_t state;  // 0 free, 1 open, 2 sealed
++} sreg_t;
++
++typedef struct {
++  int64_t tau;  // < 0: no split
++  hmap_t obj;   // id -> (size << 24) | region
++  sreg_t *r;
++  uint32_t *freel, nfree, open[2];
++  uint64_t seq;
++  double reqs, rbytes, hits, hbytes;  // halved after each window
++} shadow_t;
++
++struct rf_hint {
++  shadow_t s[MCAND];
++  uint32_t k, N, ep, hist_n;
++  uint64_t M, Rs, win, nreq, switches;
++  double w, margin, keep;
++  int cur, cand, holdn, hold, started;
++  uint64_t hist_t[64];
++  int64_t hist_tau[64];
++};
++
++static const param_spec_t P[] = {
++    {"M", P_UINT, "64", NULL, "サンプリング: 物の 1/M を影に流す"},
++    {"lo", P_UINT, "10", NULL, "τ の候補の下端（2^lo）"},
++    {"hi", P_UINT, "24", NULL, "τ の候補の上端（2^hi）"},
++    {"w", P_DOUBLE, "0.1", NULL, "目的 BHR + w·OHR の w"},
++    {"win", P_UINT, "5000000", NULL, "比べる間隔（要求数）"},
++    {"margin", P_DOUBLE, "0.003", NULL, "切り替える J の差（0.003 = 0.3pt）"},
++    {"hold", P_UINT, "2", NULL, "その差が何窓続いたら切り替えるか"},
++    {"none", P_UINT, "1", NULL, "「分割なし」を候補に入れるか"},
++    {"keep", P_DOUBLE, "0.9", NULL, "窓ごとに数えた量に掛ける割合（0.9 = 約 10 窓を覚える）"},
++    {NULL}};
++
++static void sh_init(shadow_t *s, int64_t tau, uint32_t N) {
++  memset(s, 0, sizeof(*s));
++  s->tau = tau;
++  hm_init(&s->obj, 1024);
++  s->r = xcalloc(N, sizeof(sreg_t));
++  s->freel = xcalloc(N, sizeof(uint32_t));
++  for (uint32_t i = 0; i < N; i++) s->freel[i] = N - 1 - i;
++  s->nfree = N;
++  s->open[0] = s->open[1] = RNONE;
++}
++
++static uint32_t sh_alloc(shadow_t *s, uint32_t N) {
++  if (s->nfree) return s->freel[--s->nfree];
++  uint32_t v = RNONE;  // evict the least recently touched sealed region
++  for (uint32_t i = 0; i < N; i++)
++    if (s->r[i].state == 2 && (v == RNONE || s->r[i].seq < s->r[v].seq)) v = i;
++  if (v == RNONE) die("hint mini: no sealed region to evict (N too small)");
++  sreg_t *g = &s->r[v];
++  for (uint32_t j = 0; j < g->n; j++) {
++    uint64_t *x = hm_get(&s->obj, g->ids[j]);
++    if (x && (*x & 0xFFFFFF) == v) hm_del(&s->obj, g->ids[j]);
++  }
++  g->n = 0, g->used = 0, g->state = 0;
++  return v;
++}
++
++static void sh_access(shadow_t *s, uint64_t id, uint64_t size, uint32_t N, uint64_t Rs) {
++  if (size > Rs) return;  // too large for a shadow region: left out of J (the same for every candidate)
++  s->reqs += 1, s->rbytes += (double)size;
++  uint64_t *x = hm_get(&s->obj, id);
++  if (x) {
++    uint32_t r = (uint32_t)(*x & 0xFFFFFF);
++    if ((*x >> 24) == size) {
++      s->hits += 1, s->hbytes += (double)size;
++      s->r[r].seq = ++s->seq;
++      return;
++    }
++    hm_del(&s->obj, id);  // a size change is a miss; its old copy is dead space until evicted
++  }
++  uint32_t c = (s->tau >= 0 && (int64_t)size > s->tau) ? 1 : 0, o = s->open[c];
++  if (o == RNONE || s->r[o].used + size > Rs) {
++    if (o != RNONE) s->r[o].state = 2, s->r[o].seq = ++s->seq;
++    o = sh_alloc(s, N);
++    s->r[o].state = 1, s->r[o].seq = ++s->seq, s->open[c] = o;
++  }
++  sreg_t *g = &s->r[o];
++  if (g->n == g->cap) g->cap = g->cap ? g->cap * 2 : 64, g->ids = realloc(g->ids, g->cap * sizeof(uint64_t));
++  g->ids[g->n++] = id, g->used += size;
++  hm_put(&s->obj, id, (size << 24) | o);
++}
++
++static double sh_j(const shadow_t *s, double w) {
++  return s->reqs > 0 ? s->hbytes / s->rbytes + w * s->hits / s->reqs : 0;
++}
++
++static int create(rf_hint_t **out, const param_vals_t *v, const hint_env_t *env) {
++  if (!env->region_size || !env->ssd_cap) die("hint mini: needs ssd-mode=region");
++  rf_hint_t *h = xcalloc(1, sizeof(*h));
++  h->M = (uint64_t)pv_int(v, "M");
++  h->w = pv_dbl(v, "w"), h->margin = pv_dbl(v, "margin"), h->keep = pv_dbl(v, "keep");
++  h->win = (uint64_t)pv_int(v, "win"), h->hold = (int)pv_int(v, "hold");
++  uint32_t lo = (uint32_t)pv_int(v, "lo"), hi = (uint32_t)pv_int(v, "hi");
++  if (!h->M || !h->win || hi < lo || hi > 40 || hi - lo + 2 > MCAND || env->k_max < 2)
++    die("hint mini: need M, win > 0, lo <= hi <= 40, hi - lo < %d, k_max >= 2", MCAND - 1);
++  h->N = (uint32_t)(env->ssd_cap / env->region_size);
++  h->Rs = env->region_size / h->M;
++  if (h->N < 3 || !h->Rs) die("hint mini: too few regions or R / M == 0");
++  if (pv_int(v, "none")) sh_init(&h->s[h->k++], -1, h->N);  // candidate 0: no split
++  for (uint32_t b = lo; b <= hi; b++) sh_init(&h->s[h->k++], (int64_t)1 << b, h->N);
++  h->cur = 0;
++  *out = h;
++  return 0;
++}
++
++static void destroy(rf_hint_t *h) {
++  for (uint32_t i = 0; i < h->k; i++) {
++    for (uint32_t j = 0; j < h->N; j++) free(h->s[i].r[j].ids);
++    free(h->s[i].r), free(h->s[i].freel), hm_free(&h->s[i].obj);
++  }
++  free(h);
++}
++
++static void decide(rf_hint_t *h) {
++  int b = 0;
++  for (uint32_t i = 1; i < h->k; i++)
++    if (sh_j(&h->s[i], h->w) > sh_j(&h->s[b], h->w)) b = (int)i;
++  bool move = false;
++  if (h->nreq < 4 * h->win) return;  // the shadows are still filling: no decision, counters kept
++  if (!h->started) h->started = 1, move = b != h->cur;
++  else if (b != h->cur && sh_j(&h->s[b], h->w) - sh_j(&h->s[h->cur], h->w) > h->margin) {
++    h->holdn = b == h->cand ? h->holdn + 1 : 1;
++    h->cand = b;
++    move = h->holdn >= h->hold;
++  } else h->holdn = 0;
++  if (move) {
++    h->cur = b, h->ep++, h->switches++, h->holdn = 0;
++    if (h->hist_n < 64) h->hist_t[h->hist_n] = h->nreq, h->hist_tau[h->hist_n++] = h->s[b].tau;
++  }
++  for (uint32_t i = 0; i < h->k; i++) {
++    shadow_t *s = &h->s[i];
++    s->reqs *= h->keep, s->rbytes *= h->keep, s->hits *= h->keep, s->hbytes *= h->keep;
++  }
++}
++
++static void on_get(rf_hint_t *h, const rf_hint_ev_t *e) {
++  uint64_t x = (e->id + 0x9E3779B97F4A7C15ull) * 0xBF58476D1CE4E5B9ull;
++  x ^= x >> 31;
++  if (x % h->M == 0)
++    for (uint32_t i = 0; i < h->k; i++) sh_access(&h->s[i], e->id, e->size, h->N, h->Rs);
++  if (++h->nreq % h->win == 0) decide(h);
++}
++
++static uint32_t on_insert(rf_hint_t *h, const rf_hint_ev_t *e) {
++  int64_t t = h->s[h->cur].tau;
++  return t >= 0 && (int64_t)e->size > t ? 1 : 0;
++}
++
++static uint32_t epoch(const rf_hint_t *h) { return h->ep; }
++static uint32_t bounds(const rf_hint_t *h, int64_t *out, uint32_t max) {
++  int64_t t = h->s[h->cur].tau;
++  if (t < 0 || max < 1) return 0;
++  out[0] = t;
++  return 1;
++}
++static uint32_t max_classes(const rf_hint_t *h) { return 2; }
++
++static void report(rf_hint_t *h, FILE *f) {
++  fprintf(f, "{\"tau\": %lld, \"switches\": %llu, \"M\": %llu, \"w\": %g, \"J\": {", (long long)h->s[h->cur].tau,
++          (unsigned long long)h->switches, (unsigned long long)h->M, h->w);
++  for (uint32_t i = 0; i < h->k; i++) fprintf(f, "%s\"%lld\": %.5f", i ? ", " : "", (long long)h->s[i].tau, sh_j(&h->s[i], h->w));
++  fprintf(f, "}, \"history\": [");
++  for (uint32_t i = 0; i < h->hist_n; i++) fprintf(f, "%s[%llu, %lld]", i ? ", " : "", (unsigned long long)h->hist_t[i], (long long)h->hist_tau[i]);
++  fprintf(f, "]}");
++}
++
++const rf_hint_ops_t rf_hint_mini_ops = {
++    .name = "mini", .params = P, .create = create, .destroy = destroy, .on_get = on_get, .on_insert = on_insert,
++    .epoch = epoch, .bounds = bounds, .max_classes = max_classes, .report = report};
 diff --git a/libCacheSim/cache/eviction/flash/hint/oracle_gdt.c b/libCacheSim/cache/eviction/flash/hint/oracle_gdt.c
 new file mode 100644
 index 0000000..2bb3a60
@@ -5195,10 +5635,10 @@ index 0000000..4ebae27
 +    .epoch = epoch, .bounds = bounds, .max_classes = max_classes};
 diff --git a/libCacheSim/cache/eviction/flash/hint/regionflash_hint.h b/libCacheSim/cache/eviction/flash/hint/regionflash_hint.h
 new file mode 100644
-index 0000000..aa0229c
+index 0000000..1d8bfba
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/regionflash_hint.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,96 @@
 +//
 +//  regionflash_hint.h — RegionFlash's hint interface: a hint provider sees
 +//  the cache's operations and gives each SSD write its class (write stream,
@@ -5260,6 +5700,7 @@ index 0000000..aa0229c
 +  uint32_t k_max;        // classes the provider may use at most
 +  uint64_t region_size;  // R (0 in ssd-mode=object)
 +  rng_t *rng;            // the provider's random numbers (seed * 6 + 5)
++  uint64_t ssd_cap;      // SSD capacity in bytes
 +} hint_env_t;
 +
 +typedef struct {
@@ -5296,7 +5737,7 @@ index 0000000..aa0229c
 +#endif /* REGIONFLASH_HINT_H */
 diff --git a/libCacheSim/cache/eviction/flash/hint/rf_hint.c b/libCacheSim/cache/eviction/flash/hint/rf_hint.c
 new file mode 100644
-index 0000000..beeaae6
+index 0000000..54b3a94
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/rf_hint.c
 @@ -0,0 +1,147 @@
@@ -5326,7 +5767,7 @@ index 0000000..beeaae6
 +    rf_hint_st_recursive_ops, rf_hint_split_threshold_req_ops, rf_hint_st_hitrate_ops,
 +    rf_hint_st_hr_refine_ops, rf_hint_hr_segment_ops, rf_hint_profile_ops, rf_hint_oracle_gdt_ops,
 +    rf_hint_key_ops, rf_hint_oracle_key_ops, rf_hint_oracle_keyinfo_ops, rf_hint_value_ops,
-+    rf_hint_pdens_ops;
++    rf_hint_pdens_ops, rf_hint_mini_ops;
 +static const rf_hint_ops_t *const RF_HINTS[] = {
 +    &rf_hint_none_ops,           &rf_hint_fixed_ops,
 +    &rf_hint_split_threshold_ops, &rf_hint_st_recursive_ops,
@@ -5335,7 +5776,7 @@ index 0000000..beeaae6
 +    &rf_hint_profile_ops,        &rf_hint_oracle_gdt_ops,
 +    &rf_hint_key_ops,            &rf_hint_oracle_key_ops,
 +    &rf_hint_oracle_keyinfo_ops, &rf_hint_value_ops,
-+    &rf_hint_pdens_ops,
++    &rf_hint_pdens_ops,         &rf_hint_mini_ops,
 +    NULL};
 +
 +/* spec "name:k=v/k=v" -> the ops of an admission policy (kind 0) or a hint
@@ -5910,10 +6351,10 @@ index 0000000..8cd7a6a
 +    on_evict, epoch, bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/regionflash_internal.h b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 new file mode 100644
-index 0000000..ab878ba
+index 0000000..af0ae70
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/regionflash_internal.h
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,277 @@
 +//
 +//  regionflash_internal.h — RegionFlash's state and the functions its modules
 +//  share. Not for use outside cache/eviction/flash/.
@@ -6045,6 +6486,13 @@ index 0000000..ab878ba
 +   * recently requested first (Colossus' "most recently used") */
 +  bool re_score, re_recent, re_n_set;
 +  uint32_t re_n;
++  /* n=auto: per class, the smallest n whose rewritten objects were hit again in
++   * their next stay with probability >= re_target (Laplace estimate over
++   * re_try / re_hit, by the hits h = 1..8 they had when rewritten); objects
++   * below it are still rewritten with probability re_eps to keep learning */
++  bool re_auto;
++  double re_target, re_eps;
++  uint64_t re_try[RF_KMAX][9], re_hit[RF_KMAX][9], re_auto_n[RF_KMAX][10];
 +  uint64_t re_max_size;
 +  double re_p, re_frac;
 +  cache_obj_t **rebuf;  // candidates of the region evictions in progress
@@ -6387,10 +6835,10 @@ index 0000000..fc9592e
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_region.c b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
 new file mode 100644
-index 0000000..30b66bf
+index 0000000..4ffb6c6
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,400 @@
 +//
 +//  rf_region.c — the SSD's Region store: placement into the OPEN region of a
 +//  write stream, sealing (a whole-region write, to the FDP device if any),
@@ -6562,6 +7010,7 @@ index 0000000..30b66bf
 +  }
 +  if (p->re_ii) c = p->khint;
 +  MD(o).cls = (uint8_t)c;
++  if (p->re_auto) MD(o).re_b = (uint8_t)(MD(o).ssd_hits < 8 ? MD(o).ssd_hits : 8);
 +  MD(o).ssd_hits = 0;  // admit_t is kept
 +  bool ok = rf_append(p, o, c);
 +  CNT(p, reinsert_objs, c, 1);
@@ -6653,6 +7102,12 @@ index 0000000..30b66bf
 +      CNT(p, chunk_orphan_bytes, MD(o).cls, orphan);
 +    }
 +    rf_ssd_invalidate(p, o);
++    if (MD(o).re_b) {  // n=auto: was its last rewrite hit again before this eviction
++      uint32_t c = MD(o).cls, b = MD(o).re_b;
++      p->re_try[c][b]++;
++      if (MD(o).ssd_hits) p->re_hit[c][b]++;
++      MD(o).re_b = 0;
++    }
 +    /* admit=budget: a rewrite also spends the write budget (admit.h charge); no room = not rewritten */
 +    bool keep = p->re_score ? (MD(o).flags & RF_KEEP) != 0
 +                            : (uint64_t)o->obj_size <= budget && rf_reinsert_ok(p, o) &&
@@ -6765,7 +7220,7 @@ index 0000000..30b66bf
 +    p->fdp.counting = &p->counting;
 +    rf_fdp_init(&p->fdp, p->N, p->R, p->kmax);
 +  }
-+  p->rview = (rf_rview_t){p->reg, p->N, p->kmax, p->R, &p->t, p->admit_n, p->admit_b};
++  p->rview = (rf_rview_t){p->reg, p->N, p->kmax, p->R, &p->t, p->admit_n, p->admit_b, &p->tot.reqs, &p->tot.req_bytes, &p->tot.ssd_hits, &p->tot.hit_bytes};
 +  if (p->rops != NULL) p->rpol = p->rops->create(&p->rview, rparams);
 +}
 +
@@ -6861,10 +7316,10 @@ index 0000000..2b95f79
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c b/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c
 new file mode 100644
-index 0000000..1b72770
+index 0000000..c44172f
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,167 @@
 +//
 +//  rf_ssd.c — the SSD tier as the request flow sees it: admission (admit ->
 +//  hint -> write), hits, invalidation, eviction accounting and reinsertion's
@@ -6925,7 +7380,20 @@ index 0000000..1b72770
 +}
 +
 +/* reinsertion: enough SSD hits since written, not too large, then a coin */
++/* n=auto: the class's threshold now (9 = none qualifies yet) */
++static uint32_t rf_re_auto_n(const rf_params_t *p, uint32_t c) {
++  for (uint32_t h = 1; h <= 8; h++)
++    if ((p->re_hit[c][h] + 1.0) / (p->re_try[c][h] + 2.0) >= p->re_target) return h;
++  return 9;
++}
++
 +bool rf_reinsert_ok(rf_params_t *p, const cache_obj_t *o) {
++  if (p->re_on && p->re_auto) {
++    uint32_t c = MD(o).cls, h = MD(o).ssd_hits, n = rf_re_auto_n(p, c);
++    p->re_auto_n[c][n]++;
++    if (h == 0 || (h < n && rng_double(&p->rng_re) >= p->re_eps)) return false;
++    return !(p->re_max_size && (uint64_t)o->obj_size > p->re_max_size);
++  }
 +  if (!p->re_on || MD(o).ssd_hits < p->re_n) return false;
 +  if (p->re_max_size && (uint64_t)o->obj_size > p->re_max_size) return false;
 +  return p->re_p >= 1 || rng_double(&p->rng_re) < p->re_p;  // cachesim reinsert_ok
@@ -6998,6 +7466,7 @@ index 0000000..1b72770
 +  uint32_t c = rf_hint_insert(p, o, src);
 +  MD(o).cls = (uint8_t)c;
 +  MD(o).ssd_hits = 0;
++  MD(o).re_b = 0;
 +  MD(o).admit_t = p->t;
 +  if (p->ssd_mode == SSD_OBJECT) {
 +    if (!rf_obj_write(p, o)) {  // the algorithm declined it
@@ -7977,7 +8446,7 @@ index 43f7c92..2859d35 100644
   * @brief get the number of bytes occupied, this is the default
   * for most algorithms, but some algorithms may have different implementation
 diff --git a/libCacheSim/include/libCacheSim/cacheObj.h b/libCacheSim/include/libCacheSim/cacheObj.h
-index e79e265..8299c5c 100644
+index e79e265..2ec5320 100644
 --- a/libCacheSim/include/libCacheSim/cacheObj.h
 +++ b/libCacheSim/include/libCacheSim/cacheObj.h
 @@ -27,7 +27,13 @@ typedef struct {
@@ -7995,7 +8464,7 @@ index e79e265..8299c5c 100644
  
  typedef struct {
    clockpro_status_e status;
-@@ -169,6 +175,22 @@ typedef struct {
+@@ -169,6 +175,23 @@ typedef struct {
    int32_t freq;
  } __attribute__((packed)) Sieve_obj_params_t;
  
@@ -8013,12 +8482,13 @@ index e79e265..8299c5c 100644
 +  uint32_t snap_row;
 +  uint8_t snap_gen;
 +  uint32_t last_t;  // its last request (request number mod 2^32; RF_SEEN)
-+} __attribute__((packed)) RegionFlash_obj_metadata_t;  // 30 B: the union is 32
++  uint8_t re_b;     // reinsert n=auto: its SSD hits (1..8) when last rewritten, 0 = not rewritten
++} __attribute__((packed)) RegionFlash_obj_metadata_t;  // 31 B: the union is 32
 +
  // ############################## cache obj ###################################
  struct cache_obj;
  typedef struct cache_obj {
-@@ -216,6 +238,7 @@ typedef struct cache_obj {
+@@ -216,6 +239,7 @@ typedef struct cache_obj {
      MERLIN_obj_metadata_t MERLIN;
      S4FIFO_obj_metadata_t S4FIFO;
      Sieve_obj_params_t sieve;

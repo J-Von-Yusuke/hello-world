@@ -214,6 +214,38 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜nproc に収める
 | | 240 GiB 想定:BMR の時間変化 | 定常に入っているか |
 | | 240 GiB 想定:書き込みの内訳 | 受け入れと再挿入、大物の容量の下限ごと |
 
+## 6.2 自動推定の実験（tune）
+
+分類閾値・分類ごとの容量の配分・再挿入の閾値を**実行中に自動で決めたとき**に、手で選んだ最良（固定の格子）にどこまで届くか、
+目標（基準「分類なし＋再挿入 n=1」に対して OHR↑・BMR↓・SSD 書き込み↓）を満たすかを測る。計画と背景は `../docs/auto_tuning_plan.html`。
+
+```bash
+./run.sh tune-synth          # 合成の 95:5・3:1（答えが分かっている負荷）。6,000 万要求 × 2 負荷 × 25 構成、32 コアで数分
+./run.sh tune meta_nha       # traces.tsv のトレース（名前を省くと全部）。validity と同じ SSD・DRAM・Region
+./run.sh tune-figs           # 図だけ作り直す（TUNE_W=1 ./run.sh tune-figs で目的の重みを変える）
+```
+
+| 自動で決めるもの | RegionFlash の指定 | 決め方 |
+|---|---|---|
+| 分類閾値（1〜3 個） | `hint=split_threshold` / `st_hr_refine:k_max=3` / `st_recursive:depth=2` | 書いた物の大きさの分布から SplitThreshold が決め直す（既存） |
+| 分類閾値（目的から） | `hint=mini:M=64/w=0.1` | 物の 1/M を τ の候補（各オクターブと分割なし）ごとの影の Region LRU に流し、目的が最大の τ を採る（縮小シミュレーション）。Meta で最良の固定 τ に −0.19pt（SplitThreshold は −0.96pt）。途中で τ を切り替えると効果が出きらない場合がある（w01）。影の分だけメモリが増える |
+| 容量の配分（本命） | `region-evict=lru,region-params=auto=1/w=<重み>` | 大物の下限 ff を、N 回の追い出しごとに測った目的 BHR + w·OHR が上がる向きへ 0.02 ずつ動かす（山登り）。出発点は大物が受け入れたバイトの割合 |
+| 容量の配分（比較用） | `region-evict=mv,region-params=w=<重み>` | 分類ごとの LRU 末尾のヒット密度が最も低い分類から追い出す。1 Region に物が多い分類では末尾が冷えず限界値を誤る（合成 95:5 で −2.6pt） |
+| 再挿入の閾値 | `reinsert=hits:n=auto/target=0.5/eps=0.02` | 分類ごと・ヒット回数 h ごとに「書き直した物が次の滞在でまた当たった割合」を数え、target を越える最小の h を n にする |
+
+構成は `config.sh` の `TUNE_JOBS`（`id|指定` の並び）。出力は `work/tune/<名前>/<id>/P.json`（n=auto は `P.reauto.json` も）、
+1 トレースの要約 `work/tune/<名前>.json`、図 `work/tune/figs/`（交換曲線・書き込みの内訳・n=auto の学習・目標の達成・自動と最良の差・分類の数）。
+見本（400 万要求の試運転。数値は意味を持たない）: `../docs/kit_tune_figs_sample/`。
+
+理論的根拠（再挿入の閾値・容量の配分）: `../docs/auto_tuning_theory.md`（同じ内容の図つき版 `.html`）。
+
+注意:
+- `./run.sh all` には tune を含めない（時間がかかるので別に実行する）。
+- 同時実行数は validity と同じメモリの見積り（§4.1）で決まるが、`hint=mini` の影の分（物の約 (候補数)/M 倍の表）は見積りに入っていない。物の多いトレース（例 w01：1 本 約 5.8 GB）では `TUNE_P=3` のように小さく固定する。WSL でメモリを使い切ると WSL ごと落ちる。
+- 構成は 31 個（`TUNE_JOBS`）。全量の Meta nha で 1 本 70〜90 秒、P=4 で 10 分ほど。
+
+分類は多くても 4 つ（閾値 3 個）まで: 分類ごとに書き込み中の Region（FDP なら RU）が要り、書き込み先が散るほど各 Region の書き込み速度が落ちて開いたままの時間が延び、空きも増えるため。
+
 ## 7. 制約と注意
 
 - 物の数の上限: `cdn_prefix_check` と `og_xform` は物が約 6,700 万個まで（超えると `NN overflow`。`src/*.c` を `-DNN=` 付きでコンパイルし直す）。`og_info` は無制限。

@@ -46,6 +46,42 @@ REGION_BYTES=${REGION_BYTES:-}             # 空 = SSD ÷ REGION_N。バイト�
 WRITE_MARKS_TB=${WRITE_MARKS_TB:-"1.5"}    # 「先頭 W TB 書き込んだ時点」で効果を測る W（TB = 10^12 B。全受け入れ・分類なしの SSD 書き込み量で数える）
 STATS=${STATS:-1}                          # 1 = og_trace_stats（サイズ・頻度の分布統計）も取る
 
+# ---- 自動推定の実験（tune）: 分類閾値 × 容量の配分 × 再挿入の閾値 ---------------------
+# 1 行 = "id|RegionFlash の指定"。DRAM・Region・chunk は validity と同じ（tune_synth は縮小 SSD の固定値）。
+# 分類は多くても 4 つ（閾値 3 個）まで: 分類ごとに開いた Region が 1 つ要り、書き込み先が散るほど
+# 各 Region（FDP なら RU）の書き込み速度が落ちて開いたままの時間が延び、空きも増えるため。
+ST2="hint=split_threshold"; ST3="hint=st_hr_refine:k_max=3"; ST4="hint=st_recursive:depth=2"
+RE1="reinsert=hits:n=1"; RE3="reinsert=hits:n=3"; REA="reinsert=hits:n=auto/target=0.5"
+TUNE_JOBS=(
+  # 基準（既存の構成）と理想 SSD
+  "none|hint=none,region-evict=lru"            "none_h1|hint=none,region-evict=lru,$RE1"
+  "none_auto|hint=none,region-evict=lru,$REA"
+  "obj|ssd-mode=object,ssd-algo=lru,hint=none"
+  # A 容量の配分（分類 2、再挿入なし）: 固定の下限 ff、自動の hc（ff を測った目的 BHR + w·OHR で山登り。本命）、
+  #   自動の mv（末尾のヒット密度で配分。1 Region に物が多い分類で限界値を誤るので比較用）
+  "st_lru|$ST2,region-evict=lru" "st_lru_auto|$ST2,region-evict=lru,$REA"
+  "st_ff50|$ST2,region-evict=lru,region-params=fc=1/ff=0.5" "st_ff70|$ST2,region-evict=lru,region-params=fc=1/ff=0.7"
+  "st_ff80|$ST2,region-evict=lru,region-params=fc=1/ff=0.8" "st_ff90|$ST2,region-evict=lru,region-params=fc=1/ff=0.9"
+  "st_ff95|$ST2,region-evict=lru,region-params=fc=1/ff=0.95"
+  "st_hc0.03|$ST2,region-evict=lru,region-params=auto=1/w=0.03" "st_hc0.1|$ST2,region-evict=lru,region-params=auto=1/w=0.1"
+  "st_hc0.3|$ST2,region-evict=lru,region-params=auto=1/w=0.3"   "st_hc1|$ST2,region-evict=lru,region-params=auto=1/w=1"
+  "st_hc0.1_auto|$ST2,region-evict=lru,region-params=auto=1/w=0.1,$REA"
+  "st_mv0.03|$ST2,region-evict=mv,region-params=w=0.03" "st_mv0.1|$ST2,region-evict=mv,region-params=w=0.1"
+  "st_mv0.3|$ST2,region-evict=mv,region-params=w=0.3"   "st_mv1|$ST2,region-evict=mv,region-params=w=1"
+  # B 再挿入の閾値（固定 n=1, 3 と自動）
+  "st_ff90_h1|$ST2,region-evict=lru,region-params=fc=1/ff=0.9,$RE1" "st_ff90_h3|$ST2,region-evict=lru,region-params=fc=1/ff=0.9,$RE3"
+  "st_ff90_auto|$ST2,region-evict=lru,region-params=fc=1/ff=0.9,$REA"
+  "st_mv0.3_h1|$ST2,region-evict=mv,region-params=w=0.3,$RE1" "st_mv0.3_auto|$ST2,region-evict=mv,region-params=w=0.3,$REA"
+  # D 分割閾値を縮小シミュレーションで選ぶ（hint=mini）と、それに下限の山登り・n=auto を重ねた全部自動
+  "mini_lru|hint=mini,region-evict=lru" "mini_hc0.1_auto|hint=mini,region-evict=lru,region-params=auto=1/w=0.1,$REA"
+  # C 分類の数（2 / 3 / 4）
+  "k3_lru_auto|$ST3,region-evict=lru,$REA" "k4_lru_auto|$ST4,region-evict=lru,$REA"
+  "k3_mv0.3_auto|$ST3,region-evict=mv,region-params=w=0.3,$REA" "k4_mv0.3_auto|$ST4,region-evict=mv,region-params=w=0.3,$REA"
+)
+TUNE_W=${TUNE_W:-0.3}                      # 図で「良い構成」を選ぶ目的 BHR + w·OHR の w（mv の w と同じ意味）
+TUNE_SYNTH=${TUNE_SYNTH:-"r95to5:1K:4194304:0.95:0.9,512K:25600:0.05:0.9 r3to1:1K:4194304:0.75:0.9,512K:25600:0.25:0.9"}
+TUNE_SYNTH_N=${TUNE_SYNTH_N:-60000000}     # 合成トレースの長さ（1/64 縮小 SSD: 3.75 GiB、R = 4 MiB、chunk 16 KiB、DRAM なし）
+
 # ---- 合成負荷（synth）------------------------------------------------------
 SYNTH_N=${SYNTH_N:-20000000}               # 合成トレースの要求数
 SYNTH_SCALED=${SYNTH_SCALED:-0}            # 1 = 規模を縮めた SSD 想定の負荷（scaled.py / writes.py: 2 億要求 × 多数）も走らせる。数時間かかる
