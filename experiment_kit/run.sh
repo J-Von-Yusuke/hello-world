@@ -12,7 +12,8 @@
 #   ./run.sh paper-figs         paper の図と表だけ作り直す
 #   ./run.sh paper-ext [name..] CacheLib の n=0・n=3 を追加で回す（PAPER_EXT_JOBS）→ work/paper/ext/（図と表も）。既にある結果は回さない
 #   ./run.sh paper-figs --ext   paper-ext の図と表だけ作り直す
-#   ./run.sh paper-robust [..]  頑健性の確認（chunk=0・再挿入の上限なし・乱数の種。PAPER_ROBUST_JOBS）→ work/paper/robust/ と paper_check の表
+#   ./run.sh paper-robust [..]  頑健性の確認（chunk=0・再挿入の上限なし・乱数の種。PAPER_ROBUST_JOBS）→ work/paper/robust/（表と図）
+#   ./run.sh paper-figs --robust 頑健性の図と表だけ作り直す
 #   ./run.sh all                setup → validity → synth → aggregate
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
@@ -266,7 +267,9 @@ EOF
   done
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
-paper_figs() { python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; }
+paper_figs() {  # --robust なら頑健性の図（work/paper/robust/）、それ以外は paper_figs.py（--ext を渡せば ext）
+  if [[ " $* " == *" --robust "* ]]; then python3 "$KIT/py/paper_robust_figs.py" "$WORK"; else python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
+}
 
 aggregate() { TUNE_W=$TUNE_W python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }
 need_build() {  # キットのパッチが当てたものと違う（キットを更新した）なら setup をやり直す（古い cachesim は新しい構成を知らず FAIL する）
@@ -287,7 +290,7 @@ case $cmd in
   tune-figs) tune_figs "$@" ;;
   paper) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper"; RUN_JOBS=PAPER_JOBS RUN_ROOT=$WORK/paper each_trace tune_one "$@"; paper_figs ;;
   paper-figs) paper_figs "$@" ;;
-  paper-robust) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/robust"; RUN_JOBS=PAPER_ROBUST_JOBS RUN_ROOT=$WORK/paper/robust each_trace tune_one "$@"; python3 "$KIT/py/paper_check.py" "$WORK" --robust ;;
+  paper-robust) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/robust"; RUN_JOBS=PAPER_ROBUST_JOBS RUN_ROOT=$WORK/paper/robust each_trace tune_one "$@"; python3 "$KIT/py/paper_check.py" "$WORK" --robust; paper_figs --robust ;;
   paper-ext) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/ext"; RUN_JOBS=PAPER_EXT_JOBS RUN_ROOT=$WORK/paper/ext each_trace tune_one "$@"; paper_figs --ext ;;
   all) setup && check && each_trace validity_one && synth && aggregate ;;
   *) sed -n '2,9p' "$0" ;;
