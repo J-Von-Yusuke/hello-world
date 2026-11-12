@@ -28,7 +28,7 @@ SYNTH_P=${SYNTH_P:-$NCPU}                  # 合成負荷の並列数（1 本あ
 SSD_DEFAULT=${SSD_DEFAULT:-30%}            # SSD 容量: 240G（固定）/ 30%（フットプリントに対する割合）。traces.tsv の ssd 列で個別指定
 DRAM_DIV=${DRAM_DIV:-30}                   # DRAM = SSD / DRAM_DIV        （meta: 240G の SSD に 8G）
 REGION_N=${REGION_N:-392}                  # Region の数。R = SSD / REGION_N（MiB に切り捨て。meta: 626.5 MiB）
-CHUNK=${CHUNK:-1M}                         # piece-wise 書き込みの幅（R より大きければ R に縮める）
+CHUNK=${CHUNK:-64K}                        # piece-wise 書き込みの幅（R より大きければ R に縮める）
 PIECE=${PIECE:-131072}                     # K(N)（piece 数）の数え方。CacheLib は 128 KiB
 INTERVAL=${INTERVAL:-10000}                # 先頭 N 要求の曲線の刻み（要求数）。小さいトレース（< 1000 万）は 1000 に
 NREQ=${NREQ:-}                             # 空 = 全要求。数字 = 各 RegionFlash 実行を先頭 NREQ 要求で打ち切る（試運転用）
@@ -43,7 +43,7 @@ SAT_VARIANTS=${SAT_VARIANTS:-"drop delete"} # SAT_VALUE の要求があるトレ
                                            #   drop = 無かったことにする / delete = その物を消す操作（要求に数えない）/
                                            #   asis = そのまま / fix = その物の他のサイズに置換（og_xform。感度用）
 SAT=${SAT:-auto}                           # auto = SAT_VALUE があれば上の SAT_VARIANTS、無ければ asis。変種を直接並べてもよい（例 "drop delete asis"）
-REGION_BYTES=${REGION_BYTES:-}             # 空 = SSD ÷ REGION_N。バイト数を書くと Region の大きさをそれに固定（meta の過去の測定は 656932864）
+REGION_BYTES=${REGION_BYTES-656932864}    # Region の大きさ [B]。既定 = 手元の FDP SSD の RU（626.5 MiB。Region = RU で DLWA = 1）。空 = SSD ÷ REGION_N
 WRITE_MARKS_TB=${WRITE_MARKS_TB:-"1.5"}    # 「先頭 W TB 書き込んだ時点」で効果を測る W（TB = 10^12 B。全受け入れ・分類なしの SSD 書き込み量で数える）
 STATS=${STATS:-1}                          # 1 = og_trace_stats（サイズ・頻度の分布統計）も取る
 
@@ -87,3 +87,15 @@ TUNE_SYNTH_N=${TUNE_SYNTH_N:-60000000}     # 合成トレースの長さ（1/64 
 SYNTH_N=${SYNTH_N:-20000000}               # 合成トレースの要求数
 SYNTH_SCALED=${SYNTH_SCALED:-0}            # 1 = 規模を縮めた SSD 想定の負荷（scaled.py / writes.py: 2 億要求 × 多数）も走らせる。数時間かかる
 SYNTH_SCALED_N=${SYNTH_SCALED_N:-200000000}
+
+# ---- 論文用の比較（paper）: Region を CacheLib の上限 256 MiB と RU（REGION_BYTES）で、方式 3 通り ----------
+# 1 行 = "id|指定"。region-size は各行で上書きする（同じキーは後の値が使われる）。SSD・DRAM・chunk は validity と同じ。
+PAPER_R256=${PAPER_R256:-268435456}        # CacheLib の Region の上限（256 MiB）
+PAPER_JOBS=(
+  "r256_base|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=1"
+  "r256_ff90_h3|region-size=$PAPER_R256,hint=split_threshold,region-evict=lru,region-params=fc=1/ff=0.9,reinsert=hits:n=3"
+  "r256_auto|region-size=$PAPER_R256,hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1,reinsert=hits:n=auto/target=0.5"
+  "ru_base|hint=none,region-evict=lru,reinsert=hits:n=1"
+  "ru_ff90_h3|hint=split_threshold,region-evict=lru,region-params=fc=1/ff=0.9,reinsert=hits:n=3"
+  "ru_auto|hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1,reinsert=hits:n=auto/target=0.5"
+)

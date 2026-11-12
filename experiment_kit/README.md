@@ -249,11 +249,41 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU（既定 = CPU 
 理論的根拠（再挿入の閾値・容量の配分）: `../docs/auto_tuning_theory.md`（同じ内容の図つき版 `.html`）。
 
 注意:
+- **キットを新しくしたとき**：`setup` は当てたパッチの印（`work/src/.rf_patch`）を `regionflash.patch` と照合し、違えば土台に戻して当て直し、cachesim を作り直す。validity / synth / tune / tune-synth も始める前に同じ照合をする。以前の版（印の無い setup）で作った `work/` の上に新しいキットを置いた場合も自動で作り直す。古い cachesim のままだと、新しい構成（`n=auto`・`auto=1`・`mv`・`mini`）は「reinsert does not have parameter target」などで FAIL する。`LCS_SRC` や `CACHESIM` を指定しているときは自動では作り直さない。
+- FAIL した構成（`P.json` が無いもの）は、同じコマンドをもう一度実行すればそれだけやり直す。
+- tune-synth の同時実行数は NCPU と空きメモリ ÷ 2.5 GB（1 本の実測 1.6〜1.9 GB）の小さい方。`TUNE_P` で固定もできる。
 - `./run.sh all` には tune を含めない（時間がかかるので別に実行する）。
 - 同時実行数は validity と同じメモリの見積り（§4.1）で決まるが、`hint=mini` の影の分（物の約 (候補数)/M 倍の表）は見積りに入っていない。物の多いトレース（例 w01：1 本 約 5.8 GB）では `TUNE_P=3` のように小さく固定する。WSL でメモリを使い切ると WSL ごと落ちる。
 - 構成は 31 個（`TUNE_JOBS`）。全量の Meta nha で 1 本 70〜90 秒、P=4 で 10 分ほど。
 
 分類は多くても 4 つ（閾値 3 個）まで: 分類ごとに書き込み中の Region（FDP なら RU）が要り、書き込み先が散るほど各 Region の書き込み速度が落ちて開いたままの時間が延び、空きも増えるため。
+
+## 6.3 論文用の比較（paper）：Region を CacheLib の上限と RU で比べる
+
+FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限（256 MiB）より大きい。Region を RU に合わせると DLWA = 1 になるが、Region が大きいぶん道連れと書き直し（アプリ層の GC）が増える。書き込み時のサイズ分類がその増加を抑えるかを、6 構成（`config.sh` の `PAPER_JOBS`）で測る。DLWA は実機と CacheLib で測るので、ここでは測らない。
+
+| id | Region | 方式 |
+|---|---|---|
+| `r256_base`（**基準**） | 256 MiB（`PAPER_R256`） | 分類なし、再挿入 n=1（CacheLib 相当） |
+| `r256_ff90_h3` / `r256_auto` | 256 MiB | サイズ分類＋大物の下限 0.9＋n=3（手動） / 下限の山登り＋n=auto（自動） |
+| `ru_base` | RU = `REGION_BYTES`（既定 656932864 = 626.5 MiB） | 分類なし、再挿入 n=1 |
+| `ru_ff90_h3` / `ru_auto` | RU | 同上の手動 / 自動 |
+
+```bash
+./run.sh paper               # traces.tsv の全部（名前を並べればそれだけ）。SSD・DRAM・chunk は validity と同じ。変種は埋め値を除いた主の変種
+./run.sh paper-figs          # 図と表だけ作り直す（PAPER_LANG=en で英語）
+```
+
+出力（`work/paper/`）は**図 1 枚（1 面ずつの版もある）と表 1 つ**（査読で見る量を抑える）。図は値そのものを並べ、基準（濃い灰）も含む。
+
+| ファイル | 中身 |
+|---|---|
+| `fig_main.svg` | 3 面まとめ：BMR [%]（低いほど良い）・SSD 書き込み量 [TB]（受け入れ＋再挿入＋詰め物、低いほど良い）・OHR [%]（参考）。横軸 = トレース（BMR・OHR は 2 本以上なら最後に平均） |
+| `fig_bmr.svg` / `fig_write.svg` / `fig_ohr.svg` | 同じ図の 1 面ずつ（1 つだけ載せるとき用）。`.png` は rsvg-convert などがあれば |
+| `table_main.tex` / `.md` / `.csv` | トレースごとに、基準の BMR・書き込み [TB]・OHR・アプリ層の書き込み増幅（書いたバイト ÷ 受け入れたバイト）と、各構成の基準との差「BMR [pt]（負が良い）/ 書き込み [%]（負が良い）/ OHR [pt]」。CSV は全構成の全指標 |
+| `index.html` | 図と表と要点 |
+
+`REGION_BYTES` の既定を RU（656932864）にしたので、validity と tune も Region = RU で走る。以前の「SSD ÷ 392」に戻すには `REGION_BYTES= ./run.sh …`（空にする）。`CHUNK` の既定は 64 KiB（piece-wise 書き込みの幅。validity・tune・paper 共通）。
 
 ## 7. 制約と注意
 

@@ -8,6 +8,8 @@
 #   ./run.sh tune [name..]      自動推定の実験（分類閾値 × 容量の配分 × 再挿入の閾値。TUNE_JOBS）→ work/tune/
 #   ./run.sh tune-synth         同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷での確認）
 #   ./run.sh tune-figs          tune の図だけ作り直す → work/tune/figs/
+#   ./run.sh paper [name..]     論文用の比較（Region 256 MiB / RU × 方式 3 通り。PAPER_JOBS）→ work/paper/（図 1 枚・表 1 つ）
+#   ./run.sh paper-figs         paper の図と表だけ作り直す
 #   ./run.sh all                setup → validity → synth → aggregate
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
@@ -20,11 +22,21 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # ---------------------------------------------------------------- setup
 setup() {
   for c in gcc cmake git python3 make; do command -v $c >/dev/null || die "$c が無い"; done
-  local src=$LCS_SRC PT=$KIT/regionflash.patch
+  local src=$LCS_SRC PT=$KIT/regionflash.patch sha stamp
+  sha=$(sha256sum "$PT" | cut -c1-16)
   if [ -z "$src" ]; then   # 自分で clone して土台に合わせる
     src=$WORK/src
     [ -d "$src/.git" ] || git clone -q "$LCS_REPO" "$src" || die "clone 失敗"
+    stamp=$(cat "$src/.rf_patch" 2>/dev/null)
+    if [ -d "$src/libCacheSim/cache/eviction/flash" ] && [ "$stamp" != "$sha" ]; then
+      # キットのパッチが新しくなった（または印の無い古い setup）: 土台に戻して当て直し、作り直す
+      log "regionflash.patch が当てたものと違う → $src を $LCS_BASE に戻して当て直し、cachesim を作り直す"
+      git -C "$src" reset -q --hard "$LCS_BASE" && git -C "$src" clean -qfd || die "$src を土台に戻せない"
+      rm -f "$WORK/b/bin/cachesim" "$WORK/b/bin/traceConv"
+    fi
     [ -d "$src/libCacheSim/cache/eviction/flash" ] || git -C "$src" checkout -q "$LCS_BASE" || die "checkout $LCS_BASE 失敗"
+  elif [ -d "$src/libCacheSim/cache/eviction/flash" ] && [ "$(cat "$src/.rf_patch" 2>/dev/null)" != "$sha" ]; then
+    log "注意: LCS_SRC=$src のパッチはキットの regionflash.patch と違う可能性がある（手元の clone なので自動では当て直さない）。新しい構成が FAIL するなら、その clone を $LCS_BASE に戻して ./run.sh setup をやり直す"
   fi
   if [ ! -d "$src/libCacheSim/cache/eviction/flash" ]; then   # 未パッチ（LCS_SRC の既存 clone も）なら当てる。ブランチは動かさない
     [ -d "$src/.git" ] || die "$src は git の clone ではない（パッチ済みのソースか、libCacheSim の clone を指定）"
@@ -32,6 +44,7 @@ setup() {
     git -C "$src" apply --check --whitespace=nowarn "$PT" 2>"$WORK/apply.err" ||
       die "$src（HEAD $head）にパッチが当たらない: $WORK/apply.err。土台は $LCS_BASE → git -C $src checkout $LCS_BASE（変更中なら先に git stash）"
     git -C "$src" apply --whitespace=nowarn "$PT" || die "パッチの適用に失敗"
+    echo "$sha" > "$src/.rf_patch"   # どのパッチを当てたかの印（キットを更新したら setup が当て直す）
     log "パッチを当てた: $src（HEAD $head）"
     [ "$(git -C "$src" rev-parse HEAD)" = "$(git -C "$src" rev-parse -q --verify "$LCS_BASE^{commit}")" ] ||
       log "注意: HEAD $head は土台 $LCS_BASE と違う。当たったが、結果を検証済みなのは $LCS_BASE の上だけ"
@@ -183,20 +196,25 @@ synth() {
 }
 
 # ---------------------------------------------------------------- 自動推定（tune）
-tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <warmup>  → TUNE_JOBS を全部走らせて要約
-  local O=$WORK/tune/$1 tr=$2 SSD=$3 DRAM=$4 R=$5 CH=$6 TP=$7 WU=$8 J s id spec E
+tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <warmup>  → 構成の一覧を全部走らせて要約
+  # 構成の一覧は RUN_JOBS（配列の名前。既定 TUNE_JOBS）、出力先は RUN_ROOT（既定 $WORK/tune）。paper も同じ仕組みで走る
+  local -n JOBS=${RUN_JOBS:-TUNE_JOBS}
+  local ROOT=${RUN_ROOT:-$WORK/tune}
+  local O=$ROOT/$1 tr=$2 SSD=$3 DRAM=$4 R=$5 CH=$6 TP=$7 WU=$8 J s id spec E
   mkdir -p "$O"; J=$O/jobs.txt; : > "$J"
-  E="dram-size=$DRAM,region-size=$R,chunk=$CH,dram-algo=lru,inclusion=cachelib,seal-on-repartition=inactive,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU}"
-  for s in "${TUNE_JOBS[@]}"; do
+  E="dram-size=$DRAM,chunk=$CH,dram-algo=lru,inclusion=cachelib,seal-on-repartition=inactive,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU}"
+  for s in "${JOBS[@]}"; do
     id=${s%%|*}; spec=${s#*|}
-    [[ "$spec" == *ssd-mode=object* ]] && spec="dram-size=$DRAM,dram-algo=lru,inclusion=cachelib,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU},$spec" || spec="$E,$spec"
+    if [[ "$spec" == *ssd-mode=object* ]]; then spec="dram-size=$DRAM,dram-algo=lru,inclusion=cachelib,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU},$spec"
+    elif [[ "$spec" == *region-size=* ]]; then spec="$E,$spec"   # 構成が Region の大きさを持つ（paper の 256 MiB など）
+    else spec="$E,region-size=$R,$spec"; fi
     echo "[ -f $O/$id/P.json ] || { mkdir -p $O/$id && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$spec,out=$O/$id/P\" > $O/$id/stdout 2>&1 || echo FAIL $O/$id; }" >> "$J"
   done
   echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"warmup\":\"$WU\",\"nreq_limit\":\"$NREQ\"}" > "$O/config.json"
   local p=${TUNE_P:-}; [ -z "$p" ] && { [ "$P" = auto ] && p=$NCPU || p=$P; }
-  log "tune $1: ${#TUNE_JOBS[@]} 構成を P=$p で"
+  log "$(basename "$ROOT") $1: ${#JOBS[@]} 構成を P=$p で"
   tr "\n" "\0" < "$J" | xargs -0 -P "$p" -I{} bash -c "{}"
-  python3 "$KIT/py/tune_one.py" "$O" > "$WORK/tune/$1.json" || log "tune $1: 要約に失敗"
+  python3 "$KIT/py/tune_one.py" "$O" > "$ROOT/$1.json" || log "$1: 要約に失敗"
 }
 tune_one() {  # name path fmt params category source ssd: validity と同じ SSD・DRAM・Region で、主の変種（SAT_VARIANTS の先頭）だけ
   local name=$1 path=$2 fmt=$3 params=$4 ssd=$7 tr=$WORK/traces/$1.zst
@@ -204,19 +222,36 @@ tune_one() {  # name path fmt params category source ssd: validity と同じ SSD
   prep_trace "$name" "$path" "$fmt" "$params"
   local O=$WORK/out/$name; mkdir -p "$O"
   [ -s "$O/info.json" ] || "$B/og_info" "$tr" > "$O/info.json" || die "$name: og_info 失敗"
-  local var=asis TP=""; [ "$(jq1 "$O/info.json" sat_reqs)" -gt 0 ] && var=${SAT_VARIANTS%% *}
-  case $var in drop|delete) TP="-t $var-obj-size=$SAT_VALUE";; esac
-  local fp SSD DRAM R CH; fp=$(jq1 "$O/info.json" footprint); SSD=$(ssd_bytes "$ssd" "$fp"); DRAM=$((SSD / DRAM_DIV))
+  # 変種は validity の主結果と同じ（SAT=auto なら埋め値があるとき SAT_VARIANTS の先頭、指定があればその先頭）
+  local var=asis TP="" SENV=""
+  if [ "$SAT" = auto ]; then [ "$(jq1 "$O/info.json" sat_reqs)" -gt 0 ] && var=${SAT_VARIANTS%% *}; else var=${SAT%% *}; fi
+  case $var in drop|delete) TP="-t $var-obj-size=$SAT_VALUE"; SENV="SAT_DROP=$SAT_VALUE SAT_OP=$var";; esac
+  if [ "$var" = fix ]; then
+    local tf=$WORK/traces/$name.fix.zst
+    [ -s "$tf" ] || "$B/og_xform" "$tr" "$tf" fix > "$O/xform.txt" 2>&1 || die "$name: og_xform 失敗"
+    tr=$tf
+  fi
+  # フットプリントは埋め値（size = SAT_VALUE）を除いて数えた、その変種の info.json（validity と共用）
+  mkdir -p "$O/$var"
+  [ -s "$O/$var/info.json" ] || env $SENV "$B/og_info" "$tr" > "$O/$var/info.json" || die "$name: og_info 失敗"
+  local fp SSD DRAM R CH; fp=$(jq1 "$O/$var/info.json" footprint); SSD=$(ssd_bytes "$ssd" "$fp"); DRAM=$((SSD / DRAM_DIV))
   R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}; [ $R -lt 1048576 ] && R=1048576
   CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
-  local pe; pe=($(auto_p "$(jq1 "$O/info.json" uniq)" "$fp" "$SSD" "$DRAM"))   # validity と同じメモリの見積り（meta は P≤4）
+  log "tune $name/$var: footprint=$fp SSD=$SSD DRAM=$DRAM R=$R chunk=$CH"
+  local pe; pe=($(auto_p "$(jq1 "$O/$var/info.json" uniq)" "$fp" "$SSD" "$DRAM"))   # validity と同じメモリの見積り（meta は P≤4）
   TUNE_P=${TUNE_P:-${pe[0]}} tune_run "$name" "$tr" "$SSD" "$DRAM" "$R" "$CH" "$TP" ""
-  python3 - "$WORK/tune/$name.json" "$5" "$6" "$var" <<'EOF'
+  python3 - "${RUN_ROOT:-$WORK/tune}/$name.json" "$5" "$6" "$var" <<'EOF'
 import json, sys; d = json.load(open(sys.argv[1])); d.update(category=sys.argv[2], source=sys.argv[3], variant=sys.argv[4]); json.dump(d, open(sys.argv[1], "w"))
 EOF
 }
 tune_synth() {  # 合成の 95:5 と 3:1（1/64 縮小の SSD）。答え（固定の下限の最良）が分かっている負荷で、自動推定が届くかを見る
-  local S=$WORK/synth w name spec
+  local S=$WORK/synth w name spec av
+  if [ -z "${TUNE_P:-}" ]; then   # 1 本 約 1.6〜1.9 GB（6,000 万要求の実測）→ 2.5 GB と見て、空きメモリでも抑える
+    av=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
+    TUNE_P=$(awk -v a="$av" -v f="$MEM_FRAC" -v c="$NCPU" 'BEGIN{p=int(a*f/2.5e9); if (p<1) p=1; if (p>c) p=c; print p}')
+    log "tune-synth: 同時実行 P=$TUNE_P（NCPU=$NCPU、空き $((av / 2**30)) GB ÷ 2.5 GB）"
+  fi
+  export TUNE_P
   for w in $TUNE_SYNTH; do
     name=${w%%:*}; spec=${w#*:}; spec=${spec//,/ }
     [ -s "$WORK/traces/syn_$name.zst" ] || { "$S/synth_gen" "$WORK/traces/syn_$name.raw" "$TUNE_SYNTH_N" 1 $spec >/dev/null &&
@@ -228,20 +263,27 @@ EOF
   done
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
+paper_figs() { python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; }
 
 aggregate() { TUNE_W=$TUNE_W python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }
+need_build() {  # キットのパッチが当てたものと違う（キットを更新した）なら setup をやり直す（古い cachesim は新しい構成を知らず FAIL する）
+  [ -n "$LCS_SRC" ] || [ "$CACHESIM" != "$WORK/b/bin/cachesim" ] && return 0   # 手元の clone / 作成済みの cachesim を使うときは任せる
+  [ "$(cat "$WORK/src/.rf_patch" 2>/dev/null)" = "$(sha256sum "$KIT/regionflash.patch" | cut -c1-16)" ] && [ -x "$CACHESIM" ] || setup
+}
 
 # ---------------------------------------------------------------- main
 cmd=${1:-help}; [ $# -gt 0 ] && shift
 case $cmd in
   setup) setup ;;
   check) check ;;
-  validity) check >/dev/null || { check; die "traces.tsv を直す"; }; [ -x "$B/og_info" ] || setup; each_trace validity_one "$@" ;;
-  synth) [ -x "$WORK/synth/synth_gen" ] || setup; synth ;;
+  validity) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; each_trace validity_one "$@" ;;
+  synth) need_build; synth ;;
   aggregate) aggregate "$@" ;;
-  tune) check >/dev/null || { check; die "traces.tsv を直す"; }; [ -x "$B/og_info" ] || setup; mkdir -p "$WORK/tune"; each_trace tune_one "$@"; tune_figs ;;
-  tune-synth) [ -x "$WORK/synth/synth_gen" ] || setup; mkdir -p "$WORK/tune"; tune_synth; tune_figs ;;
+  tune) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/tune"; each_trace tune_one "$@"; tune_figs ;;
+  tune-synth) need_build; mkdir -p "$WORK/tune"; tune_synth; tune_figs ;;
   tune-figs) tune_figs "$@" ;;
+  paper) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper"; RUN_JOBS=PAPER_JOBS RUN_ROOT=$WORK/paper each_trace tune_one "$@"; paper_figs ;;
+  paper-figs) paper_figs "$@" ;;
   all) setup && check && each_trace validity_one && synth && aggregate ;;
   *) sed -n '2,9p' "$0" ;;
 esac
