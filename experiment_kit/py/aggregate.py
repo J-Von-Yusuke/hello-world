@@ -52,11 +52,16 @@ for n, v in res.items():
     r["_j"] = j
     r["_v"] = v   # すべての変種（感度の表用）
     rows.append(r)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tune_aggregate   # 自動推定（tune）の集計。validity の結果が無くても作る
+tune_html, tune_n = tune_aggregate.run(kit, work, by, float(os.environ.get("TUNE_W", "0.3")))
+if tune_n: print(f"tune の集計: {tune_n} 本 → {R}/tune_report.html, tune_per_trace.csv, tune_by_*.csv")
 if not rows:   # トレース実験の結果が無くても、合成トレースの図だけは作る
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import figures
     os.makedirs(R, exist_ok=True); fo, nf, png = figures.build(R, [], work, {}, None)
-    sys.exit(f"results/*.json が無い（./run.sh validity がまだ）。合成トレースの図だけ作った: {nf} 枚 → {fo}/index.html" if nf else
-             "results/*.json も合成トレースの結果も無い。先に ./run.sh validity か ./run.sh synth")
+    print(f"results/*.json が無い（./run.sh validity がまだ）。合成トレースの図だけ作った: {nf} 枚 → {fo}/index.html" if nf else
+          "results/*.json も合成トレースの結果も無い（validity / synth はまだ）", file=sys.stderr)
+    sys.exit(0 if nf or tune_n else 1)   # tune の集計だけでもできていれば成功
 rows.sort(key=lambda r: (r.get("category", ""), r.get("source", ""), r["name"]))
 effkeys = sorted({k[4:] for r in rows for k in r if k.startswith("eff_") and not k.startswith("eff_asis_")},
                  key=lambda k: (k.startswith("d"), k))
@@ -297,6 +302,7 @@ for sec, (nm, ttl) in enumerate((("scaled", "縮小した SSD 想定の負荷（
             H.append(table(["w|R|構成", "OHR", "BMR", "write B", "admit B", "reinsert B"], body))
         else:
             H.append(table(["w", "R", "構成", "ff", "再挿入", "OHR", "BMR", "write B", "reinsert B"], [[esc(x["w"]), esc(x["r"]), esc(x["kind"]), str(x["ff"]), str(x["re"]), f(x["ohr"], 4), f(x["bmr"], 4), f"{x['write']:.3e}", f"{x['reinsert']:.3e}"] for x in d]))
+if tune_html: H.append(tune_html)
 H.append("</main></body></html>")
 open(f"{R}/report.html", "w", encoding="utf-8").write("\n".join(H))
 print(f"集計: {len(rows)} 本 → {R}/report.html, per_trace.csv, by_*.csv" + (", synth_summary.csv" if sj else ""))
@@ -306,4 +312,4 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import figures
 fo, nf, png = figures.build(R, rows, work, groups, spearman)
 print(f"図: {nf} 枚 → {fo}/index.html（説明つき）, *.svg" + (", *.png, slides.pptx" if png else
-      "（PNG と slides.pptx は作れなかった: rsvg-convert / cairosvg / inkscape / soffice のどれかを入れる）"))
+      "（PNG と slides.pptx は作れなかった: rsvg-convert / cairosvg / inkscape のどれかを入れる。例 sudo apt install librsvg2-bin）"))

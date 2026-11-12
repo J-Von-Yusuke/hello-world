@@ -3,7 +3,7 @@
 
   出力（work/results/figs/）:
     NN_名前.svg       図（1600×900、白地、大きな文字。PowerPoint に貼れる）
-    NN_名前.png       同じ図の画像（変換器 rsvg-convert / cairosvg / inkscape / soffice のどれかがあれば）
+    NN_名前.png       同じ図の画像（変換器 rsvg-convert / cairosvg / inkscape のどれかがあれば）
     index.html        全部の図と説明（要点・読み方・定義）を並べたページ
     captions.md       説明だけのテキスト（スライドのノートに貼る用）
     slides.pptx       1 図 1 枚のスライド（左に図、右に要点と読み方）。PNG ができたときだけ
@@ -647,7 +647,7 @@ def synth_figs(work, add):
 
 
 # ---------------------------------------------------------------- 出力の補助
-def to_png(out, slugs):
+def to_png(out, slugs):  # rsvg-convert / cairosvg / inkscape のどれか。LibreOffice は使わない（止まることがあった）
     svgs = [f"{out}/{s}.svg" for s in slugs]
     if shutil.which("rsvg-convert"):
         for s in svgs: subprocess.run(["rsvg-convert", "-w", "1600", "-o", s[:-4] + ".png", s], capture_output=True)
@@ -658,9 +658,6 @@ def to_png(out, slugs):
         except ImportError:
             if shutil.which("inkscape"):
                 for s in svgs: subprocess.run(["inkscape", s, "--export-type=png", f"--export-filename={s[:-4]}.png", "-w", "1600"], capture_output=True)
-            else:
-                so = shutil.which("soffice") or shutil.which("libreoffice")
-                if so: subprocess.run([so, "--headless", "--convert-to", "png", "--outdir", out] + svgs, capture_output=True)
     return all(os.path.exists(s[:-4] + ".png") for s in svgs) and bool(svgs)
 
 

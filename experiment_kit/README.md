@@ -20,7 +20,7 @@ synth_workloads.txt → run.sh synth → work/synth/*.json
 ## 1. 必要なもの
 
 Linux（Windows なら WSL2 の Ubuntu）。`gcc cmake make git python3 libzstd-dev libglib2.0-dev`（Python は標準ライブラリだけ）。
-スライド用の PNG と `slides.pptx` も欲しければ、SVG を PNG にする道具を 1 つと日本語フォントを入れる: `sudo apt install librsvg2-bin fonts-noto-cjk`（`rsvg-convert` の代わりに `cairosvg` / `inkscape` / LibreOffice の `soffice` でもよい）。無くても SVG と説明は出る。
+スライド用の PNG と `slides.pptx` も欲しければ、SVG を PNG にする道具を 1 つと日本語フォントを入れる: `sudo apt install librsvg2-bin fonts-noto-cjk`（`rsvg-convert` の代わりに `cairosvg` / `inkscape` でもよい。LibreOffice は使わない：変換が止まることがあった）。無くても SVG と説明は出る。
 メモリ: 同時実行数 `P` は既定 `auto` で、変種ごとに空きメモリとトレースの物の数から自動で決まる（§4.1）。ディスクは `work/` に、変換したトレースと出力（トレース 1 本あたり数百 MB〜数 GB）。
 
 ## 2. 手順
@@ -89,6 +89,7 @@ git -C <clone> worktree add ../lcs-rf 93529a1   # 元の作業を残したまま
 | `REGION_BYTES` | 空 | Region の大きさをバイト数で固定（空 = SSD ÷ `REGION_N`） |
 | `INTERVAL` | `10000` | 先頭 N 曲線の刻み（要求数）。1000 万要求未満のトレースは `1000` に |
 | `P` | `auto` | 同時に走らせる cachesim の数。`auto` = §4.1 の見積りで自動。数字なら固定 |
+| `NCPU` | CPU の総コア数 − 1 | 並列に使うプロセス数の上限。`P=auto` の上限、`P=auto` のときの tune-synth の並列数、`SYNTH_P` の既定値、ビルドの `make -j` に使う。`NCPU=8 ./run.sh …` で変えられる |
 | `MEM_FRAC` | `0.8` | `auto` で使ってよい空きメモリ（`MemAvailable`）の割合 |
 | `NREQ` | 空 | 数字を入れると各 run を先頭 NREQ 要求で打ち切る（試運転） |
 | `SYNTH_N` / `SYNTH_SCALED` | 2000 万 / `0` | 合成トレースの長さ / 縮小 SSD 想定の重い負荷（2 億要求 × 多数、数時間）を走らせるか |
@@ -102,7 +103,7 @@ cachesim 1 本のピーク RSS は、次の 2 つの物の数でほぼ決まる�
 
 ```
 1 本 ≈ max( MEM_BASE + MEM_SEEN·u + MEM_RES·u·x ,  MEM_BASE + MEM_RES_OBJ·u·x ) × MEM_SAFETY
-P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜nproc に収める
+P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU（既定 = CPU の総コア数 − 1）に収める
 ```
 
 係数の既定値(`config.sh`)は、少し多めに取ってある。
@@ -237,6 +238,14 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜nproc に収める
 1 トレースの要約 `work/tune/<名前>.json`、図 `work/tune/figs/`（交換曲線・書き込みの内訳・n=auto の学習・目標の達成・自動と最良の差・分類の数）。
 見本（400 万要求の試運転。数値は意味を持たない）: `../docs/kit_tune_figs_sample/`。
 
+**集計**：`./run.sh aggregate` が tune の結果も出典・種類ごとにまとめる（`py/tune_aggregate.py`。validity の結果が無くても動く）。基準 = 分類なし＋再挿入 n=1（`none_h1`）。差はどれも正 = 良くなった（OHR の向上 pt、BMR の減少 pt、SSD 書き込みの減少 %）。
+
+| 出力（`work/results/`） | 中身 |
+|---|---|
+| `tune_per_trace.csv` | トレース × 構成ごとに 1 行：OHR・BMR・書き込み、基準との差、`goal`（3 つとも改善）、`gap`（目的の、固定の下限の格子の最良との差）、n=auto が選んだ閾値 |
+| `tune_by_<列>.csv` | 出典・種類（`--by` の列）× 構成 × 指標ごとに n・平均・中央値・最小・最大・目標を満たしたトレース数 |
+| `tune_report.html`（`report.html` にも同じ節） | 上をまとめた表 |
+
 理論的根拠（再挿入の閾値・容量の配分）: `../docs/auto_tuning_theory.md`（同じ内容の図つき版 `.html`）。
 
 注意:
@@ -268,7 +277,7 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜nproc に収める
 
 | 確認したこと | 結果 |
 |---|---|
-| PNG への変換(LibreOffice) | 1 回約 3 秒 |
+| PNG への変換(LibreOffice。2026-11-12 以降は使わない：変換が止まることがあった) | 1 回約 3 秒 |
 | `slides.pptx` | LibreOffice で PDF に変換でき、45 枚がそろった |
 | 合成トレースの結果だけのとき | 合成トレースの図だけが出た |
 

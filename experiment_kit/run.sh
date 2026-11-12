@@ -4,7 +4,7 @@
 #   ./run.sh check              traces.tsv の検査（パスがあるか、名前の重複）
 #   ./run.sh validity [name..]  トレース実験（CDN 妥当性検証と同じ）。name を省くと traces.tsv の全部
 #   ./run.sh synth              合成トレースの評価
-#   ./run.sh aggregate [--by category,source]   集計（CSV と report.html）
+#   ./run.sh aggregate [--by category,source]   集計（CSV と report.html。tune の結果があれば tune_report.html と tune_*.csv も）
 #   ./run.sh tune [name..]      自動推定の実験（分類閾値 × 容量の配分 × 再挿入の閾値。TUNE_JOBS）→ work/tune/
 #   ./run.sh tune-synth         同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷での確認）
 #   ./run.sh tune-figs          tune の図だけ作り直す → work/tune/figs/
@@ -229,7 +229,7 @@ EOF
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
 
-aggregate() { python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }
+aggregate() { TUNE_W=$TUNE_W python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }
 
 # ---------------------------------------------------------------- main
 cmd=${1:-help}; [ $# -gt 0 ] && shift
