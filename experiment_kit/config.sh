@@ -14,14 +14,15 @@ TRACECONV=${TRACECONV:-$WORK/b/bin/traceConv}
 P=${P:-auto}                               # 同時に走らせる cachesim の数。auto = 空きメモリと 1 本の見積りから変種ごとに決める（数字なら固定）
 # auto の見積り（実測で決めた。README の「メモリと同時実行数」）。u = 物の数、x = min(1, (SSD+DRAM)/フットプリント)
 #   1 本 ≈ max(MEM_BASE + MEM_SEEN·u + MEM_RES·u·x,  MEM_BASE + MEM_RES_OBJ·u·x) × MEM_SAFETY   （Region 構成, 物単位 SSD 構成）
-#   P = floor(MemAvailable × MEM_FRAC ÷ 1 本) を 1〜nproc に収める
+#   P = floor(MemAvailable × MEM_FRAC ÷ 1 本) を 1〜NCPU（既定 = 総コア数 − 1）に収める
 MEM_BASE=${MEM_BASE:-400000000}            # 固定分 [B]（nha の none: 346 MB）
 MEM_SEEN=${MEM_SEEN:-80}                   # 見た物 1 個あたり [B]（分類 hint の表。nha 65〜85, w01 68）
 MEM_RES=${MEM_RES:-160}                    # Region 構成で SSD+DRAM に入っている物 1 個あたり [B]（w01 の none: 150）
 MEM_RES_OBJ=${MEM_RES_OBJ:-320}            # 物単位 SSD 構成（obj_d*）で同じく [B]（w01 の obj: 310）
 MEM_SAFETY=${MEM_SAFETY:-1.25}             # 見積りの余裕（ハッシュ表の倍々拡張の山など）
 MEM_FRAC=${MEM_FRAC:-0.8}                  # 空きメモリ（/proc/meminfo の MemAvailable）のうち使ってよい割合
-SYNTH_P=${SYNTH_P:-8}                      # 合成負荷の並列数（1 本あたりは軽い）
+NCPU=${NCPU:-$(n=$(nproc); echo $(( n > 1 ? n - 1 : 1 )))}   # 並列に使うプロセス数の上限（既定 = CPU の総コア数 − 1。1 つは OS と操作用に残す）
+SYNTH_P=${SYNTH_P:-$NCPU}                  # 合成負荷の並列数（1 本あたりは軽い）
 
 # ---- トレース実験（validity）の既定構成 ----------------------------------
 SSD_DEFAULT=${SSD_DEFAULT:-30%}            # SSD 容量: 240G（固定）/ 30%（フットプリントに対する割合）。traces.tsv の ssd 列で個別指定

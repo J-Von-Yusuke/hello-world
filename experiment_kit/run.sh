@@ -38,7 +38,7 @@ setup() {
   fi
   if [ ! -x "$CACHESIM" ] || [ ! -x "$TRACECONV" ]; then
     mkdir -p "$WORK/b" && (cd "$WORK/b" && cmake -DCMAKE_BUILD_TYPE=Release "$src" > cmake.log 2>&1 &&
-      make cachesim traceConv -j"$(nproc)" > make.log 2>&1) || die "ビルド失敗: $WORK/b/make.log を見る"
+      make cachesim traceConv -j"$NCPU" > make.log 2>&1) || die "ビルド失敗: $WORK/b/make.log を見る"
   fi
   local s=$KIT/src
   gcc -O2 -o "$B/og_info" "$s/og_info.c" -lzstd &&
@@ -86,7 +86,7 @@ ssd_bytes() {  # ssd_bytes <指定> <footprint>
 jq1() { python3 -c "import json,sys; print(json.load(open('$1'))['$2'])"; }
 auto_p() {  # auto_p <物の数> <footprint> <SSD> <DRAM>  →  "P 1本の見積りGB 空きGB"（P が数字ならそのまま）
   local av; av=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
-  awk -v u="$1" -v f="$2" -v s="$3" -v d="$4" -v av="$av" -v c="$(nproc)" -v P="$P" -v fr="$MEM_FRAC" \
+  awk -v u="$1" -v f="$2" -v s="$3" -v d="$4" -v av="$av" -v c="$NCPU" -v P="$P" -v fr="$MEM_FRAC" \
       -v b="$MEM_BASE" -v a="$MEM_SEEN" -v r="$MEM_RES" -v ro="$MEM_RES_OBJ" -v sf="$MEM_SAFETY" 'BEGIN{
     x = f > 0 ? (s + d) / f : 1; if (x > 1) x = 1          # SSD+DRAM に入る物の割合（容量 ÷ フットプリント）
     e = b + a * u + r * u * x; o = b + ro * u * x; if (o > e) e = o; e *= sf   # 重い方（Region+分類 / 物単位 SSD）
@@ -193,7 +193,7 @@ tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <
     echo "[ -f $O/$id/P.json ] || { mkdir -p $O/$id && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$spec,out=$O/$id/P\" > $O/$id/stdout 2>&1 || echo FAIL $O/$id; }" >> "$J"
   done
   echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"warmup\":\"$WU\",\"nreq_limit\":\"$NREQ\"}" > "$O/config.json"
-  local p=${TUNE_P:-}; [ -z "$p" ] && { [ "$P" = auto ] && p=$(nproc) || p=$P; }
+  local p=${TUNE_P:-}; [ -z "$p" ] && { [ "$P" = auto ] && p=$NCPU || p=$P; }
   log "tune $1: ${#TUNE_JOBS[@]} 構成を P=$p で"
   tr "\n" "\0" < "$J" | xargs -0 -P "$p" -I{} bash -c "{}"
   python3 "$KIT/py/tune_one.py" "$O" > "$WORK/tune/$1.json" || log "tune $1: 要約に失敗"
