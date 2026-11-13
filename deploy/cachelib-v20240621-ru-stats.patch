@@ -394,11 +394,67 @@ index 1f2477f..813844e 100644
  
 +static_assert(sizeof(CacheValue) == 32, "CacheValue layout");
  } // namespace facebook::cachelib::cachebench
+diff --git a/cachelib/cachebench/cache/TimeStampTicker.cpp b/cachelib/cachebench/cache/TimeStampTicker.cpp
+index 35783b3..c44f736 100644
+--- a/cachelib/cachebench/cache/TimeStampTicker.cpp
++++ b/cachelib/cachebench/cache/TimeStampTicker.cpp
+@@ -33,6 +33,9 @@ namespace cachebench {
+ // bucket, it may hang.
+ // TODO: Fix this T85645905
+ bool TimeStampTicker::advanceTimeStamp(uint32_t currTimeStamp) {
++  if (released_.load(std::memory_order_acquire)) {
++    return true;
++  }
+   auto oldTimeStamp = currTimeStamp_.load(std::memory_order_relaxed);
+   auto oldBucket = oldTimeStamp / bucketTicks_;
+ 
+@@ -74,9 +77,13 @@ bool TimeStampTicker::advanceTimeStamp(uint32_t currTimeStamp) {
+     oldBucket++;
+   }
+   XDCHECK(latch);
+-  // Wait on the last bucket.
+-  // Currently we set no timeout as we want to expose any potential bugs.
+-  latch->wait();
++  // Wait on the last bucket. No overall timeout (to expose bugs), but leave
++  // as soon as the ticker is released (stop requested / a thread ended).
++  while (!latch->wait_for(std::chrono::milliseconds(100))) {
++    if (released_.load(std::memory_order_acquire)) {
++      return true;
++    }
++  }
+   // All threads finished currentBucket - 1.
+   oldTimeStamp = currTimeStamp_.load(std::memory_order_relaxed);
+   oldBucket = oldTimeStamp / bucketTicks_;
+diff --git a/cachelib/cachebench/cache/TimeStampTicker.h b/cachelib/cachebench/cache/TimeStampTicker.h
+index d36f11a..25d99a5 100644
+--- a/cachelib/cachebench/cache/TimeStampTicker.h
++++ b/cachelib/cachebench/cache/TimeStampTicker.h
+@@ -66,6 +66,12 @@ class TimeStampTicker : public cachelib::Ticker {
+     currTimeStamp_.store(timeStampSecond, std::memory_order_relaxed);
+   }
+ 
++  // Stop synchronizing threads: threads blocked at a bucket boundary are
++  // woken and later updates never block. Called when the run is stopped or a
++  // worker thread has ended; the latch needs every thread to arrive, so a
++  // thread that left would otherwise block the others forever.
++  void release() { released_.store(true, std::memory_order_release); }
++
+   // Add a callback to be called when the last thread crosses bucket boundary.
+   void addCrossTimeWindowCb(
+       std::function<void(double elapsedSecs)> onCrossTimeWindow) {
+@@ -104,6 +110,7 @@ class TimeStampTicker : public cachelib::Ticker {
+ 
+   // The current time stamp;
+   std::atomic<uint32_t> currTimeStamp_{0};
++  std::atomic<bool> released_{false};
+ 
+   const uint32_t numThreads_;
+   const uint32_t bucketTicks_;
 diff --git a/cachelib/cachebench/main.cpp b/cachelib/cachebench/main.cpp
-index ddc0568..e97bd01 100644
+index ddc0568..94fc3c2 100644
 --- a/cachelib/cachebench/main.cpp
 +++ b/cachelib/cachebench/main.cpp
-@@ -52,6 +52,21 @@ DEFINE_uint64(
+@@ -52,6 +52,25 @@ DEFINE_uint64(
  DEFINE_string(progress_stats_file,
                "",
                "Print detailed stats at each progress interval to this file");
@@ -415,12 +471,16 @@ index ddc0568..e97bd01 100644
 +DEFINE_uint64(stop_ops, 0, "op axis: graceful stop at X ops");
 +DEFINE_string(progress_ops_stats_file, "", "op axis output file");
 +DEFINE_uint64(progress_poll_ms, 1000, "sampling period for byte/op axes");
++DEFINE_uint64(stop_grace_seconds, 900,
++              "after a stop (--stop_*) the run must end within this many "
++              "seconds, otherwise FINAL stats are written and the process "
++              "exits with code 3 (0 = wait forever)");
 +DEFINE_uint64(placement_merge_at_ops, 0,
 +              "example: merge all hints into placement 0 at X ops");
  DEFINE_int32(timeout_seconds,
               0,
               "Maximum allowed seconds for running test. 0 means no timeout");
-@@ -156,8 +171,20 @@ int main(int argc, char** argv) {
+@@ -156,8 +175,21 @@ int main(int argc, char** argv) {
      setupSignalHandler();
      setupTimeoutHandler();
  
@@ -438,16 +498,41 @@ index ddc0568..e97bd01 100644
 +                                   FLAGS_progress_ops_stats_file};
 +    tc.byteUseDevice = FLAGS_byte_axis_device;
 +    tc.pollMs = std::max<uint64_t>(FLAGS_progress_poll_ms, 1);
++    tc.stopGraceSec = FLAGS_stop_grace_seconds;
 +    tc.placementMergeAtOps = FLAGS_placement_merge_at_ops;
 +    return runnerInstance->run(tc)
                 ? 0
                 : 1;
    } catch (const std::exception& e) {
+diff --git a/cachelib/cachebench/runner/AsyncCacheStressor.h b/cachelib/cachebench/runner/AsyncCacheStressor.h
+index 529a124..f4708e9 100644
+--- a/cachelib/cachebench/runner/AsyncCacheStressor.h
++++ b/cachelib/cachebench/runner/AsyncCacheStressor.h
+@@ -167,6 +167,9 @@ class AsyncCacheStressor : public Stressor {
+   void abort() override {
+     wg_->markShutdown();
+     Stressor::abort();
++    if (ticker_) {
++      ticker_->release();
++    }
+   }
+ 
+   // obtain stats from the cache instance.
 diff --git a/cachelib/cachebench/runner/CacheStressor.h b/cachelib/cachebench/runner/CacheStressor.h
-index cbc8204..71083a5 100644
+index cbc8204..d6800fc 100644
 --- a/cachelib/cachebench/runner/CacheStressor.h
 +++ b/cachelib/cachebench/runner/CacheStressor.h
-@@ -223,6 +223,11 @@ class CacheStressor : public Stressor {
+@@ -190,6 +190,9 @@ class CacheStressor : public Stressor {
+   void abort() override {
+     wg_->markShutdown();
+     Stressor::abort();
++    if (ticker_) {
++      ticker_->release(); // workers blocked at a time bucket must see the stop
++    }
+   }
+ 
+   // obtain stats from the cache instance.
+@@ -223,6 +226,11 @@ class CacheStressor : public Stressor {
    }
  
   private:
@@ -459,7 +544,7 @@ index cbc8204..71083a5 100644
    static std::string genHardcodedString() {
      const std::string s = "The quick brown fox jumps over the lazy dog. ";
      std::string val;
-@@ -340,13 +345,15 @@ class CacheStressor : public Stressor {
+@@ -340,13 +348,15 @@ class CacheStressor : public Stressor {
            }
            auto lock = chainedItemAcquireUniqueLock(*key);
            result = setKey(pid, stats, key, *(req.sizeBegin), req.ttlSecs,
@@ -476,7 +561,7 @@ index cbc8204..71083a5 100644
  
            auto slock = chainedItemAcquireSharedLock(*key);
            auto xlock = decltype(chainedItemAcquireUniqueLock(*key)){};
-@@ -370,11 +377,18 @@ class CacheStressor : public Stressor {
+@@ -370,11 +380,18 @@ class CacheStressor : public Stressor {
                slock = {};
                xlock = chainedItemAcquireUniqueLock(*key);
                setKey(pid, stats, key, *(req.sizeBegin), req.ttlSecs,
@@ -496,15 +581,19 @@ index cbc8204..71083a5 100644
  
            break;
          }
-@@ -461,6 +475,7 @@ class CacheStressor : public Stressor {
+@@ -461,6 +478,11 @@ class CacheStressor : public Stressor {
          break;
        }
      }
 +    stats.closeRequest(); // a request still open when the thread stops
++    if (ticker_) {
++      // this thread will not reach the next bucket: do not hold the others
++      ticker_->release();
++    }
      wg_->markFinish();
    }
  
-@@ -480,7 +495,9 @@ class CacheStressor : public Stressor {
+@@ -480,7 +502,9 @@ class CacheStressor : public Stressor {
        size_t size,
        uint32_t ttlSecs,
        const std::unordered_map<std::string, std::string>& featureMap,
@@ -515,7 +604,7 @@ index cbc8204..71083a5 100644
      // check the admission policy first, and skip the set operation
      // if the policy returns false
      if (config_.admPolicy && !config_.admPolicy->accept(featureMap)) {
-@@ -488,7 +505,7 @@ class CacheStressor : public Stressor {
+@@ -488,7 +512,7 @@ class CacheStressor : public Stressor {
      }
  
      ++stats.set;
@@ -525,15 +614,17 @@ index cbc8204..71083a5 100644
        ++stats.setFailure;
        return OpResultType::kSetFailure;
 diff --git a/cachelib/cachebench/runner/ProgressTracker.cpp b/cachelib/cachebench/runner/ProgressTracker.cpp
-index 68703c7..e12ffc7 100644
+index 68703c7..9d49e04 100644
 --- a/cachelib/cachebench/runner/ProgressTracker.cpp
 +++ b/cachelib/cachebench/runner/ProgressTracker.cpp
-@@ -16,70 +16,185 @@
+@@ -16,70 +16,231 @@
  
  #include "cachelib/cachebench/runner/ProgressTracker.h"
  
 +#include <algorithm>
++#include <cstdlib>
 +#include <cstring>
++#include <iostream>
 +
 +#include "cachelib/navy/block_cache/BlockCache.h"
 +
@@ -564,6 +655,10 @@ index 68703c7..e12ffc7 100644
  }
  
  ProgressTracker::~ProgressTracker() {
++  done_ = true;
++  if (watchdog_.joinable()) {
++    watchdog_.join();
++  }
    try {
 -    if (statsFile_.is_open()) {
 -      statsFile_.close();
@@ -582,7 +677,32 @@ index 68703c7..e12ffc7 100644
 -  ::strftime(buf, sizeof(buf), "%H:%M:%S", &time);
 -  auto throughputStats = stressor_.aggregateThroughputStats();
 -  auto mOpsPerSec = throughputStats.ops / 1e6;
--
++void ProgressTracker::startStopWatchdog() {
++  if (cfg_.stopGraceSec == 0) {
++    return;
++  }
++  watchdog_ = std::thread([this] {
++    for (uint64_t i = 0; i < cfg_.stopGraceSec * 10 && !done_; i++) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    }
++    if (done_) {
++      return;
++    }
++    const auto tp = stressor_.aggregateThroughputStats();
++    XLOGF(ERR,
++          "Stop requested {} s ago but the run has not ended (ops={}). The "
++          "workers are probably blocked (e.g. inside Navy). Writing the FINAL "
++          "block and exiting with code 3. To see where they are blocked, run "
++          "`gdb -p <pid> -batch -ex 'thread apply all bt'` while it hangs "
++          "(raise --stop_grace_seconds to get time for that).",
++          cfg_.stopGraceSec, tp.ops);
++    finalizeImpl();
++    std::cout.flush();
++    std::cerr.flush();
++    std::_Exit(3);
++  });
++}
+ 
 -  const auto currCacheStats = stressor_.getCacheStats();
 -  auto [overallHitRatio, ramHitRatio, nvmHitRatio] =
 -      currCacheStats.getHitRatios(prevStats_);
@@ -594,15 +714,6 @@ index 68703c7..e12ffc7 100644
 -      overallHitRatio,
 -      ramHitRatio,
 -      nvmHitRatio);
--
--  // log this always to stdout
--  std::cout << thStr << std::endl;
--
--  // additionally log into the stats file
--  if (statsFile_.is_open()) {
--    statsFile_ << thStr << std::endl;
--    statsFile_ << "== Allocator Stats ==" << std::endl;
--    currCacheStats.render(statsFile_);
 +std::chrono::milliseconds ProgressTracker::pollInterval() const {
 +  uint64_t ms = 0;
 +  const auto& t = cfg_.axes[TrackerConfig::kTime];
@@ -611,6 +722,9 @@ index 68703c7..e12ffc7 100644
 +    if (v > 0) {
 +      ms = ms == 0 ? v * 1000 : std::min(ms, v * 1000);
 +    }
++  }
++  if (t.warmup || t.stop) {
++    ms = std::min<uint64_t>(ms, 1000);
 +  }
 +  for (int a : {TrackerConfig::kByte, TrackerConfig::kOp}) {
 +    const auto& c = cfg_.axes[a];
@@ -621,8 +735,8 @@ index 68703c7..e12ffc7 100644
 +  return std::chrono::milliseconds{ms};
 +}
  
--    statsFile_ << "== Hit Ratio Stats Since Last ==" << std::endl;
--    currCacheStats.render(prevStats_, statsFile_);
+-  // log this always to stdout
+-  std::cout << thStr << std::endl;
 +uint64_t ProgressTracker::measure(int axis,
 +                                  const Stats& st,
 +                                  const ThroughputStats& tp,
@@ -639,9 +753,11 @@ index 68703c7..e12ffc7 100644
 +  }
 +}
  
--    statsFile_ << "== Throughput Stats ==" << std::endl;
--    auto elapsedTimeNs = stressor_.getTestDurationNs();
--    throughputStats.render(elapsedTimeNs, statsFile_);
+-  // additionally log into the stats file
+-  if (statsFile_.is_open()) {
+-    statsFile_ << thStr << std::endl;
+-    statsFile_ << "== Allocator Stats ==" << std::endl;
+-    currCacheStats.render(statsFile_);
 +void ProgressTracker::emit(int axis,
 +                           const char* tag,
 +                           uint64_t v,
@@ -700,8 +816,8 @@ index 68703c7..e12ffc7 100644
 +  }
 +}
  
--    stressor_.renderWorkloadGeneratorStats(elapsedTimeNs, statsFile_);
--    statsFile_ << std::endl;
+-    statsFile_ << "== Hit Ratio Stats Since Last ==" << std::endl;
+-    currCacheStats.render(prevStats_, statsFile_);
 +void ProgressTracker::work() {
 +  const auto tp = stressor_.aggregateThroughputStats();
 +  const auto st = stressor_.getCacheStats();
@@ -718,15 +834,20 @@ index 68703c7..e12ffc7 100644
 +      XLOGF(INFO, "placement merge at {} ops: {} hints -> placement 0",
 +            tp.ops, bc->numHintClasses());
 +    }
-   }
++  }
 +  for (int a = 0; a < TrackerConfig::kNumAxes; a++) {
 +    auto& s = ax_[a];
 +    const auto& c = s.cfg;
 +    if (!c.interval && !c.warmup && !c.stop) {
 +      continue;
 +    }
-+    const uint64_t v = measure(a, st, tp, ns);
-+    if (c.warmup && !s.warmed && v >= c.warmup) {
++    const uint64_t v = measure(a, st, tp, ns); // rounded: for display/interval
++    // warmup / stop: the time axis compares exact nanoseconds
++    auto reached = [&](uint64_t limit) {
++      return a == TrackerConfig::kTime ? ns >= limit * 1'000'000'000ULL
++                                       : v >= limit;
++    };
++    if (c.warmup && !s.warmed && reached(c.warmup)) {
 +      emit(a, "WARMUP", v, st, tp, ns);
 +      s.warmed = true;
 +      s.warm = st;
@@ -736,18 +857,28 @@ index 68703c7..e12ffc7 100644
 +      emit(a, "PROGRESS", v, st, tp, ns);
 +      s.nextEmit = (v / c.interval + 1) * c.interval;
 +    }
-+    if (c.stop && !stopped_ && v >= c.stop) {
++    if (c.stop && !stopped_ && reached(c.stop)) {
 +      emit(a, "STOP", v, st, tp, ns);
 +      XLOGF(INFO, "Stopping: {} axis reached {} {}", kAxisName[a], v,
 +            kAxisUnit[a]);
 +      stopped_ = true;
 +      stopFn_();
++      startStopWatchdog();
 +    }
 +  }
 +}
  
--  prevStats_ = currCacheStats;
+-    statsFile_ << "== Throughput Stats ==" << std::endl;
+-    auto elapsedTimeNs = stressor_.getTestDurationNs();
+-    throughputStats.render(elapsedTimeNs, statsFile_);
 +void ProgressTracker::finalize() {
++  done_ = true; // the run ended by itself: disarm the watchdog
++  finalizeImpl();
++}
+ 
+-    stressor_.renderWorkloadGeneratorStats(elapsedTimeNs, statsFile_);
+-    statsFile_ << std::endl;
++void ProgressTracker::finalizeImpl() {
 +  const auto tp = stressor_.aggregateThroughputStats();
 +  const auto st = stressor_.getCacheStats();
 +  const uint64_t ns = stressor_.getTestDurationNs();
@@ -755,25 +886,30 @@ index 68703c7..e12ffc7 100644
 +    if (ax_[a].out.is_open()) {
 +      emit(a, "FINAL", measure(a, st, tp, ns), st, tp, ns);
 +    }
-+  }
+   }
+-
+-  prevStats_ = currCacheStats;
  }
  } // namespace cachebench
  } // namespace cachelib
 diff --git a/cachelib/cachebench/runner/ProgressTracker.h b/cachelib/cachebench/runner/ProgressTracker.h
-index 34005bc..1c305c3 100644
+index 34005bc..0798190 100644
 --- a/cachelib/cachebench/runner/ProgressTracker.h
 +++ b/cachelib/cachebench/runner/ProgressTracker.h
-@@ -15,6 +15,9 @@
+@@ -15,7 +15,12 @@
   */
  
  #pragma once
 +#include <array>
 +#include <fstream>
++#include <atomic>
 +#include <functional>
  #include <string>
++#include <thread>
  
  #include "cachelib/cachebench/runner/Stressor.h"
-@@ -23,24 +26,74 @@
+ #include "cachelib/common/PeriodicWorker.h"
+@@ -23,24 +28,82 @@
  namespace facebook {
  namespace cachelib {
  namespace cachebench {
@@ -801,6 +937,10 @@ index 34005bc..1c305c3 100644
 +  // example use of the placement control API: at this op count route every
 +  // hint to placement 0 and close the other placements (0 = off)
 +  uint64_t placementMergeAtOps{0};
++  // after a stop request the run must end within this many seconds; if the
++  // workers are stuck (e.g. blocked inside Navy), the FINAL block is written
++  // and the process exits with code 3 (0 = wait forever)
++  uint64_t stopGraceSec{0};
 +};
 +
  class ProgressTracker final : public cachelib::PeriodicWorker {
@@ -836,6 +976,8 @@ index 34005bc..1c305c3 100644
 +  };
 +
    void work() override;
++  void finalizeImpl();
++  void startStopWatchdog();
 +  uint64_t measure(int axis,
 +                   const Stats& st,
 +                   const ThroughputStats& tp,
@@ -856,6 +998,8 @@ index 34005bc..1c305c3 100644
 +  std::array<AxisState, TrackerConfig::kNumAxes> ax_;
 +  bool stopped_{false};
 +  bool merged_{false};
++  std::atomic<bool> done_{false}; // the run ended by itself
++  std::thread watchdog_;
  };
  } // namespace cachebench
  } // namespace cachelib
@@ -1651,7 +1795,7 @@ index af09593..3f78bee 100644
  } // namespace hw
  } // namespace facebook
 diff --git a/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp b/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp
-index 7decd82..308df5e 100644
+index 7decd82..ae29bf5 100644
 --- a/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp
 +++ b/cachelib/cachebench/workload/BlockChunkReplayGenerator.cpp
 @@ -56,6 +56,10 @@ const Request& BlockChunkReplayGenerator::getReq(
@@ -1665,6 +1809,14 @@ index 7decd82..308df5e 100644
  
    return reqWrapper->req;
  }
+@@ -157,6 +161,7 @@ void BlockChunkReplayGenerator::getReqFromTrace() {
+       while (true) {
+         if (shouldShutdown()) {
+           XLOG(INFO) << "Forced to stop, terminate reading trace file!";
++          isEndOfFile_.store(true, std::memory_order_relaxed);
+           return;
+         }
+ 
 diff --git a/cachelib/cachebench/workload/OracleGeneralReplayGenerator.h b/cachelib/cachebench/workload/OracleGeneralReplayGenerator.h
 new file mode 100644
 index 0000000..7d3558f
@@ -2242,7 +2394,7 @@ index 0000000..f37e6f2
 +} // namespace cachelib
 +} // namespace facebook
 diff --git a/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp b/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp
-index 59289bb..3e0edef 100644
+index 59289bb..85bae44 100644
 --- a/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp
 +++ b/cachelib/cachebench/workload/PieceWiseReplayGenerator.cpp
 @@ -57,6 +57,10 @@ const Request& PieceWiseReplayGenerator::getReq(
@@ -2256,6 +2408,52 @@ index 59289bb..3e0edef 100644
  
    return reqWrapper->req;
  }
+@@ -263,6 +267,7 @@ void PieceWiseReplayGenerator::getReqFromTrace() {
+         while (true) {
+           if (shouldShutdown()) {
+             XLOG(INFO) << "Forced to stop, terminate reading trace file!";
++            isEndOfFile_.store(true, std::memory_order_relaxed);
+             return;
+           }
+ 
+diff --git a/cachelib/common/CountDownLatch.cpp b/cachelib/common/CountDownLatch.cpp
+index 300a076..cc2a9db 100644
+--- a/cachelib/common/CountDownLatch.cpp
++++ b/cachelib/common/CountDownLatch.cpp
+@@ -29,6 +29,11 @@ void CountDownLatch::wait() {
+   cv_.wait(lock, [this]() { return count_ == 0; });
+ }
+ 
++bool CountDownLatch::wait_for(std::chrono::milliseconds d) {
++  std::unique_lock<std::mutex> lock(lock_);
++  return cv_.wait_for(lock, d, [this]() { return count_ == 0; });
++}
++
+ // Count down without waiitng.
+ bool CountDownLatch::count_down() {
+   {
+diff --git a/cachelib/common/CountDownLatch.h b/cachelib/common/CountDownLatch.h
+index 27d2593..692012f 100644
+--- a/cachelib/common/CountDownLatch.h
++++ b/cachelib/common/CountDownLatch.h
+@@ -15,6 +15,7 @@
+  */
+ 
+ #pragma once
++#include <chrono>
+ #include <condition_variable>
+ #include <mutex>
+ namespace facebook {
+@@ -30,6 +31,9 @@ class CountDownLatch {
+   // Wait for the count down to complete.
+   void wait();
+ 
++  // Wait at most `d`; returns whether the count reached 0.
++  bool wait_for(std::chrono::milliseconds d);
++
+   // decrements the counter in a non-blocking manner
+   bool count_down();
+ 
 diff --git a/cachelib/navy/CMakeLists.txt b/cachelib/navy/CMakeLists.txt
 index 6c02f0d..322adbd 100644
 --- a/cachelib/navy/CMakeLists.txt
