@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>少数サイズの合成トレースと Che 型モデル</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:19px;margin:40px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}h3{font-size:16px;margin:24px 0 6px}
+.sub{color:var(--mut);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
+table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:right;vertical-align:top}th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:600}
+code,.f{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+.f{display:block;padding:8px 12px;margin:8px 0;font-family:ui-monospace,Consolas,monospace;white-space:pre-wrap;border:1px solid var(--line)}
+svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-size:12px}
+.tbl{overflow-x:auto}
+.warn{border-left:4px solid var(--b)}.ok{border-left:4px solid var(--g)}.bad{border-left:4px solid var(--r)}
+details{margin:6px 0}summary{cursor:pointer}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.math{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 16px;margin:8px 0;overflow-x:auto}
+.math p{margin:8px 0 0}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}]})"></script>
+</head>
+<body>
+<main>
+<h1>サイズが 2〜3 個しかない合成トレースで、サイズ分類の効果を式で説明する</h1>
+<p class="sub">2026-11-05。生成器 <code>tools/synth/synth_gen.c</code>、理論 <code>tools/synth/synth_model.c</code>、実行 <code>tools/synth/synth_run.py</code>・<code>run_all.sh</code>、結果 <code>tools/synth/results/</code>。式の厳密な導出（仮定・補題・証明）は <a href="region_model_appendix.html">付録</a>。実測は libCacheSim（物単位 LRU）と RegionFlash（DRAM なし、全受け入れ、Region 256 個、先頭 25% で温め）。</p>
+
+<div class="card ok"><b>要点</b>
+<ol>
+<li><b>提案のやり方は妥当で、しかも 3 つのつまみが統計量に 1 対 1 で対応する</b>：サイズの値は \(\mathrm{Var}(\log s)\)、要求の割合と物の数は「要求とバイトの偏り」、Zipf の傾きは \(\mathrm{Var}(\log\lambda)\) を動かす。ただし「要求の割合」と「物の数」は両方決める必要がある（物 1 個の \(\lambda=\text{割合}\div\text{物の数}\times\text{Zipf の重み}\)）。</li>
+<li><b>Che 近似に基づく式は 3 段で書け、どれも実測と合う</b>。物単位 LRU と静的分割は誤差 0.3pt 以下（各 24 点、平均 0.01〜0.04pt）、Region FIFO は 0.2pt、Region LRU は立ち上がりの隔離（§5.4）を入れて OHR 平均 0.2pt・BHR 平均 0.1〜0.8pt。</li>
+<li><b>サイズで分けると、式は「\(T\) が 1 つ」から「クラスごとの \(T_k\)」に変わる</b>。最適な \(T_k\) は「境目にある物の \(\lambda/s\)」がクラス間でそろう点（限界ヒット/バイトの均等化）。W1（36 KiB / 1 MiB、要求 3:1）では OHR +14〜18pt、BHR −14〜19pt。</li>
+<li><b>Region キャッシュでは、物から見ると「滞在 \(L\) の FIFO」になる</b>。Region FIFO では \(L\) がどのクラスでも同じなので、分類しても利得は厳密に 0（実測でも ±0.3pt）。Region LRU では \(L_k=\int_0^T\mathbb{E}[e^{\Lambda t}]\,dt\) で、<b>1 個の Region に小物が多く入るほど touch 率 \(\Lambda\) が上がり、寿命が指数的に延びる</b>。これが「明示的に分割しなくても容量が小物に寄る」仕組み。</li>
+<li><b>対照 W2（\(\lambda/s\) の分布を両クラスでそろえた）では利得がほぼ消える</b>（静的分割 +0.7pt、Region LRU +0.5pt）。効いているのはサイズそのものではなく価値 \(\lambda/s\) のばらつき、という trace_characteristics.md §8 の予想どおり。</li>
+<li><b>Region LRU の定常モデルは、サイズ分類時の BHR を過小に出していた</b>（平均 3.5pt、W3 で最大 14pt）。<b>根本原因は「立ち上がりの隔離」</b>（§5.4）：空のキャッシュを埋める間は全部がミスなので、最初の Region には熱い物・温かい物がまとめて詰まり、\(\Lambda\) が非常に大きくなって事実上不死になる。熱い物はそこに隔離されて二度とミスせず、冷たい物の Region を守らなくなる。定常（エルゴード）を仮定したモデルは、この準安定な状態を表せなかった。初期の詰め込みを再現して「観測期間を生き延びる初期 Region は不死」とする項を入れると（<code>-H</code>）、Region LRU（サイズ分類）の BHR の誤差は<b>平均 3.5 → 0.8pt、最大 14.4 → 2.6pt</b> に下がり、Region 数を変えても実測に追従する。<b>当初の診断「\(T\) の揺らぎが主因」は誤りで、撤回</b>。</li>
+<li><b>人気が変わると隔離は消える</b>（§6）：一巡時間がトレース長の 4 倍のゆっくりした老化でも、立ち上がりの Region は 1 個も残らない。代わりに、熱い新顔が入った「生まれた時に熱い Region」が流れ続ける。老化による OHR の損失は Region キャッシュの方が物 LRU より 2〜4 倍大きいが、サイズ分類の利得は老化があっても残る（W1 30% で +13〜17pt）。</li>
+</ol></div>
+
+<h2>1. 提案の妥当性</h2>
+<div class="tbl"><table>
+<tr><th>提案の段階</th><th>評価</th><th>注意・直し方</th></tr>
+<tr><td>① サイズの数と値（例 36 KiB と 1 MiB）</td><td>妥当。\(\mathrm{Var}(\log s)\) を自由に動かせ、実トレースの「サイズの寄与」と同じ軸に置ける</td><td>RegionFlash の piece-wise（chunk=1M）の境目を避ける。今回は chunk を切った。CacheLib に流すときは小物が BigHash に行かない設定にする</td></tr>
+<tr><td>② 要求の割合 か ユニーク数の割合</td><td>どちらか一方では足りない。物 1 個の \(\lambda\) は「割合 ÷ 物の数」で決まり、価値 \(\lambda/s\) の分布はその両方に依る</td><td>(物の数, 要求の割合, \(\alpha\)) の 3 つを指定する形にした（<code>size:nobj:share:alpha</code>）。3:1 と 6:1 では利得はほぼ同じ（10% で +15.8 と +16.6pt）。効くのは比そのものより \(\lambda/s\) の分布</td></tr>
+<tr><td>③ サイズごとの Zipf の傾き</td><td>妥当。クラス内の \(\mathrm{Var}(\log\lambda)\) を動かせる</td><td>傾きが急なクラスは Region の \(\Lambda\) が大きく、Region LRU のモデルの誤差が増える（§4）</td></tr>
+<tr><td>IRM（独立参照）で作ること</td><td>Che 近似の前提とちょうど一致するので、「式で説明できるか」を確かめる目的には最適</td><td>時間局所性・一回きりの物・サイズ変化（block で 41%）は含まれない。実トレースとの差はこれらの寄与として別に測る</td></tr>
+<tr><td>必要な対照</td><td>W2（\(\lambda/s\) をそろえる）、Region FIFO（分類が効かないはず）を入れた</td><td>W3（無作為な 2 分割）は IRM では Region FIFO と同じ理屈で 0 になるので省いた</td></tr>
+</table></div>
+
+<h2>2. 定式化：Che 近似から 3 段で</h2>
+<svg viewBox="0 0 900 300" role="img" aria-label="3 つのモデルの比較">
+ <g stroke="var(--line)" fill="var(--card)">
+  <rect x="5" y="10" width="285" height="280" rx="10"/><rect x="307" y="10" width="285" height="280" rx="10"/><rect x="609" y="10" width="285" height="280" rx="10"/>
+ </g>
+ <text x="20" y="36" font-weight="700">(a) 物単位 LRU を共有</text>
+ <text x="322" y="36" font-weight="700">(b) クラスで静的に分割</text>
+ <text x="624" y="36" font-weight="700">(c) Region LRU ＋ サイズ分類</text>
+ <g font-size="11">
+ <rect x="25" y="55" width="245" height="26" rx="4" fill="none" stroke="var(--mut)"/>
+ <g fill="var(--a)"><rect x="28" y="58" width="9" height="20"/><rect x="40" y="58" width="9" height="20"/><rect x="52" y="58" width="9" height="20"/><rect x="64" y="58" width="9" height="20"/></g>
+ <g fill="var(--b)"><rect x="78" y="58" width="60" height="20"/><rect x="141" y="58" width="60" height="20"/><rect x="204" y="58" width="60" height="20"/></g>
+ <text x="25" y="100">全員が同じ T：h = 1 − e<tspan baseline-shift="super" font-size="0.7em">−λT</tspan></text>
+ <text x="25" y="120">Σ s(1 − e<tspan baseline-shift="super" font-size="0.7em">−λT</tspan>) = C</text>
+ <text x="25" y="150" fill="var(--mut)">価値の順位は λ だけ</text>
+ <text x="25" y="168" fill="var(--mut)">→ 小物の λ/s の高さを使えない</text>
+ <text x="25" y="186" fill="var(--mut)">→ BHR にはほぼ最適</text>
+
+ <rect x="327" y="55" width="140" height="26" rx="4" fill="none" stroke="var(--a)"/><rect x="472" y="55" width="100" height="26" rx="4" fill="none" stroke="var(--b)"/>
+ <g fill="var(--a)"><rect x="330" y="58" width="9" height="20"/><rect x="342" y="58" width="9" height="20"/><rect x="354" y="58" width="9" height="20"/><rect x="366" y="58" width="9" height="20"/><rect x="378" y="58" width="9" height="20"/><rect x="390" y="58" width="9" height="20"/></g>
+ <g fill="var(--b)"><rect x="475" y="58" width="60" height="20"/></g>
+ <text x="327" y="100">クラスごとの T<tspan baseline-shift="sub" font-size="0.75em">k</tspan>、C<tspan baseline-shift="sub" font-size="0.75em">1</tspan> + C<tspan baseline-shift="sub" font-size="0.75em">2</tspan> = C</text>
+ <text x="327" y="120">最適：∂H<tspan baseline-shift="sub" font-size="0.75em">k</tspan>/∂C<tspan baseline-shift="sub" font-size="0.75em">k</tspan> が全クラスで等しい</text>
+ <text x="327" y="140">= (1/s<tspan baseline-shift="sub" font-size="0.75em">k</tspan>)·Σλ²e<tspan baseline-shift="super" font-size="0.7em">−λT<tspan baseline-shift="sub" font-size="0.75em">k</tspan></tspan> / Σλe<tspan baseline-shift="super" font-size="0.7em">−λT<tspan baseline-shift="sub" font-size="0.75em">k</tspan></tspan></text>
+ <text x="327" y="168" fill="var(--mut)">「境目の物の λ/s をそろえる」</text>
+ <text x="327" y="186" fill="var(--mut)">BHR 最適なら 1/s<tspan baseline-shift="sub" font-size="0.75em">k</tspan> を外す</text>
+
+ <rect x="629" y="55" width="70" height="26" rx="4" fill="var(--a)" fill-opacity=".25" stroke="var(--a)"/><rect x="704" y="55" width="70" height="26" rx="4" fill="var(--a)" fill-opacity=".25" stroke="var(--a)"/>
+ <rect x="779" y="55" width="70" height="26" rx="4" fill="var(--b)" fill-opacity=".25" stroke="var(--b)"/>
+ <text x="633" y="72">小物 ×900</text><text x="708" y="72">小物 ×900</text><text x="783" y="72">大物 ×31</text>
+ <text x="629" y="100">Region は最後の touch から T で追い出し</text>
+ <text x="629" y="120">touch 率 Λ = 中の物の λ の和</text>
+ <text x="629" y="140">寿命 L = (e<tspan baseline-shift="super" font-size="0.7em">ΛT</tspan>−1)/Λ = ∫₀ᵀ e<tspan baseline-shift="super" font-size="0.7em">Λt</tspan>dt</text>
+ <text x="629" y="160">物から見ると滞在 L の FIFO：</text>
+ <text x="629" y="178">h = λL / (1 + λL)</text>
+ <text x="629" y="206" fill="var(--mut)">小物の Region は Λ が大きい</text>
+ <text x="629" y="224" fill="var(--mut)">→ e<tspan baseline-shift="super" font-size="0.7em">ΛT</tspan> で長生き → 容量が自然に寄る</text>
+ <text x="629" y="250" fill="var(--mut)">FIFO なら L = T で全クラス同じ</text>
+ <text x="629" y="268" fill="var(--mut)">→ 分類しても何も変わらない</text>
+ </g>
+</svg>
+
+<h3>2.1 物単位 LRU（共有）と静的分割</h3>
+<p>時間の単位を要求 1 回にして、物 \(i\) の要求率を \(\lambda_i\)（\(\sum_i \lambda_i = 1\)）、大きさを \(s_i\)、在籍率（＝ヒット率）を \(h_i\)、容量を \(C\) とする。</p>
+<div class="math">
+<p><b>共有（\(T\) は 1 つ）</b></p>
+\[ h_i = 1 - e^{-\lambda_i T}, \qquad \sum_i s_i\, h_i = C \]
+<p><b>クラスで静的に分割（\(T_k\) はクラスごと）</b></p>
+\[ h_i = 1 - e^{-\lambda_i T_k}\ \ (i \in k), \qquad \sum_{i \in k} s_i\, h_i = C_k, \qquad \sum_k C_k = C \]
+<p><b>OHR 最適の配分</b>：クラス \(k\) のヒット数 \(H_k = \sum_{i\in k}\lambda_i h_i\) の、容量あたりの限界がすべてのクラスで等しい。</p>
+\[ \frac{\partial H_k}{\partial C_k} = \frac{dH_k/dT_k}{dC_k/dT_k}
+   = \frac{\sum_{i \in k} \lambda_i^{2}\, e^{-\lambda_i T_k}}{\sum_{i \in k} s_i\, \lambda_i\, e^{-\lambda_i T_k}}
+   \;\overset{s_i = s_k}{=}\; \frac{1}{s_k}\cdot
+   \frac{\sum_{i \in k} \lambda_i^{2}\, e^{-\lambda_i T_k}}{\sum_{i \in k} \lambda_i\, e^{-\lambda_i T_k}} = \mu \quad (\text{全クラスで同じ}) \]
+<p><b>BHR 最適の配分</b>：バイトのヒット \(B_k = \sum_{i\in k} s_i\lambda_i h_i\) で同じことをすると、\(1/s_k\) が消える。</p>
+\[ \frac{\partial B_k}{\partial C_k}
+   = \frac{\sum_{i \in k} s_i\, \lambda_i^{2}\, e^{-\lambda_i T_k}}{\sum_{i \in k} s_i\, \lambda_i\, e^{-\lambda_i T_k}}
+   \;\overset{s_i = s_k}{=}\; \frac{\sum_{i \in k} \lambda_i^{2}\, e^{-\lambda_i T_k}}{\sum_{i \in k} \lambda_i\, e^{-\lambda_i T_k}} = \mu' \]
+</div>
+<p><b>注 1（\(s_i = s_k\) の意味）</b>：今回の合成負荷では、クラス \(k\) を「サイズが \(s_k\) の物」と定義しているので、クラスの中の物はすべて \(s_i = s_k\)。\(\overset{s_i = s_k}{=}\) はこの条件のもとでの等号。サイズに幅のあるクラス（実トレースのサイズ帯など）では \(s_i\) を和の外に出せないので、左側の一般形を使う。<br>
+<b>注 2（\(\lambda\) が約分できない理由）</b>：分子・分母はともに、物ごとに \(\lambda\) の違う項の<b>和</b>なので、項どうしで約分できない（\(\sum a_i^2/\sum a_i \ne \sum a_i\)）。分子の \(\lambda_i^2\) は「ヒット 1 回の価値 \(\lambda_i\)」×「\(T\) を延ばしたときに在籍率が増える速さ \(\lambda_i e^{-\lambda_i T}\)」から来る。例：\(\lambda = 0.1, 0.01\)、\(T = 10\) なら、比は 0.003769 / 0.04584 = 0.082 で、0.01 と 0.1 の間の重み付き平均になる。</p>
+<p>比 \(\sum\lambda_i^2 e^{-\lambda_i T_k} / \sum\lambda_i e^{-\lambda_i T_k}\) は、重み \(w_i \propto \lambda_i e^{-\lambda_i T_k}\) による \(\lambda\) の平均、つまり「LRU の境目にいる物の \(\lambda\) の重み付き平均」\(\bar\lambda_k\) なので、OHR 最適は<b>境目の物の \(\lambda/s\) をクラス間でそろえる</b>こと、BHR 最適は<b>境目の \(\lambda\) をそろえる</b>ことを意味する。共有 LRU は全員に同じ \(T\) を与えるので、境目の \(\lambda\) が自動的にそろい、BHR についてはほぼ最適になる。W1・容量 10% で比べると：</p>
+<div class="tbl"><table><tr><th>方式（W1、容量 10%、モデル）</th><th>OHR</th><th>BHR</th></tr>
+<tr><td>共有 LRU</td><td>0.530</td><td>0.593</td></tr>
+<tr><td>分割・BHR 最適</td><td>0.493</td><td>0.594</td></tr>
+<tr><td>分割・OHR 最適（小物に容量の 81%）</td><td>0.688</td><td>0.431</td></tr>
+<tr><td>静的ナップサック（\(\lambda/s\) 順に詰める。IRM の上限）</td><td>0.768</td><td>0.576</td></tr></table></div>
+<p>つまり<b>「共有 LRU ≒ BHR 最適」と「OHR 最適の分割」が交換の曲線の両端</b>にあり、サイズで分けることは、その曲線上を OHR 側へ動くことに当たる。これが「サイズ分類で OHR は上がるが BMR が増える」（trace_stats_results.md §6）の式の上での理由である。</p>
+
+<h3>2.2 Region キャッシュ</h3>
+<p>Region を消すと中の物が全部消え、ヒットしても物は動かない。したがって物 \(i\) から見ると、「挿入されてから Region が消えるまで（\(L_i\)）」だけキャッシュにいる FIFO になる。再生報酬の定理から、次の式が成り立つ。</p>
+<div class="math">
+<p><b>物から見た在籍率</b>（滞在 \(L_i\) の FIFO。Che 近似の FIFO 版と同じ形）</p>
+\[ h_i = \frac{\lambda_i L_i}{1 + \lambda_i L_i} \]
+<p><b>Region FIFO</b>：どの Region も封じてから同じ時間 \(T\) で消えるので、分類しても \(h_i\) は変わらない。</p>
+\[ L_i = T \]
+<p><b>Region LRU</b>：Region は最後の touch から \(T\) 経つと消える。touch の率が一定の \(\Lambda\) なら、期待寿命は</p>
+\[ \mathbb{E}[\text{寿命}] = \frac{e^{\Lambda T} - 1}{\Lambda} = \int_0^{T} e^{\Lambda t}\, dt \]
+<p>物 \(i\) が入った Region の \(\Lambda\) は、自分の \(\lambda_i\) と同居の物の \(\lambda_j\) の和。同居の物を挿入の流れから独立に引くと</p>
+\[ L_i = \int_0^{T} e^{\lambda_i t}\; \mathbb{E}\!\left[ \prod_{j \in \text{同居}} e^{\lambda_j t} \right] dt \]
+<p>単一サイズの分類 \(k\) なら、同居は \(n_k - 1\) 個（\(n_k = \lfloor R/s_k \rfloor\)）で、挿入はミス率 \(m_j\) に比例するので</p>
+\[ \mathbb{E}\!\left[ \prod_{j} e^{\lambda_j t} \right] = M_k(t)^{\,n_k - 1}, \qquad
+   M_k(t) = \frac{\sum_{j \in k} m_j\, e^{\lambda_j t}}{\sum_{j \in k} m_j}, \qquad
+   m_j = \frac{\lambda_j}{1 + \lambda_j L_j} \]
+<p><b>容量の条件</b>（\(\phi_k\) は Region の充填率。詰め残しも容量を食う）</p>
+\[ \sum_i \frac{s_i\, h_i}{\phi_{k(i)}} = C \]
+<p><b>補正</b>：封じるまでの待ち \(U_k\) を滞在に足す（\(L_i \leftarrow U_k + L_i\)、\(U_k\) は「後から入る物の数の平均 \((n_k-1)/2\)」÷「分類の挿入率」）。立ち上がりの初期 Region \(j\) のうち、寿命が観測期間 \(H\) を超えるもの（\((e^{\Lambda_j T}-1)/\Lambda_j > H\)）は不死とし、その中の物は \(h_i = 1\)（§5.4）。</p>
+</div>
+<p>挿入の流れが \(L\) に依るので、\(T\) ごとに不動点を解き、占有が \(C\) になる \(T\) を二分法で求める。この式のもとでは、サイズ分類の効果は次のように説明できる。</p>
+<div class="card"><b>サイズ分類 = Region の「touch 密度」の分離</b><br>
+Region の touch 率は \(\Lambda\approx(R/s_k)\,\mathbb{E}_{\rm ins}[\lambda]\)、つまり <b>\(R\times\mathbb{E}_{\rm ins}[\lambda/s]\)（挿入された物の \(\lambda/s\) の平均）</b> で、Region 1 個の価値密度そのものである。混ぜると全 Region の \(\Lambda\) がならされるが、分けると小物の Region だけ \(\Lambda\) が大きくなり、寿命 \((e^{\Lambda T}-1)/\Lambda\) が<b>指数的に</b>延びる。LRU は寿命の差で容量を配り直すので、静的分割の \(C_k\) を明示的に決めなくても、容量が価値密度の高い側へ寄る（W1・容量 10% で小物の容量は 13% → 62%）。FIFO はこの寿命の差を作れないので、分類は効かない。</div>
+
+<svg viewBox="0 0 640 260" role="img" aria-label="寿命と ΛT">
+ <rect x="60" y="20" width="540" height="190" fill="none" stroke="var(--line)"/>
+ <polyline fill="none" stroke="var(--a)" stroke-width="2.2" points="73,210 87,199 114,183 141,170 168,158 195,145 222,133 249,121 276,109 303,97 330,84 357,72 384,60 411,48 438,36 465,24"/>
+ <g fill="var(--mut)"><text x="60" y="226" text-anchor="middle">0</text><text x="195" y="226" text-anchor="middle">5</text><text x="330" y="226" text-anchor="middle">10</text><text x="465" y="226" text-anchor="middle">15</text><text x="600" y="226" text-anchor="middle">20</text>
+ <text x="52" y="210" text-anchor="end">10⁰</text><text x="52" y="149" text-anchor="end">10²</text><text x="52" y="93" text-anchor="end">10⁴</text><text x="52" y="37" text-anchor="end">10⁶</text></g>
+ <text x="330" y="248" text-anchor="middle">ΛT（Region の touch 率 × 追い出し年齢）</text>
+ <text x="14" y="115" transform="rotate(-90 14 115)" text-anchor="middle">期待寿命 × Λ = e<tspan baseline-shift="super" font-size="0.7em">ΛT</tspan> − 1</text>
+ <circle cx="157" cy="163" r="5" fill="var(--b)"/><text x="165" y="188" fill="var(--b)">大物の Region（W1・30%、実測 ΛT≈3.6）</text>
+ <circle cx="265" cy="114" r="5" fill="var(--a)"/><text x="272" y="133" fill="var(--a)">小物の Region（実測 ΛT≈7.6）</text>
+ <text x="380" y="60" fill="var(--mut)">ΛT が 1 増えると寿命は e≈2.7 倍</text>
+ <text x="380" y="78" fill="var(--mut)">→ T が数 % 揺らぐだけで寿命が大きく変わる</text>
+</svg>
+
+<h2>3. 実験</h2>
+<div class="tbl"><table><tr><th>名前</th><th>指定（size:物の数:要求の割合:\(\alpha\)）</th><th>目的</th></tr>
+<tr><td>W1</td><td>36K:200000:0.75:0.9　1M:20000:0.25:0.9</td><td>基本形（提案の例、要求 3:1）</td></tr>
+<tr><td>W1b</td><td>36K:200000:0.857:0.9　1M:20000:0.143:0.9</td><td>要求 6:1</td></tr>
+<tr><td>W2</td><td>36K:20000:0.034:0.9　1M:20000:0.966:0.9</td><td>対照：物の数と \(\alpha\) をそろえ、要求の比をサイズの比（28.4）にする → \(\lambda/s\) の分布が両クラスで同じ</td></tr>
+<tr><td>W3 / W3r</td><td>小物 \(\alpha=1.1\)・大物 \(\alpha=0.6\) / その逆</td><td>クラスごとの Zipf の傾き</td></tr>
+<tr><td>W5</td><td>8K:400000:0.5　128K:50000:0.3　1M:10000:0.2（\(\alpha=0.9\)）</td><td>3 サイズ。\(k=3\) と \(k=2\)</td></tr></table></div>
+<p>各 2,000 万要求（先頭 500 万で温める）。容量は足跡の 5・10・20・30%、Region は容量 ÷ 256。静的分割は、クラス別の部分トレースに LRU を当て、容量はモデルの OHR 最適な \(C_k\) を使った。</p>
+
+<h2>4. 結果</h2>
+<div class=grid><svg viewBox="0 0 600 365" role="img" aria-label="OHR：モデル対実測（全負荷・全容量）">
+<rect x="50" y="20" width="300" height="300" fill="none" stroke="var(--line)"/>
+<line x1="50" y1="320" x2="350" y2="20" stroke="var(--line)" stroke-dasharray="4 3"/>
+<text x="50.0" y="336" text-anchor="middle">0.1</text><text x="44" y="324.0" text-anchor="end">0.1</text>
+<text x="116.66666666666666" y="336" text-anchor="middle">0.3</text><text x="44" y="257.33333333333337" text-anchor="end">0.3</text>
+<text x="183.33333333333334" y="336" text-anchor="middle">0.5</text><text x="44" y="190.66666666666666" text-anchor="end">0.5</text>
+<text x="250.0" y="336" text-anchor="middle">0.7</text><text x="44" y="124.0" text-anchor="end">0.7</text>
+<text x="316.6666666666667" y="336" text-anchor="middle">0.9</text><text x="44" y="57.333333333333314" text-anchor="end">0.9</text>
+<text x="200.0" y="356" text-anchor="middle">モデル（Che 型）</text><text x="12" y="170.0" transform="rotate(-90 12 170.0)" text-anchor="middle">実測（libCacheSim）</text>
+<circle cx="165.2" cy="204.9" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="212.5" cy="157.5" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="151.3" cy="221.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="151.3" cy="218.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="161.2" cy="209.0" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="194.8" cy="175.6" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="193.4" cy="176.6" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="246.0" cy="124.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="179.1" cy="191.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="179.1" cy="191.1" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="189.2" cy="180.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="230.2" cy="139.9" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="226.2" cy="143.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="284.2" cy="85.8" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="214.4" cy="156.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="214.4" cy="155.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="220.2" cy="148.3" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="271.1" cy="99.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="248.2" cy="121.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="308.3" cy="61.7" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="236.7" cy="133.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="236.7" cy="133.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="244.2" cy="126.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="296.9" cy="73.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="177.6" cy="192.4" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="226.8" cy="143.3" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="163.4" cy="208.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="163.4" cy="206.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="175.7" cy="195.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="210.4" cy="159.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="206.4" cy="163.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="261.7" cy="108.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="191.6" cy="178.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="191.6" cy="178.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="202.3" cy="167.3" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="247.9" cy="122.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="239.4" cy="130.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="301.5" cy="68.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="226.8" cy="144.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="226.8" cy="143.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="233.8" cy="135.2" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="289.9" cy="79.9" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="261.2" cy="108.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="325.5" cy="44.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="249.0" cy="121.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="249.0" cy="121.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="258.9" cy="113.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="317.2" cy="54.1" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="173.3" cy="196.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="175.5" cy="194.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="159.1" cy="211.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="159.1" cy="211.1" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="170.8" cy="199.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="172.3" cy="198.2" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="205.6" cy="164.4" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="207.9" cy="162.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="190.9" cy="179.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="190.9" cy="179.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="201.4" cy="168.7" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="203.1" cy="167.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="242.3" cy="127.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="244.7" cy="125.3" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="227.9" cy="142.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="227.9" cy="142.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="236.2" cy="133.9" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="238.0" cy="132.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="266.2" cy="103.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="268.6" cy="101.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="252.7" cy="117.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="252.7" cy="117.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="259.9" cy="110.4" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="261.5" cy="108.8" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="203.1" cy="166.9" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="243.3" cy="126.7" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="191.1" cy="179.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="191.1" cy="179.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="201.3" cy="169.7" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="229.7" cy="140.6" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="224.0" cy="146.1" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="258.4" cy="111.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="212.4" cy="157.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="212.4" cy="157.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="220.8" cy="149.4" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="249.7" cy="120.8" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="249.4" cy="120.6" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="277.6" cy="92.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="240.2" cy="131.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="240.2" cy="130.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="245.2" cy="124.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="271.9" cy="98.6" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="267.4" cy="102.6" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="291.6" cy="78.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="258.6" cy="111.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="258.6" cy="111.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="263.6" cy="106.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="286.1" cy="84.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="115.4" cy="254.6" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="151.0" cy="219.1" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="108.2" cy="263.1" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="108.2" cy="261.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="113.8" cy="255.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="135.1" cy="236.1" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="145.4" cy="224.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="203.5" cy="166.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="136.3" cy="233.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="136.3" cy="233.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="142.9" cy="226.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="185.3" cy="185.8" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="189.8" cy="180.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="278.8" cy="91.3" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="180.4" cy="190.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="180.4" cy="190.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="189.2" cy="183.4" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="260.9" cy="108.6" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="224.8" cy="145.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="328.8" cy="41.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="212.7" cy="157.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="212.7" cy="157.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="221.1" cy="150.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="319.6" cy="51.8" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="149.3" cy="220.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="202.5" cy="167.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="132.1" cy="236.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="132.1" cy="238.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="146.0" cy="223.9" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="180.2" cy="191.1" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="162.2" cy="208.2" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="176.8" cy="193.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="235.1" cy="135.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="163.5" cy="207.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="163.5" cy="206.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="172.8" cy="197.0" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="218.1" cy="153.1" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="197.0" cy="173.3" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="209.1" cy="161.0" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="272.1" cy="98.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="198.9" cy="173.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="198.9" cy="171.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="204.9" cy="164.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="259.1" cy="113.5" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="234.8" cy="135.7" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="231.1" cy="139.0" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="295.4" cy="75.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="221.3" cy="149.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="221.3" cy="149.1" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="227.7" cy="142.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="284.8" cy="89.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="259.3" cy="110.7" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="368" cy="30" r="4" fill="var(--mut)"/><text x="378" y="34">物 LRU（共有）</text>
+<circle cx="368" cy="50" r="4" fill="var(--g)"/><text x="378" y="54">物 LRU（静的分割・OHR 最適）</text>
+<circle cx="368" cy="70" r="4" fill="var(--b)"/><text x="378" y="74">Region FIFO・分類なし</text>
+<circle cx="368" cy="90" r="4" fill="var(--b)"/><text x="378" y="94">Region FIFO・サイズ分類</text>
+<circle cx="368" cy="110" r="4" fill="var(--a)"/><text x="378" y="114">Region LRU・分類なし</text>
+<circle cx="368" cy="130" r="4" fill="var(--r)"/><text x="378" y="134">Region LRU・サイズ分類</text>
+<circle cx="368" cy="150" r="4" fill="var(--p)"/><text x="378" y="154">Region LRU・k=2（8K+128K / 1M）</text>
+<text x="50" y="12">OHR：モデル対実測（全負荷・全容量）</text></svg>
+<svg viewBox="0 0 600 365" role="img" aria-label="BHR：モデル対実測（全負荷・全容量）">
+<rect x="50" y="20" width="300" height="300" fill="none" stroke="var(--line)"/>
+<line x1="50" y1="320" x2="350" y2="20" stroke="var(--line)" stroke-dasharray="4 3"/>
+<text x="50.0" y="336" text-anchor="middle">0.1</text><text x="44" y="324.0" text-anchor="end">0.1</text>
+<text x="116.66666666666666" y="336" text-anchor="middle">0.3</text><text x="44" y="257.33333333333337" text-anchor="end">0.3</text>
+<text x="183.33333333333334" y="336" text-anchor="middle">0.5</text><text x="44" y="190.66666666666666" text-anchor="end">0.5</text>
+<text x="250.0" y="336" text-anchor="middle">0.7</text><text x="44" y="124.0" text-anchor="end">0.7</text>
+<text x="316.6666666666667" y="336" text-anchor="middle">0.9</text><text x="44" y="57.333333333333314" text-anchor="end">0.9</text>
+<text x="200.0" y="356" text-anchor="middle">モデル（Che 型）</text><text x="12" y="170.0" transform="rotate(-90 12 170.0)" text-anchor="middle">実測（libCacheSim）</text>
+<circle cx="181.7" cy="188.4" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="134.4" cy="235.7" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="165.0" cy="208.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="165.0" cy="205.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="171.7" cy="198.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="165.0" cy="205.4" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="214.3" cy="155.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="160.4" cy="209.7" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="197.1" cy="173.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="197.1" cy="173.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="205.4" cy="164.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="188.4" cy="180.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="251.3" cy="118.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="190.1" cy="180.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="236.7" cy="134.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="236.7" cy="133.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="242.5" cy="127.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="217.7" cy="149.8" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="275.3" cy="94.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="212.4" cy="157.7" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="260.8" cy="109.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="260.8" cy="109.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="267.4" cy="102.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="236.5" cy="129.0" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="179.9" cy="190.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="125.1" cy="245.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="163.6" cy="208.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="163.6" cy="206.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="170.2" cy="199.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="159.6" cy="210.2" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="211.9" cy="158.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="149.9" cy="220.3" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="195.0" cy="174.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="195.0" cy="175.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="203.0" cy="166.8" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="182.4" cy="187.0" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="248.2" cy="121.9" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="178.3" cy="191.9" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="233.7" cy="137.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="233.7" cy="136.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="239.3" cy="130.2" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="209.9" cy="157.1" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="271.8" cy="98.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="208.6" cy="161.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="257.4" cy="112.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="257.4" cy="113.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="264.4" cy="106.0" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="229.1" cy="135.8" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="176.8" cy="193.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="175.5" cy="194.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="161.7" cy="208.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="161.7" cy="208.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="174.2" cy="196.1" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="174.0" cy="196.5" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="209.4" cy="160.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="207.9" cy="162.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="193.8" cy="176.2" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="193.8" cy="176.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="205.0" cy="165.2" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="204.4" cy="165.6" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="246.4" cy="123.6" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="244.7" cy="125.3" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="231.2" cy="138.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="231.2" cy="139.0" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="240.1" cy="130.0" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="238.8" cy="130.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="270.4" cy="99.5" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="268.6" cy="101.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="256.2" cy="113.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="256.2" cy="114.1" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="264.0" cy="106.3" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="261.9" cy="107.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="94.2" cy="275.9" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="62.8" cy="307.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="85.6" cy="284.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="85.6" cy="284.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="90.4" cy="280.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="85.8" cy="283.2" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="128.0" cy="242.1" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="91.7" cy="278.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="116.1" cy="252.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="116.1" cy="254.1" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="122.5" cy="248.0" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="109.3" cy="257.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="178.0" cy="192.1" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="138.9" cy="231.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="166.0" cy="205.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="166.0" cy="204.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="170.0" cy="199.8" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="148.6" cy="214.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="217.4" cy="152.7" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="177.7" cy="192.4" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="202.7" cy="166.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="202.7" cy="167.8" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="208.4" cy="161.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="180.0" cy="181.5" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="245.5" cy="124.6" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="200.5" cy="169.6" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="231.5" cy="139.7" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="231.5" cy="138.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="238.0" cy="131.9" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="228.3" cy="141.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="267.0" cy="103.1" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="216.4" cy="153.7" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="254.3" cy="115.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="254.3" cy="115.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="259.3" cy="110.5" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="242.6" cy="126.4" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="289.7" cy="80.4" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="235.9" cy="134.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="279.7" cy="90.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="279.7" cy="90.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="283.0" cy="87.4" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="262.9" cy="106.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="303.9" cy="66.2" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="273.3" cy="96.8" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="294.7" cy="75.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="294.7" cy="75.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="297.9" cy="72.7" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="278.9" cy="90.5" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="183.9" cy="186.3" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="133.4" cy="236.8" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="160.0" cy="206.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="160.0" cy="210.4" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="173.9" cy="195.9" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="161.2" cy="207.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="163.6" cy="206.9" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="218.6" cy="151.5" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="161.2" cy="209.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="199.9" cy="169.9" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="199.9" cy="170.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="208.7" cy="161.6" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="189.0" cy="177.3" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="194.0" cy="175.7" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="258.0" cy="112.1" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="193.1" cy="177.2" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="242.9" cy="128.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="242.9" cy="127.6" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="247.9" cy="121.0" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="218.8" cy="143.9" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="227.1" cy="142.6" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="283.3" cy="86.8" r="3.2" fill="var(--mut)" fill-opacity=".75"/>
+<circle cx="217.2" cy="153.0" r="3.2" fill="var(--g)" fill-opacity=".75"/>
+<circle cx="268.1" cy="101.5" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="268.1" cy="102.3" r="3.2" fill="var(--b)" fill-opacity=".75"/>
+<circle cx="274.3" cy="95.8" r="3.2" fill="var(--a)" fill-opacity=".75"/>
+<circle cx="237.6" cy="123.7" r="3.2" fill="var(--r)" fill-opacity=".75"/>
+<circle cx="247.0" cy="123.0" r="3.2" fill="var(--p)" fill-opacity=".75"/>
+<circle cx="368" cy="30" r="4" fill="var(--mut)"/><text x="378" y="34">物 LRU（共有）</text>
+<circle cx="368" cy="50" r="4" fill="var(--g)"/><text x="378" y="54">物 LRU（静的分割・OHR 最適）</text>
+<circle cx="368" cy="70" r="4" fill="var(--b)"/><text x="378" y="74">Region FIFO・分類なし</text>
+<circle cx="368" cy="90" r="4" fill="var(--b)"/><text x="378" y="94">Region FIFO・サイズ分類</text>
+<circle cx="368" cy="110" r="4" fill="var(--a)"/><text x="378" y="114">Region LRU・分類なし</text>
+<circle cx="368" cy="130" r="4" fill="var(--r)"/><text x="378" y="134">Region LRU・サイズ分類</text>
+<circle cx="368" cy="150" r="4" fill="var(--p)"/><text x="378" y="154">Region LRU・k=2（8K+128K / 1M）</text>
+<text x="50" y="12">BHR：モデル対実測（全負荷・全容量）</text></svg>
+</div><h3>モデルの精度（方式ごと）</h3>
+<div class="tbl"><table><tr><th>方式</th><th>指標</th><th>点</th><th>平均 |実測−モデル|</th><th>最大のずれ</th></tr>
+<tr><td>物 LRU（共有）</td><td>OHR</td><td>24</td><td>0.01 pt</td><td>-0.04 pt</td></tr>
+<tr><td>物 LRU（共有）</td><td>BHR</td><td>24</td><td>0.02 pt</td><td>-0.05 pt</td></tr>
+<tr><td>物 LRU（静的分割・OHR 最適）</td><td>OHR</td><td>24</td><td>0.02 pt</td><td>-0.28 pt</td></tr>
+<tr><td>物 LRU（静的分割・OHR 最適）</td><td>BHR</td><td>24</td><td>0.04 pt</td><td>-0.08 pt</td></tr>
+<tr><td>Region FIFO・分類なし</td><td>OHR</td><td>24</td><td>0.26 pt</td><td>-0.86 pt</td></tr>
+<tr><td>Region FIFO・分類なし</td><td>BHR</td><td>24</td><td>0.24 pt</td><td>+1.11 pt</td></tr>
+<tr><td>Region FIFO・サイズ分類</td><td>OHR</td><td>24</td><td>0.08 pt</td><td>-0.14 pt</td></tr>
+<tr><td>Region FIFO・サイズ分類</td><td>BHR</td><td>24</td><td>0.09 pt</td><td>-0.15 pt</td></tr>
+<tr><td>Region LRU・分類なし</td><td>OHR</td><td>24</td><td>0.19 pt</td><td>-0.76 pt</td></tr>
+<tr><td>Region LRU・分類なし</td><td>BHR</td><td>24</td><td>0.10 pt</td><td>+0.34 pt</td></tr>
+<tr><td>Region LRU・サイズ分類</td><td>OHR</td><td>24</td><td>0.25 pt</td><td>-1.23 pt</td></tr>
+<tr><td>Region LRU・サイズ分類</td><td>BHR</td><td>24</td><td>0.77 pt</td><td>+2.60 pt</td></tr>
+<tr><td>Region LRU・\(k=2\)（8K+128K / 1M）</td><td>OHR</td><td>4</td><td>0.09 pt</td><td>-0.13 pt</td></tr>
+<tr><td>Region LRU・\(k=2\)（8K+128K / 1M）</td><td>BHR</td><td>4</td><td>0.09 pt</td><td>-0.13 pt</td></tr></table></div>
+<h3>サイズで分けたときの利得（pt）</h3>
+<div class="tbl"><table><tr><th>負荷</th><th>容量</th><th>静的分割 \(\Delta\)OHR<br>モデル / 実測</th><th>静的分割 ΔBHR<br>モデル / 実測</th><th>Region LRU 分類 \(\Delta\)OHR<br>モデル / 実測</th><th>Region LRU 分類 ΔBHR<br>モデル / 実測</th><th>Region FIFO 分類 \(\Delta\)OHR<br>実測</th><th>上限 opt<br>OHR</th></tr>
+<tr><td>W1 36K/1M 要求 3:1</td><td>5%</td><td><span style="color:var(--g)">+14.2</span> / <span style="color:var(--g)">+14.2</span></td><td><span style="color:var(--r)">-14.2</span> / <span style="color:var(--r)">-14.2</span></td><td><span style="color:var(--g)">+10.1</span> / <span style="color:var(--g)">+10.0</span></td><td><span style="color:var(--r)">-2.0</span> / <span style="color:var(--r)">-2.1</span></td><td><span style="color:var(--g)">+0.8</span></td><td>0.688</td></tr>
+<tr><td>W1 36K/1M 要求 3:1</td><td>10%</td><td><span style="color:var(--g)">+15.8</span> / <span style="color:var(--g)">+15.8</span></td><td><span style="color:var(--r)">-16.2</span> / <span style="color:var(--r)">-16.2</span></td><td><span style="color:var(--g)">+12.3</span> / <span style="color:var(--g)">+12.2</span></td><td><span style="color:var(--r)">-5.1</span> / <span style="color:var(--r)">-4.8</span></td><td><span style="color:var(--mut)">+0.0</span></td><td>0.768</td></tr>
+<tr><td>W1 36K/1M 要求 3:1</td><td>20%</td><td><span style="color:var(--g)">+17.4</span> / <span style="color:var(--g)">+17.4</span></td><td><span style="color:var(--r)">-18.4</span> / <span style="color:var(--r)">-18.4</span></td><td><span style="color:var(--g)">+15.3</span> / <span style="color:var(--g)">+14.7</span></td><td><span style="color:var(--r)">-7.4</span> / <span style="color:var(--r)">-6.8</span></td><td><span style="color:var(--mut)">+0.3</span></td><td>0.854</td></tr>
+<tr><td>W1 36K/1M 要求 3:1</td><td>30%</td><td><span style="color:var(--g)">+18.0</span> / <span style="color:var(--g)">+18.0</span></td><td><span style="color:var(--r)">-18.9</span> / <span style="color:var(--r)">-18.9</span></td><td><span style="color:var(--g)">+15.8</span> / <span style="color:var(--g)">+15.7</span></td><td><span style="color:var(--r)">-9.3</span> / <span style="color:var(--r)">-7.9</span></td><td><span style="color:var(--mut)">-0.1</span></td><td>0.906</td></tr>
+<tr><td>W1b 要求 6:1</td><td>5%</td><td><span style="color:var(--g)">+14.7</span> / <span style="color:var(--g)">+14.8</span></td><td><span style="color:var(--r)">-16.4</span> / <span style="color:var(--r)">-16.4</span></td><td><span style="color:var(--g)">+10.4</span> / <span style="color:var(--g)">+10.6</span></td><td><span style="color:var(--r)">-3.2</span> / <span style="color:var(--r)">-3.3</span></td><td><span style="color:var(--g)">+0.6</span></td><td>0.723</td></tr>
+<tr><td>W1b 要求 6:1</td><td>10%</td><td><span style="color:var(--g)">+16.6</span> / <span style="color:var(--g)">+16.6</span></td><td><span style="color:var(--r)">-18.6</span> / <span style="color:var(--r)">-18.6</span></td><td><span style="color:var(--g)">+13.7</span> / <span style="color:var(--g)">+13.5</span></td><td><span style="color:var(--r)">-6.2</span> / <span style="color:var(--r)">-6.1</span></td><td><span style="color:var(--mut)">-0.0</span></td><td>0.804</td></tr>
+<tr><td>W1b 要求 6:1</td><td>20%</td><td><span style="color:var(--g)">+18.6</span> / <span style="color:var(--g)">+18.6</span></td><td><span style="color:var(--r)">-21.0</span> / <span style="color:var(--r)">-21.0</span></td><td><span style="color:var(--g)">+16.8</span> / <span style="color:var(--g)">+16.6</span></td><td><span style="color:var(--r)">-8.8</span> / <span style="color:var(--r)">-8.1</span></td><td><span style="color:var(--mut)">+0.3</span></td><td>0.891</td></tr>
+<tr><td>W1b 要求 6:1</td><td>30%</td><td><span style="color:var(--g)">+19.3</span> / <span style="color:var(--g)">+19.3</span></td><td><span style="color:var(--r)">-18.9</span> / <span style="color:var(--r)">-19.0</span></td><td><span style="color:var(--g)">+17.5</span> / <span style="color:var(--g)">+17.7</span></td><td><span style="color:var(--r)">-10.6</span> / <span style="color:var(--r)">-8.9</span></td><td><span style="color:var(--mut)">-0.1</span></td><td>0.944</td></tr>
+<tr><td>W2 \(\lambda/s\) をそろえた対照</td><td>5%</td><td><span style="color:var(--g)">+0.6</span> / <span style="color:var(--g)">+0.6</span></td><td><span style="color:var(--mut)">-0.4</span> / <span style="color:var(--mut)">-0.4</span></td><td><span style="color:var(--mut)">+0.4</span> / <span style="color:var(--mut)">+0.4</span></td><td><span style="color:var(--mut)">-0.1</span> / <span style="color:var(--mut)">-0.1</span></td><td><span style="color:var(--mut)">+0.2</span></td><td>0.602</td></tr>
+<tr><td>W2 \(\lambda/s\) をそろえた対照</td><td>10%</td><td><span style="color:var(--g)">+0.7</span> / <span style="color:var(--g)">+0.7</span></td><td><span style="color:var(--mut)">-0.4</span> / <span style="color:var(--mut)">-0.5</span></td><td><span style="color:var(--g)">+0.5</span> / <span style="color:var(--mut)">+0.4</span></td><td><span style="color:var(--mut)">-0.2</span> / <span style="color:var(--mut)">-0.1</span></td><td><span style="color:var(--mut)">+0.1</span></td><td>0.683</td></tr>
+<tr><td>W2 \(\lambda/s\) をそろえた対照</td><td>20%</td><td><span style="color:var(--g)">+0.7</span> / <span style="color:var(--g)">+0.7</span></td><td><span style="color:var(--r)">-0.5</span> / <span style="color:var(--r)">-0.5</span></td><td><span style="color:var(--g)">+0.6</span> / <span style="color:var(--mut)">+0.5</span></td><td><span style="color:var(--mut)">-0.4</span> / <span style="color:var(--mut)">-0.2</span></td><td><span style="color:var(--mut)">+0.1</span></td><td>0.771</td></tr>
+<tr><td>W2 \(\lambda/s\) をそろえた対照</td><td>30%</td><td><span style="color:var(--g)">+0.7</span> / <span style="color:var(--g)">+0.7</span></td><td><span style="color:var(--r)">-0.5</span> / <span style="color:var(--r)">-0.6</span></td><td><span style="color:var(--mut)">+0.5</span> / <span style="color:var(--mut)">+0.5</span></td><td><span style="color:var(--r)">-0.6</span> / <span style="color:var(--mut)">-0.3</span></td><td><span style="color:var(--mut)">+0.0</span></td><td>0.825</td></tr>
+<tr><td>W3 小物 \(\alpha=1.1\)・大物 \(\alpha=0.6\)</td><td>5%</td><td><span style="color:var(--g)">+12.1</span> / <span style="color:var(--g)">+12.1</span></td><td><span style="color:var(--r)">-9.4</span> / <span style="color:var(--r)">-9.4</span></td><td><span style="color:var(--g)">+8.5</span> / <span style="color:var(--g)">+8.7</span></td><td><span style="color:var(--r)">-1.4</span> / <span style="color:var(--r)">-0.8</span></td><td><span style="color:var(--mut)">+0.3</span></td><td>0.736</td></tr>
+<tr><td>W3 小物 \(\alpha=1.1\)・大物 \(\alpha=0.6\)</td><td>10%</td><td><span style="color:var(--g)">+10.3</span> / <span style="color:var(--g)">+10.3</span></td><td><span style="color:var(--r)">-10.9</span> / <span style="color:var(--r)">-10.9</span></td><td><span style="color:var(--g)">+8.7</span> / <span style="color:var(--g)">+8.6</span></td><td><span style="color:var(--r)">-4.0</span> / <span style="color:var(--r)">-2.9</span></td><td><span style="color:var(--mut)">-0.0</span></td><td>0.781</td></tr>
+<tr><td>W3 小物 \(\alpha=1.1\)・大物 \(\alpha=0.6\)</td><td>20%</td><td><span style="color:var(--g)">+8.5</span> / <span style="color:var(--g)">+8.5</span></td><td><span style="color:var(--r)">-11.7</span> / <span style="color:var(--r)">-11.7</span></td><td><span style="color:var(--g)">+8.0</span> / <span style="color:var(--g)">+7.8</span></td><td><span style="color:var(--r)">-6.4</span> / <span style="color:var(--r)">-4.4</span></td><td><span style="color:var(--mut)">+0.3</span></td><td>0.833</td></tr>
+<tr><td>W3 小物 \(\alpha=1.1\)・大物 \(\alpha=0.6\)</td><td>30%</td><td><span style="color:var(--g)">+7.3</span> / <span style="color:var(--g)">+7.3</span></td><td><span style="color:var(--r)">-11.9</span> / <span style="color:var(--r)">-11.9</span></td><td><span style="color:var(--g)">+6.8</span> / <span style="color:var(--g)">+6.6</span></td><td><span style="color:var(--r)">-8.5</span> / <span style="color:var(--r)">-6.0</span></td><td><span style="color:var(--mut)">+0.0</span></td><td>0.868</td></tr>
+<tr><td>W3r 小物 \(\alpha=0.6\)・大物 \(\alpha=1.1\)</td><td>5%</td><td><span style="color:var(--g)">+10.7</span> / <span style="color:var(--g)">+10.7</span></td><td><span style="color:var(--r)">-13.5</span> / <span style="color:var(--r)">-13.5</span></td><td><span style="color:var(--g)">+6.4</span> / <span style="color:var(--g)">+5.9</span></td><td><span style="color:var(--r)">-2.9</span> / <span style="color:var(--r)">-2.8</span></td><td><span style="color:var(--mut)">+0.4</span></td><td>0.533</td></tr>
+<tr><td>W3r 小物 \(\alpha=0.6\)・大物 \(\alpha=1.1\)</td><td>10%</td><td><span style="color:var(--g)">+17.4</span> / <span style="color:var(--g)">+17.4</span></td><td><span style="color:var(--r)">-15.2</span> / <span style="color:var(--r)">-15.2</span></td><td><span style="color:var(--g)">+12.7</span> / <span style="color:var(--g)">+12.1</span></td><td><span style="color:var(--r)">-5.0</span> / <span style="color:var(--r)">-4.8</span></td><td><span style="color:var(--mut)">-0.1</span></td><td>0.666</td></tr>
+<tr><td>W3r 小物 \(\alpha=0.6\)・大物 \(\alpha=1.1\)</td><td>20%</td><td><span style="color:var(--g)">+26.7</span> / <span style="color:var(--g)">+26.7</span></td><td><span style="color:var(--r)">-16.1</span> / <span style="color:var(--r)">-16.1</span></td><td><span style="color:var(--g)">+21.5</span> / <span style="color:var(--g)">+22.4</span></td><td><span style="color:var(--r)">-6.0</span> / <span style="color:var(--r)">-5.7</span></td><td><span style="color:var(--mut)">+0.3</span></td><td>0.840</td></tr>
+<tr><td>W3r 小物 \(\alpha=0.6\)・大物 \(\alpha=1.1\)</td><td>30%</td><td><span style="color:var(--g)">+31.2</span> / <span style="color:var(--g)">+31.2</span></td><td><span style="color:var(--r)">-9.2</span> / <span style="color:var(--r)">-9.2</span></td><td><span style="color:var(--g)">+29.6</span> / <span style="color:var(--g)">+29.6</span></td><td><span style="color:var(--r)">-5.7</span> / <span style="color:var(--r)">-5.3</span></td><td><span style="color:var(--mut)">-0.1</span></td><td>0.954</td></tr>
+<tr><td>W5 8K/128K/1M</td><td>5%</td><td><span style="color:var(--g)">+16.0</span> / <span style="color:var(--g)">+16.0</span></td><td><span style="color:var(--r)">-15.1</span> / <span style="color:var(--r)">-15.2</span></td><td><span style="color:var(--g)">+10.3</span> / <span style="color:var(--g)">+9.8</span></td><td><span style="color:var(--r)">-3.8</span> / <span style="color:var(--r)">-3.5</span></td><td><span style="color:var(--r)">-0.6</span></td><td>0.664</td></tr>
+<tr><td>W5 8K/128K/1M</td><td>10%</td><td><span style="color:var(--g)">+17.5</span> / <span style="color:var(--g)">+17.5</span></td><td><span style="color:var(--r)">-17.2</span> / <span style="color:var(--r)">-17.2</span></td><td><span style="color:var(--g)">+13.6</span> / <span style="color:var(--g)">+13.2</span></td><td><span style="color:var(--r)">-5.9</span> / <span style="color:var(--r)">-4.7</span></td><td><span style="color:var(--mut)">+0.2</span></td><td>0.743</td></tr>
+<tr><td>W5 8K/128K/1M</td><td>20%</td><td><span style="color:var(--g)">+18.9</span> / <span style="color:var(--g)">+18.9</span></td><td><span style="color:var(--r)">-19.5</span> / <span style="color:var(--r)">-19.5</span></td><td><span style="color:var(--g)">+16.3</span> / <span style="color:var(--g)">+15.3</span></td><td><span style="color:var(--r)">-8.7</span> / <span style="color:var(--r)">-6.9</span></td><td><span style="color:var(--g)">+0.5</span></td><td>0.828</td></tr>
+<tr><td>W5 8K/128K/1M</td><td>30%</td><td><span style="color:var(--g)">+19.3</span> / <span style="color:var(--g)">+19.0</span></td><td><span style="color:var(--r)">-19.8</span> / <span style="color:var(--r)">-19.9</span></td><td><span style="color:var(--g)">+17.1</span> / <span style="color:var(--g)">+16.0</span></td><td><span style="color:var(--r)">-11.0</span> / <span style="color:var(--r)">-8.4</span></td><td><span style="color:var(--mut)">+0.0</span></td><td>0.880</td></tr></table></div>
+<h3>負荷ごとの詳細</h3>
+<details><summary>W1 36K/1M 要求 3:1：<code>36K:200000:0.75:0.9 1M:20000:0.25:0.9</code></summary><div class="tbl"><table><tr><th>容量</th><th>方式</th><th>OHR モデル</th><th>OHR 実測</th><th>BHR モデル</th><th>BHR 実測</th><th>容量の配分（モデル）</th><th>クラス別ヒット率（モデル）</th></tr>
+<tr><td>5%</td><td>物 LRU（共有）</td><td>0.4455</td><td>0.4454</td><td>0.4950</td><td>0.4947</td><td>0.1031,0.8969</td><td>0.4266,0.5022</td></tr>
+<tr><td>5%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.5875</td><td>0.5875</td><td>0.3531</td><td>0.3528</td><td>1139323028,277892972</td><td></td></tr>
+<tr><td>5%</td><td>Region FIFO・分類なし</td><td>0.4039</td><td>0.3953</td><td>0.4450</td><td>0.4361</td><td>0.1019,0.8981</td><td>0.3882,0.4510</td></tr>
+<tr><td>5%</td><td>Region FIFO・サイズ分類</td><td>0.4039</td><td>0.4033</td><td>0.4450</td><td>0.4443</td><td>0.1019,0.8981</td><td>0.3882,0.4510</td></tr>
+<tr><td>5%</td><td>Region LRU・分類なし</td><td>0.4337</td><td>0.4331</td><td>0.4652</td><td>0.4645</td><td>0.1264,0.8724</td><td>0.4216,0.4698</td></tr>
+<tr><td>5%</td><td>Region LRU・サイズ分類</td><td>0.5344</td><td>0.5333</td><td>0.4451</td><td>0.4437</td><td>0.4190,0.5810</td><td>0.5685,0.4321</td></tr>
+<tr><td>10%</td><td>物 LRU（共有）</td><td>0.5303</td><td>0.5301</td><td>0.5929</td><td>0.5926</td><td>0.1076,0.8924</td><td>0.5064,0.6021</td></tr>
+<tr><td>10%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.6881</td><td>0.6880</td><td>0.4312</td><td>0.4309</td><td>2293255810,541176190</td><td></td></tr>
+<tr><td>10%</td><td>Region FIFO・分類なし</td><td>0.4874</td><td>0.4863</td><td>0.5412</td><td>0.5411</td><td>0.1073,0.8927</td><td>0.4668,0.5490</td></tr>
+<tr><td>10%</td><td>Region FIFO・サイズ分類</td><td>0.4874</td><td>0.4867</td><td>0.5412</td><td>0.5404</td><td>0.1073,0.8927</td><td>0.4668,0.5490</td></tr>
+<tr><td>10%</td><td>Region LRU・分類なし</td><td>0.5177</td><td>0.5182</td><td>0.5661</td><td>0.5661</td><td>0.1244,0.8773</td><td>0.4992,0.5731</td></tr>
+<tr><td>10%</td><td>Region LRU・サイズ分類</td><td>0.6407</td><td>0.6404</td><td>0.5152</td><td>0.5178</td><td>0.5010,0.4990</td><td>0.6886,0.4969</td></tr>
+<tr><td>20%</td><td>物 LRU（共有）</td><td>0.6286</td><td>0.6286</td><td>0.7040</td><td>0.7039</td><td>0.1150,0.8850</td><td>0.5998,0.7150</td></tr>
+<tr><td>20%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.8026</td><td>0.8025</td><td>0.5204</td><td>0.5200</td><td>4597241711,1071622289</td><td></td></tr>
+<tr><td>20%</td><td>Region FIFO・分類なし</td><td>0.5932</td><td>0.5895</td><td>0.6602</td><td>0.6571</td><td>0.1224,0.8776</td><td>0.5676,0.6700</td></tr>
+<tr><td>20%</td><td>Region FIFO・サイズ分類</td><td>0.5932</td><td>0.5925</td><td>0.6602</td><td>0.6595</td><td>0.1224,0.8776</td><td>0.5676,0.6700</td></tr>
+<tr><td>20%</td><td>Region LRU・分類なし</td><td>0.6106</td><td>0.6150</td><td>0.6775</td><td>0.6787</td><td>0.1246,0.8733</td><td>0.5851,0.6872</td></tr>
+<tr><td>20%</td><td>Region LRU・サイズ分類</td><td>0.7634</td><td>0.7622</td><td>0.6032</td><td>0.6106</td><td>0.5641,0.4359</td><td>0.8245,0.5798</td></tr>
+<tr><td>30%</td><td>物 LRU（共有）</td><td>0.6946</td><td>0.6946</td><td>0.7760</td><td>0.7759</td><td>0.1220,0.8780</td><td>0.6635,0.7879</td></tr>
+<tr><td>30%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.8748</td><td>0.8748</td><td>0.5873</td><td>0.5870</td><td>6774042124,1729253876</td><td></td></tr>
+<tr><td>30%</td><td>Region FIFO・分類なし</td><td>0.6602</td><td>0.6599</td><td>0.7324</td><td>0.7330</td><td>0.1300,0.8700</td><td>0.6326,0.7430</td></tr>
+<tr><td>30%</td><td>Region FIFO・サイズ分類</td><td>0.6602</td><td>0.6594</td><td>0.7324</td><td>0.7315</td><td>0.1300,0.8700</td><td>0.6326,0.7430</td></tr>
+<tr><td>30%</td><td>Region LRU・分類なし</td><td>0.6825</td><td>0.6817</td><td>0.7521</td><td>0.7521</td><td>0.1375,0.8624</td><td>0.6560,0.7622</td></tr>
+<tr><td>30%</td><td>Region LRU・サイズ分類</td><td>0.8407</td><td>0.8388</td><td>0.6595</td><td>0.6731</td><td>0.5797,0.4203</td><td>0.9099,0.6331</td></tr></table></div></details>
+<details><summary>W1b 要求 6:1：<code>36K:200000:0.857:0.9 1M:20000:0.143:0.9</code></summary><div class="tbl"><table><tr><th>容量</th><th>方式</th><th>OHR モデル</th><th>OHR 実測</th><th>BHR モデル</th><th>BHR 実測</th><th>容量の配分（モデル）</th><th>クラス別ヒット率（モデル）</th></tr>
+<tr><td>5%</td><td>物 LRU（共有）</td><td>0.4829</td><td>0.4827</td><td>0.4896</td><td>0.4891</td><td>0.1727,0.8273</td><td>0.4815,0.4913</td></tr>
+<tr><td>5%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.6303</td><td>0.6302</td><td>0.3254</td><td>0.3249</td><td>1279678077,137537923</td><td></td></tr>
+<tr><td>5%</td><td>Region FIFO・分類なし</td><td>0.4401</td><td>0.4336</td><td>0.4407</td><td>0.4340</td><td>0.1681,0.8319</td><td>0.4399,0.4409</td></tr>
+<tr><td>5%</td><td>Region FIFO・サイズ分類</td><td>0.4401</td><td>0.4394</td><td>0.4407</td><td>0.4399</td><td>0.1681,0.8319</td><td>0.4399,0.4409</td></tr>
+<tr><td>5%</td><td>Region LRU・分類なし</td><td>0.4772</td><td>0.4748</td><td>0.4606</td><td>0.4627</td><td>0.2140,0.7860</td><td>0.4807,0.4564</td></tr>
+<tr><td>5%</td><td>Region LRU・サイズ分類</td><td>0.5812</td><td>0.5808</td><td>0.4287</td><td>0.4295</td><td>0.5920,0.4080</td><td>0.6132,0.3898</td></tr>
+<tr><td>10%</td><td>物 LRU（共有）</td><td>0.5691</td><td>0.5689</td><td>0.5856</td><td>0.5852</td><td>0.1762,0.8238</td><td>0.5656,0.5898</td></tr>
+<tr><td>10%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.7351</td><td>0.7349</td><td>0.3996</td><td>0.3991</td><td>2568844828,265587172</td><td></td></tr>
+<tr><td>10%</td><td>Region FIFO・分類なし</td><td>0.5248</td><td>0.5245</td><td>0.5349</td><td>0.5352</td><td>0.1723,0.8277</td><td>0.5226,0.5375</td></tr>
+<tr><td>10%</td><td>Region FIFO・サイズ分類</td><td>0.5248</td><td>0.5241</td><td>0.5349</td><td>0.5341</td><td>0.1723,0.8277</td><td>0.5226,0.5375</td></tr>
+<tr><td>10%</td><td>Region LRU・分類なし</td><td>0.5568</td><td>0.5580</td><td>0.5589</td><td>0.5597</td><td>0.1997,0.8003</td><td>0.5564,0.5594</td></tr>
+<tr><td>10%</td><td>Region LRU・サイズ分類</td><td>0.6938</td><td>0.6932</td><td>0.4972</td><td>0.4989</td><td>0.6605,0.3395</td><td>0.7349,0.4471</td></tr>
+<tr><td>20%</td><td>物 LRU（共有）</td><td>0.6681</td><td>0.6679</td><td>0.6946</td><td>0.6942</td><td>0.1818,0.8182</td><td>0.6625,0.7013</td></tr>
+<tr><td>20%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.8544</td><td>0.8542</td><td>0.4848</td><td>0.4842</td><td>5141968870,526895130</td><td></td></tr>
+<tr><td>20%</td><td>Region FIFO・分類なし</td><td>0.6305</td><td>0.6272</td><td>0.6510</td><td>0.6478</td><td>0.1869,0.8131</td><td>0.6262,0.6562</td></tr>
+<tr><td>20%</td><td>Region FIFO・サイズ分類</td><td>0.6305</td><td>0.6297</td><td>0.6510</td><td>0.6499</td><td>0.1869,0.8131</td><td>0.6262,0.6562</td></tr>
+<tr><td>20%</td><td>Region LRU・分類なし</td><td>0.6515</td><td>0.6543</td><td>0.6680</td><td>0.6694</td><td>0.1939,0.7967</td><td>0.6480,0.6723</td></tr>
+<tr><td>20%</td><td>Region LRU・サイズ分類</td><td>0.8197</td><td>0.8204</td><td>0.5798</td><td>0.5887</td><td>0.7086,0.2914</td><td>0.8700,0.5187</td></tr>
+<tr><td>30%</td><td>物 LRU（共有）</td><td>0.7337</td><td>0.7336</td><td>0.7653</td><td>0.7651</td><td>0.1869,0.8131</td><td>0.7271,0.7734</td></tr>
+<tr><td>30%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.9266</td><td>0.9262</td><td>0.5758</td><td>0.5753</td><td>7372799998,1130496002</td><td></td></tr>
+<tr><td>30%</td><td>Region FIFO・分類なし</td><td>0.6969</td><td>0.6965</td><td>0.7221</td><td>0.7222</td><td>0.1909,0.8091</td><td>0.6917,0.7285</td></tr>
+<tr><td>30%</td><td>Region FIFO・サイズ分類</td><td>0.6969</td><td>0.6959</td><td>0.7221</td><td>0.7209</td><td>0.1909,0.8091</td><td>0.6917,0.7285</td></tr>
+<tr><td>30%</td><td>Region LRU・分類なし</td><td>0.7268</td><td>0.7206</td><td>0.7432</td><td>0.7420</td><td>0.2088,0.7923</td><td>0.7234,0.7474</td></tr>
+<tr><td>30%</td><td>Region LRU・サイズ分類</td><td>0.9017</td><td>0.8976</td><td>0.6374</td><td>0.6527</td><td>0.7179,0.2821</td><td>0.9571,0.5700</td></tr></table></div></details>
+<details><summary>W2 \(\lambda/s\) をそろえた対照：<code>36K:20000:0.034:0.9 1M:20000:0.966:0.9</code></summary><div class="tbl"><table><tr><th>容量</th><th>方式</th><th>OHR モデル</th><th>OHR 実測</th><th>BHR モデル</th><th>BHR 実測</th><th>容量の配分（モデル）</th><th>クラス別ヒット率（モデル）</th></tr>
+<tr><td>5%</td><td>物 LRU（共有）</td><td>0.4700</td><td>0.4699</td><td>0.4803</td><td>0.4802</td><td>0.0018,0.9982</td><td>0.1655,0.4807</td></tr>
+<tr><td>5%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.4764</td><td>0.4762</td><td>0.4764</td><td>0.4762</td><td>36913381,1048526619</td><td></td></tr>
+<tr><td>5%</td><td>Region FIFO・分類なし</td><td>0.4272</td><td>0.4251</td><td>0.4350</td><td>0.4347</td><td>0.0037,0.9963</td><td>0.1962,0.4353</td></tr>
+<tr><td>5%</td><td>Region FIFO・サイズ分類</td><td>0.4272</td><td>0.4267</td><td>0.4350</td><td>0.4346</td><td>0.0037,0.9963</td><td>0.1962,0.4353</td></tr>
+<tr><td>5%</td><td>Region LRU・分類なし</td><td>0.4625</td><td>0.4615</td><td>0.4725</td><td>0.4716</td><td>0.0020,0.9980</td><td>0.1662,0.4729</td></tr>
+<tr><td>5%</td><td>Region LRU・サイズ分類</td><td>0.4669</td><td>0.4653</td><td>0.4720</td><td>0.4704</td><td>0.0115,0.9885</td><td>0.3139,0.4722</td></tr>
+<tr><td>10%</td><td>物 LRU（共有）</td><td>0.5668</td><td>0.5667</td><td>0.5781</td><td>0.5780</td><td>0.0020,0.9980</td><td>0.2352,0.5785</td></tr>
+<tr><td>10%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.5736</td><td>0.5735</td><td>0.5736</td><td>0.5735</td><td>73828317,2097051683</td><td></td></tr>
+<tr><td>10%</td><td>Region FIFO・分類なし</td><td>0.5228</td><td>0.5208</td><td>0.5315</td><td>0.5315</td><td>0.0039,0.9961</td><td>0.2648,0.5318</td></tr>
+<tr><td>10%</td><td>Region FIFO・サイズ分類</td><td>0.5228</td><td>0.5220</td><td>0.5315</td><td>0.5309</td><td>0.0039,0.9961</td><td>0.2648,0.5318</td></tr>
+<tr><td>10%</td><td>Region LRU・分類なし</td><td>0.5542</td><td>0.5539</td><td>0.5651</td><td>0.5645</td><td>0.0022,0.9978</td><td>0.2326,0.5655</td></tr>
+<tr><td>10%</td><td>Region LRU・サイズ分類</td><td>0.5593</td><td>0.5580</td><td>0.5632</td><td>0.5633</td><td>0.0178,0.9822</td><td>0.4443,0.5633</td></tr>
+<tr><td>20%</td><td>物 LRU（共有）</td><td>0.6769</td><td>0.6768</td><td>0.6891</td><td>0.6891</td><td>0.0022,0.9978</td><td>0.3172,0.6895</td></tr>
+<tr><td>20%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.6840</td><td>0.6840</td><td>0.6840</td><td>0.6840</td><td>147659712,4194100288</td><td></td></tr>
+<tr><td>20%</td><td>Region FIFO・分類なし</td><td>0.6338</td><td>0.6323</td><td>0.6436</td><td>0.6440</td><td>0.0042,0.9958</td><td>0.3468,0.6439</td></tr>
+<tr><td>20%</td><td>Region FIFO・サイズ分類</td><td>0.6338</td><td>0.6331</td><td>0.6436</td><td>0.6430</td><td>0.0042,0.9958</td><td>0.3468,0.6439</td></tr>
+<tr><td>20%</td><td>Region LRU・分類なし</td><td>0.6585</td><td>0.6584</td><td>0.6703</td><td>0.6701</td><td>0.0026,0.9974</td><td>0.3105,0.6708</td></tr>
+<tr><td>20%</td><td>Region LRU・サイズ分類</td><td>0.6640</td><td>0.6632</td><td>0.6663</td><td>0.6680</td><td>0.0255,0.9731</td><td>0.5952,0.6664</td></tr>
+<tr><td>30%</td><td>物 LRU（共有）</td><td>0.7486</td><td>0.7486</td><td>0.7613</td><td>0.7614</td><td>0.0025,0.9975</td><td>0.3740,0.7618</td></tr>
+<tr><td>30%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.7558</td><td>0.7559</td><td>0.7558</td><td>0.7559</td><td>221490463,6291149537</td><td></td></tr>
+<tr><td>30%</td><td>Region FIFO・分類なし</td><td>0.7082</td><td>0.7068</td><td>0.7185</td><td>0.7190</td><td>0.0045,0.9955</td><td>0.4044,0.7189</td></tr>
+<tr><td>30%</td><td>Region FIFO・サイズ分類</td><td>0.7082</td><td>0.7073</td><td>0.7185</td><td>0.7178</td><td>0.0045,0.9955</td><td>0.4044,0.7189</td></tr>
+<tr><td>30%</td><td>Region LRU・分類なし</td><td>0.7297</td><td>0.7288</td><td>0.7420</td><td>0.7410</td><td>0.0029,0.9971</td><td>0.3676,0.7424</td></tr>
+<tr><td>30%</td><td>Region LRU・サイズ分類</td><td>0.7345</td><td>0.7336</td><td>0.7358</td><td>0.7382</td><td>0.0305,0.9695</td><td>0.6964,0.7358</td></tr></table></div></details>
+<details><summary>W3 小物 \(\alpha=1.1\)・大物 \(\alpha=0.6\)：<code>36K:200000:0.75:1.1 1M:20000:0.25:0.6</code></summary><div class="tbl"><table><tr><th>容量</th><th>方式</th><th>OHR モデル</th><th>OHR 実測</th><th>BHR モデル</th><th>BHR 実測</th><th>容量の配分（モデル）</th><th>クラス別ヒット率（モデル）</th></tr>
+<tr><td>5%</td><td>物 LRU（共有）</td><td>0.5592</td><td>0.5592</td><td>0.2325</td><td>0.2322</td><td>0.0438,0.9562</td><td>0.6840,0.1849</td></tr>
+<tr><td>5%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.6800</td><td>0.6799</td><td>0.1384</td><td>0.1383</td><td>1136682559,280533441</td><td></td></tr>
+<tr><td>5%</td><td>Region FIFO・分類なし</td><td>0.5234</td><td>0.5204</td><td>0.2068</td><td>0.2055</td><td>0.0425,0.9575</td><td>0.6443,0.1606</td></tr>
+<tr><td>5%</td><td>Region FIFO・サイズ分類</td><td>0.5234</td><td>0.5230</td><td>0.2068</td><td>0.2063</td><td>0.0425,0.9575</td><td>0.6443,0.1606</td></tr>
+<tr><td>5%</td><td>Region LRU・分類なし</td><td>0.5540</td><td>0.5509</td><td>0.2212</td><td>0.2186</td><td>0.0518,0.9482</td><td>0.6811,0.1727</td></tr>
+<tr><td>5%</td><td>Region LRU・サイズ分類</td><td>0.6392</td><td>0.6382</td><td>0.2073</td><td>0.2103</td><td>0.2861,0.7139</td><td>0.8042,0.1444</td></tr>
+<tr><td>10%</td><td>物 LRU（共有）</td><td>0.6219</td><td>0.6218</td><td>0.3339</td><td>0.3337</td><td>0.0412,0.9588</td><td>0.7319,0.2919</td></tr>
+<tr><td>10%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.7252</td><td>0.7252</td><td>0.2250</td><td>0.2248</td><td>1819438903,1014993097</td><td></td></tr>
+<tr><td>10%</td><td>Region FIFO・分類なし</td><td>0.5871</td><td>0.5869</td><td>0.2983</td><td>0.3013</td><td>0.0409,0.9591</td><td>0.6973,0.2562</td></tr>
+<tr><td>10%</td><td>Region FIFO・サイズ分類</td><td>0.5871</td><td>0.5867</td><td>0.2983</td><td>0.2976</td><td>0.0409,0.9591</td><td>0.6973,0.2562</td></tr>
+<tr><td>10%</td><td>Region LRU・分類なし</td><td>0.6124</td><td>0.6118</td><td>0.3175</td><td>0.3161</td><td>0.0451,0.9549</td><td>0.7251,0.2745</td></tr>
+<tr><td>10%</td><td>Region LRU・サイズ分類</td><td>0.6991</td><td>0.6977</td><td>0.2778</td><td>0.2870</td><td>0.3337,0.6663</td><td>0.8600,0.2164</td></tr>
+<tr><td>20%</td><td>物 LRU（共有）</td><td>0.6982</td><td>0.6981</td><td>0.4839</td><td>0.4836</td><td>0.0402,0.9598</td><td>0.7801,0.4526</td></tr>
+<tr><td>20%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.7828</td><td>0.7827</td><td>0.3666</td><td>0.3663</td><td>2746098575,2922765425</td><td></td></tr>
+<tr><td>20%</td><td>Region FIFO・分類なし</td><td>0.6707</td><td>0.6669</td><td>0.4481</td><td>0.4440</td><td>0.0438,0.9562</td><td>0.7557,0.4156</td></tr>
+<tr><td>20%</td><td>Region FIFO・サイズ分類</td><td>0.6707</td><td>0.6701</td><td>0.4481</td><td>0.4468</td><td>0.0438,0.9562</td><td>0.7557,0.4156</td></tr>
+<tr><td>20%</td><td>Region LRU・分類なし</td><td>0.6857</td><td>0.6866</td><td>0.4601</td><td>0.4605</td><td>0.0442,0.9562</td><td>0.7719,0.4272</td></tr>
+<tr><td>20%</td><td>Region LRU・サイズ分類</td><td>0.7658</td><td>0.7641</td><td>0.3958</td><td>0.4160</td><td>0.3405,0.6595</td><td>0.9070,0.3419</td></tr>
+<tr><td>30%</td><td>物 LRU（共有）</td><td>0.7523</td><td>0.7522</td><td>0.6021</td><td>0.6020</td><td>0.0411,0.9589</td><td>0.8096,0.5802</td></tr>
+<tr><td>30%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.8248</td><td>0.8248</td><td>0.4830</td><td>0.4827</td><td>3433372042,5069923958</td><td></td></tr>
+<tr><td>30%</td><td>Region FIFO・分類なし</td><td>0.7257</td><td>0.7248</td><td>0.5582</td><td>0.5596</td><td>0.0463,0.9537</td><td>0.7896,0.5338</td></tr>
+<tr><td>30%</td><td>Region FIFO・サイズ分類</td><td>0.7257</td><td>0.7249</td><td>0.5582</td><td>0.5567</td><td>0.0463,0.9537</td><td>0.7896,0.5338</td></tr>
+<tr><td>30%</td><td>Region LRU・分類なし</td><td>0.7408</td><td>0.7406</td><td>0.5753</td><td>0.5754</td><td>0.0472,0.9528</td><td>0.8040,0.5511</td></tr>
+<tr><td>30%</td><td>Region LRU・サイズ分類</td><td>0.8083</td><td>0.8070</td><td>0.4900</td><td>0.5155</td><td>0.3183,0.6817</td><td>0.9299,0.4436</td></tr></table></div></details>
+<details><summary>W3r 小物 \(\alpha=0.6\)・大物 \(\alpha=1.1\)：<code>36K:200000:0.75:0.6 1M:20000:0.25:1.1</code></summary><div class="tbl"><table><tr><th>容量</th><th>方式</th><th>OHR モデル</th><th>OHR 実測</th><th>BHR モデル</th><th>BHR 実測</th><th>容量の配分（モデル）</th><th>クラス別ヒット率（モデル）</th></tr>
+<tr><td>5%</td><td>物 LRU（共有）</td><td>0.2963</td><td>0.2962</td><td>0.6865</td><td>0.6862</td><td>0.2222,0.7778</td><td>0.1473,0.7434</td></tr>
+<tr><td>5%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.4029</td><td>0.4028</td><td>0.5516</td><td>0.5512</td><td>1214016715,203199285</td><td></td></tr>
+<tr><td>5%</td><td>Region FIFO・分類なし</td><td>0.2746</td><td>0.2706</td><td>0.6446</td><td>0.6408</td><td>0.2244,0.7756</td><td>0.1333,0.6985</td></tr>
+<tr><td>5%</td><td>Region FIFO・サイズ分類</td><td>0.2746</td><td>0.2742</td><td>0.6446</td><td>0.6441</td><td>0.2244,0.7756</td><td>0.1333,0.6985</td></tr>
+<tr><td>5%</td><td>Region LRU・分類なし</td><td>0.2915</td><td>0.2931</td><td>0.6639</td><td>0.6642</td><td>0.2660,0.7340</td><td>0.1493,0.7182</td></tr>
+<tr><td>5%</td><td>Region LRU・サイズ分類</td><td>0.3552</td><td>0.3517</td><td>0.6350</td><td>0.6362</td><td>0.5636,0.4364</td><td>0.2483,0.6758</td></tr>
+<tr><td>10%</td><td>物 LRU（共有）</td><td>0.3861</td><td>0.3859</td><td>0.7510</td><td>0.7508</td><td>0.2490,0.7510</td><td>0.2467,0.8042</td></tr>
+<tr><td>10%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.5606</td><td>0.5603</td><td>0.5991</td><td>0.5988</td><td>2561304353,273127647</td><td></td></tr>
+<tr><td>10%</td><td>Region FIFO・分類なし</td><td>0.3590</td><td>0.3589</td><td>0.7130</td><td>0.7131</td><td>0.2490,0.7510</td><td>0.2238,0.7646</td></tr>
+<tr><td>10%</td><td>Region FIFO・サイズ分類</td><td>0.3590</td><td>0.3582</td><td>0.7130</td><td>0.7124</td><td>0.2490,0.7510</td><td>0.2238,0.7646</td></tr>
+<tr><td>10%</td><td>Region LRU・分類なし</td><td>0.3788</td><td>0.3818</td><td>0.7279</td><td>0.7285</td><td>0.2841,0.7175</td><td>0.2455,0.7788</td></tr>
+<tr><td>10%</td><td>Region LRU・サイズ分類</td><td>0.5060</td><td>0.5027</td><td>0.6779</td><td>0.6807</td><td>0.6979,0.3021</td><td>0.4403,0.7030</td></tr>
+<tr><td>20%</td><td>物 LRU（共有）</td><td>0.5193</td><td>0.5191</td><td>0.8190</td><td>0.8188</td><td>0.2762,0.7238</td><td>0.4048,0.8627</td></tr>
+<tr><td>20%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.7864</td><td>0.7862</td><td>0.6577</td><td>0.6575</td><td>5288610902,380253098</td><td></td></tr>
+<tr><td>20%</td><td>Region FIFO・分類なし</td><td>0.4911</td><td>0.4873</td><td>0.7892</td><td>0.7874</td><td>0.2818,0.7182</td><td>0.3772,0.8326</td></tr>
+<tr><td>20%</td><td>Region FIFO・サイズ分類</td><td>0.4911</td><td>0.4899</td><td>0.7892</td><td>0.7885</td><td>0.2818,0.7182</td><td>0.3772,0.8326</td></tr>
+<tr><td>20%</td><td>Region LRU・分類なし</td><td>0.5175</td><td>0.5099</td><td>0.7989</td><td>0.7979</td><td>0.3164,0.6836</td><td>0.4100,0.8399</td></tr>
+<tr><td>20%</td><td>Region LRU・サイズ分類</td><td>0.7328</td><td>0.7341</td><td>0.7387</td><td>0.7410</td><td>0.7781,0.2219</td><td>0.7305,0.7396</td></tr>
+<tr><td>30%</td><td>物 LRU（共有）</td><td>0.6245</td><td>0.6241</td><td>0.8617</td><td>0.8614</td><td>0.2903,0.7097</td><td>0.5339,0.8963</td></tr>
+<tr><td>30%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.9364</td><td>0.9363</td><td>0.7700</td><td>0.7697</td><td>7372800000,1130496000</td><td></td></tr>
+<tr><td>30%</td><td>Region FIFO・分類なし</td><td>0.5881</td><td>0.5878</td><td>0.8340</td><td>0.8340</td><td>0.2871,0.7129</td><td>0.4942,0.8698</td></tr>
+<tr><td>30%</td><td>Region FIFO・サイズ分類</td><td>0.5881</td><td>0.5867</td><td>0.8340</td><td>0.8333</td><td>0.2871,0.7129</td><td>0.4942,0.8698</td></tr>
+<tr><td>30%</td><td>Region LRU・分類なし</td><td>0.6133</td><td>0.6083</td><td>0.8437</td><td>0.8420</td><td>0.3113,0.6888</td><td>0.5253,0.8773</td></tr>
+<tr><td>30%</td><td>Region LRU・サイズ分類</td><td>0.9088</td><td>0.9045</td><td>0.7867</td><td>0.7886</td><td>0.8022,0.1978</td><td>0.9554,0.7689</td></tr></table></div></details>
+<details><summary>W5 8K/128K/1M：<code>8K:400000:0.5:0.9 128K:50000:0.3:0.9 1M:10000:0.2:0.9</code></summary><div class="tbl"><table><tr><th>容量</th><th>方式</th><th>OHR モデル</th><th>OHR 実測</th><th>BHR モデル</th><th>BHR 実測</th><th>容量の配分（モデル）</th><th>クラス別ヒット率（モデル）</th></tr>
+<tr><td>5%</td><td>物 LRU（共有）</td><td>0.3978</td><td>0.3975</td><td>0.5017</td><td>0.5012</td><td>0.0197,0.1709,0.8094</td><td>0.3335,0.4240,0.5196</td></tr>
+<tr><td>5%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.5576</td><td>0.5573</td><td>0.3503</td><td>0.3497</td><td>555581034,283583693,176643272</td><td></td></tr>
+<tr><td>5%</td><td>Region FIFO・分類なし</td><td>0.3462</td><td>0.3510</td><td>0.4299</td><td>0.4410</td><td>0.0184,0.1451,0.8365</td><td>0.2954,0.3651,0.4447</td></tr>
+<tr><td>5%</td><td>Region FIFO・サイズ分類</td><td>0.3462</td><td>0.3454</td><td>0.4299</td><td>0.4287</td><td>0.0184,0.1451,0.8365</td><td>0.2954,0.3651,0.4447</td></tr>
+<tr><td>5%</td><td>Region LRU・分類なし</td><td>0.3879</td><td>0.3882</td><td>0.4716</td><td>0.4723</td><td>0.0247,0.2022,0.7729</td><td>0.3320,0.4166,0.4847</td></tr>
+<tr><td>5%</td><td>Region LRU・サイズ分類</td><td>0.4905</td><td>0.4867</td><td>0.4337</td><td>0.4370</td><td>0.2082,0.2391,0.5527</td><td>0.5422,0.4451,0.4294</td></tr>
+<tr><td>5%</td><td>Region LRU・\(k=2\)（8K+128K / 1M）</td><td>0.4367</td><td>0.4355</td><td>0.4407</td><td>0.4394</td><td>0.0512,0.3942,0.5546</td><td>0.3998,0.5029,0.4298</td></tr>
+<tr><td>10%</td><td>物 LRU（共有）</td><td>0.4804</td><td>0.4801</td><td>0.6059</td><td>0.6055</td><td>0.0214,0.1784,0.8002</td><td>0.4023,0.5128,0.6274</td></tr>
+<tr><td>10%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.6552</td><td>0.6551</td><td>0.4336</td><td>0.4331</td><td>1123093067,562215417,346307516</td><td></td></tr>
+<tr><td>10%</td><td>Region FIFO・分類なし</td><td>0.4406</td><td>0.4378</td><td>0.5496</td><td>0.5504</td><td>0.0230,0.1749,0.8021</td><td>0.3736,0.4671,0.5685</td></tr>
+<tr><td>10%</td><td>Region FIFO・サイズ分類</td><td>0.4406</td><td>0.4396</td><td>0.5496</td><td>0.5484</td><td>0.0230,0.1749,0.8021</td><td>0.3736,0.4671,0.5685</td></tr>
+<tr><td>10%</td><td>Region LRU・分類なし</td><td>0.4684</td><td>0.4690</td><td>0.5761</td><td>0.5752</td><td>0.0257,0.2046,0.7697</td><td>0.3973,0.5038,0.5931</td></tr>
+<tr><td>10%</td><td>Region LRU・サイズ分類</td><td>0.6043</td><td>0.6007</td><td>0.5171</td><td>0.5282</td><td>0.2936,0.2698,0.4367</td><td>0.6781,0.5453,0.5087</td></tr>
+<tr><td>10%</td><td>Region LRU・\(k=2\)（8K+128K / 1M）</td><td>0.5409</td><td>0.5401</td><td>0.5319</td><td>0.5330</td><td>0.0684,0.4786,0.4531</td><td>0.4996,0.6272,0.5146</td></tr>
+<tr><td>20%</td><td>物 LRU（共有）</td><td>0.5772</td><td>0.5770</td><td>0.7239</td><td>0.7237</td><td>0.0244,0.1910,0.7846</td><td>0.4845,0.6173,0.7486</td></tr>
+<tr><td>20%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.7662</td><td>0.7659</td><td>0.5292</td><td>0.5284</td><td>2236880194,1136438424,689913382</td><td></td></tr>
+<tr><td>20%</td><td>Region FIFO・分類なし</td><td>0.5468</td><td>0.5403</td><td>0.6786</td><td>0.6745</td><td>0.0286,0.2014,0.7700</td><td>0.4640,0.5823,0.7008</td></tr>
+<tr><td>20%</td><td>Region FIFO・サイズ分類</td><td>0.5468</td><td>0.5457</td><td>0.6786</td><td>0.6772</td><td>0.0286,0.2014,0.7700</td><td>0.4640,0.5823,0.7008</td></tr>
+<tr><td>20%</td><td>Region LRU・分類なし</td><td>0.5647</td><td>0.5666</td><td>0.6937</td><td>0.6971</td><td>0.0285,0.2223,0.7493</td><td>0.4774,0.6109,0.7135</td></tr>
+<tr><td>20%</td><td>Region LRU・サイズ分類</td><td>0.7274</td><td>0.7194</td><td>0.6063</td><td>0.6283</td><td>0.3577,0.2784,0.3639</td><td>0.8258,0.6527,0.5933</td></tr>
+<tr><td>20%</td><td>Region LRU・\(k=2\)（8K+128K / 1M）</td><td>0.6543</td><td>0.6530</td><td>0.6312</td><td>0.6323</td><td>0.0834,0.5193,0.3973</td><td>0.6094,0.7604,0.6074</td></tr>
+<tr><td>30%</td><td>物 LRU（共有）</td><td>0.6432</td><td>0.6430</td><td>0.7998</td><td>0.7996</td><td>0.0274,0.2033,0.7693</td><td>0.5427,0.6892,0.8256</td></tr>
+<tr><td>30%</td><td>物 LRU（静的分割・OHR 最適）</td><td>0.8361</td><td>0.8333</td><td>0.6016</td><td>0.6009</td><td>3144479404,1842542013,1107826584</td><td></td></tr>
+<tr><td>30%</td><td>Region FIFO・分類なし</td><td>0.6139</td><td>0.6122</td><td>0.7543</td><td>0.7556</td><td>0.0324,0.2141,0.7535</td><td>0.5235,0.6554,0.7774</td></tr>
+<tr><td>30%</td><td>Region FIFO・サイズ分類</td><td>0.6139</td><td>0.6127</td><td>0.7543</td><td>0.7530</td><td>0.0324,0.2141,0.7535</td><td>0.5235,0.6554,0.7774</td></tr>
+<tr><td>30%</td><td>Region LRU・分類なし</td><td>0.6330</td><td>0.6322</td><td>0.7728</td><td>0.7727</td><td>0.0330,0.2272,0.7391</td><td>0.5400,0.6804,0.7947</td></tr>
+<tr><td>30%</td><td>Region LRU・サイズ分類</td><td>0.8043</td><td>0.7920</td><td>0.6628</td><td>0.6888</td><td>0.3796,0.2721,0.3482</td><td>0.9193,0.7171,0.6476</td></tr>
+<tr><td>30%</td><td>Region LRU・\(k=2\)（8K+128K / 1M）</td><td>0.7278</td><td>0.7280</td><td>0.6911</td><td>0.6910</td><td>0.0953,0.5243,0.3805</td><td>0.6853,0.8419,0.6629</td></tr></table></div></details>
+
+
+<h3>4.1 読み取り</h3>
+<ul>
+<li><b>式が合う範囲：</b>物単位 LRU と静的分割は 48 点すべてで誤差 0.3pt 以下。Region FIFO の分類なしは、混在 Region の詰め残しの影響で最大 0.9pt。Region LRU は立ち上がりの隔離（§5.4）を入れたモデルで、OHR 平均 0.2pt、BHR 平均 0.1pt（分類なし）・0.8pt（サイズ分類）。</li>
+<li><b>静的分割の利得は Region LRU の分類で大半を取り戻せる：</b>W1 の \(\Delta\)OHR は、静的分割 +14〜18pt に対して Region LRU の分類が実測 +10〜16pt。しかも BHR の悪化は半分ほどで済む（−2〜−8pt 対 −14〜−19pt）。Region LRU は、分割の最適点まで振り切らない。</li>
+<li><b>W2 の対照：</b>利得は静的分割 +0.7pt、Region LRU +0.5pt に縮む。0 にならないのは、共有 LRU の価値の順位が \(\lambda\) だけで決まり、\(\lambda/s\) が同じでも大物（\(\lambda\) が 28 倍）を優遇するため。</li>
+<li><b>Zipf の傾き（W3・W3r）：</b>小物の傾きを急にすると（W3）、小物の少数の熱い物で大半の要求をまかなえるので、分割の利得は小さい（10% で +10pt）。小物を平らにすると（W3r）、分割の利得は最大になる（20% で +27pt）。小物の価値が多くの物に薄く広がっている負荷ほど、サイズ分類が効く。</li>
+<li><b>3 サイズ（W5）：</b>\(k=2\) の境目は 8K と 128K の間が良い（モデルでは、{8K}/{128K,1M} の Region LRU が 0.600、{8K,128K}/{1M} は 0.542。容量 10%）。\(k=3\) の上乗せは、最良の \(k=2\) に対してモデルで +1.8pt。近いサイズを分けても上乗せは小さく、最初の境目は「\(\lambda/s\) の差が一番大きい所」に置くのが良い。</li>
+</ul>
+
+<h2>5. Region LRU のモデルがずれる原因（仮説 → 計測 → 判定）</h2>
+<div class="tbl"><table><tr><th>仮説</th><th>入れた計測</th><th>結果</th><th>判定</th></tr>
+<tr><td>H-a 定常に達していない（温めが足りない）</td><td>8,000 万要求・4,000 万で温める</td><td>小物のヒット率 0.902 → 0.900（変わらず）</td><td>温めの長さの問題ではない。ただし「定常ではない」こと自体は正しく、H-f の形で効いている</td></tr>
+<tr><td>書き込み中の Region が見えない</td><td>コードを確認（<code>rf_place</code>・<code>rf_touch</code>）</td><td>書き込み中の物もヒットし、書き込みも touch</td><td>棄却</td></tr>
+<tr><td>同居の組成の揺らぎ（Jensen）</td><td>モデルの平均場版（<code>MF=1</code>）</td><td>0.9421 → 0.9491（変わらず）</td><td>棄却</td></tr>
+<tr><td>不動点が双安定</td><td>\(T\) の小さい側からたどる連続法</td><td>同じ解に落ちる</td><td>棄却（コードからは削除）</td></tr>
+<tr><td>H-b Region 数が有限で \(T\) が揺らぐ</td><td>追い出しごとの年齢のログ（<code>RF_EVLOG</code>）、\(N\) の掃引、揺らぎの補正項（§5.1）、寿命の式の直接検定（§5.2）</td><td>揺らぎの大きさは式どおり（CV の予測と実測が一致）。しかし Region ごとに \(\Lambda\) を数えて寿命を測ると、揺らぎで寿命が縮む効果は見えない</td><td><b>撤回</b>（11-05 の初版で「主因」としたのは誤り）</td></tr>
+<tr><td>H-d 封じるまでの待ち</td><td>モデルに「滞在 = 封じるまでの待ち U ＋ 封じてからの寿命」を追加（既定で有効）</td><td>U は数百〜数千要求で寿命（10⁵ 級）より十分短く、変化は 0.1pt 未満</td><td>正しいが小さい</td></tr>
+<tr><td>H-e 温かい物の同乗（一緒に追い出された物が次の Region でも同居）</td><td>小物を id のハッシュで 8 本の書き込み流に分けて同乗を壊す（<code>hint=key:key=hash/k=8</code>）</td><td>実測 0.7628 → 0.761（ほぼ不変）。モデルは 0.747 → 0.722 で、むしろ離れる。終了時の全 Region の組成でも、温かい物の個数の分散/平均は 0.97（iid で 1.00）で集まりはない</td><td>棄却</td></tr>
+<tr><td><b>H-f 立ち上がりの隔離</b></td><td>終了時に残った全 Region を出す計測（<code>RF_ENDDUMP</code>）。封じた時刻と中の物の順位を見る</td><td>残った小物の Region 204 個のうち 69 個は最初の 100 万要求で封じたもの（\(\Lambda T\) = 9〜4917）。順位 1〜99 の全部と、100〜999 の 889/900 個がその中にいる。モデルに入れると全構成で実測に一致（§5.4）</td><td><b>根本原因</b></td></tr>
+</table></div>
+<p>\(N\) の掃引（実測 − モデル）。定常モデルのずれは Region 数とともに縮むが、その機構は \(T\) の揺らぎではなく、隔離の効果の大きさ（初期 Region に詰まる物の数）が Region の大きさに比例するため。</p>
+<div class="tbl"><table><tr><th>Region 数 \(N\)</th><th>追い出し年齢の CV</th><th>単一サイズ OHR：定常 → 隔離あり</th><th>W3（20%）BHR：定常 → 隔離あり</th></tr>
+<tr><td>64</td><td>0.28</td><td>+1.2 → −0.7 pt</td><td>+20.8 → +3.8 pt</td></tr>
+<tr><td>256</td><td>0.13</td><td>+1.6 → −0.1 pt</td><td>+14.4 → +2.0 pt</td></tr>
+<tr><td>1024</td><td>0.045</td><td>+1.1 → −0.0 pt</td><td>+3.7 → +0.7 pt</td></tr>
+<tr><td>4096</td><td>0.015</td><td>+0.5 → +0.0 pt</td><td>+0.8 → +0.0 pt</td></tr></table></div>
+
+<h3>5.1 補正の試み：追い出し年齢 \(T\) の揺らぎ</h3>
+<p><b>揺らぎの大きさの式（実測と合う）</b>：Region LRU は「最後の touch が古い順」に追い出すので、追い出し年齢 \(T\) は待ち行列の待ち時間に当たる。到着（Region への最後の touch）はポアソン的で、退去（追い出し）は書いたバイト数で決まるのでほぼ規則的。\(T\) が伸びると、最後になるはずだった touch の前に再び touch される Region が増え、到着が減る。これが \(T\) を引き戻す力になり、Ornstein–Uhlenbeck 過程になる。不死の Region や touch のない Region も含めて整理すると、復元力は \(-a'(T)=\sum_i m_i\lambda_i\)（挿入される物の \(\lambda\) の流量）になり、</p>
+<div class="math">
+\[ \mathrm{sd}(T)=\frac{1}{\sqrt{2\sum_i m_i\lambda_i}}\qquad(\text{Region の大きさに依らない絶対量}) \]
+\[ \mathrm{CV}=\frac{\mathrm{sd}(T)}{T}\qquad(\text{Region を小さく・数を多くすると }T\text{ が伸びて CV が下がる}) \]
+<p>導出は <a href="region_model_appendix.html">付録</a> §I。</p></div>
+<p><b>寿命への効果（式を入れたが、既定にはしない）</b>：無アクセス区間が、その時点の閾値 \(\Theta=T(1+\mathrm{CV}\cdot z)\) を超えたら死ぬとすると、1 区間で死ぬ確率は \(p=\mathbb{E}[e^{-\Lambda\Theta}]\)、寿命は \(L=(1/p-1)/\Lambda\)。Θ が一定なら \((e^{\Lambda T}-1)/\Lambda\) に戻る（<code>synth_model -c &lt;CV&gt;</code> または <code>-c auto</code>）。</p>
+<div class="tbl"><table><tr><th>負荷</th><th>容量</th><th>\(N\)</th><th>分類</th><th>CV 実測</th><th>CV 式</th><th>\(T\) 実測</th><th>\(T\) モデル（補正なし / 式の CV）</th><th>BHR 実測</th><th>BHR のずれ（補正なし → 式の CV）</th><th>OHR のずれ（同）</th></tr>
+<tr><td>W1</td><td>10%</td><td>256</td><td>なし</td><td>0.066</td><td>0.064</td><td>3543</td><td>3086 / 3757</td><td>0.566</td><td><span style="color:var(--g)">-0.7</span> → <span style="color:var(--g)">-0.5</span></td><td><span style="color:var(--g)">-0.4</span> → <span style="color:var(--g)">-0.5</span></td></tr>
+<tr><td>W1</td><td>10%</td><td>256</td><td>あり</td><td>0.066</td><td>0.082</td><td>3871</td><td>2820 / 3337</td><td>0.518</td><td><span style="color:var(--r)">-3.3</span> → <span style="color:var(--r)">-3.2</span></td><td><span style="color:var(--g)">+0.5</span> → <span style="color:var(--g)">+0.6</span></td></tr>
+<tr><td>W1</td><td>30%</td><td>256</td><td>なし</td><td>0.109</td><td>0.105</td><td>4499</td><td>3323 / 4000</td><td>0.752</td><td><span style="color:var(--b)">-1.3</span> → <span style="color:var(--b)">-1.2</span></td><td><span style="color:var(--g)">-0.7</span> → <span style="color:var(--g)">-0.7</span></td></tr>
+<tr><td>W1</td><td>30%</td><td>256</td><td>あり</td><td>0.102</td><td>0.112</td><td>5430</td><td>3205 / 3839</td><td>0.673</td><td><span style="color:var(--r)">-5.8</span> → <span style="color:var(--r)">-6.2</span></td><td><span style="color:var(--b)">+1.3</span> → <span style="color:var(--b)">+1.5</span></td></tr>
+<tr><td>W3</td><td>10%</td><td>256</td><td>なし</td><td>0.055</td><td>0.058</td><td>3627</td><td>3169 / 4040</td><td>0.316</td><td><span style="color:var(--g)">-0.2</span> → <span style="color:var(--g)">-0.0</span></td><td><span style="color:var(--g)">-0.4</span> → <span style="color:var(--g)">-0.2</span></td></tr>
+<tr><td>W3</td><td>10%</td><td>256</td><td>あり</td><td>0.049</td><td>0.074</td><td>4791</td><td>4039 / 4123</td><td>0.287</td><td><span style="color:var(--b)">-2.4</span> → <span style="color:var(--b)">-2.8</span></td><td><span style="color:var(--g)">+0.4</span> → <span style="color:var(--g)">+0.5</span></td></tr>
+<tr><td>W3</td><td>20%</td><td>256</td><td>なし</td><td>0.071</td><td>0.069</td><td>4446</td><td>3636 / 4510</td><td>0.460</td><td><span style="color:var(--g)">-0.6</span> → <span style="color:var(--g)">-0.5</span></td><td><span style="color:var(--g)">-0.5</span> → <span style="color:var(--g)">-0.5</span></td></tr>
+<tr><td>W3</td><td>20%</td><td>256</td><td>あり</td><td>0.064</td><td>0.076</td><td>5875</td><td>2901 / 4816</td><td>0.416</td><td><span style="color:var(--r)">-14.4</span> → <span style="color:var(--r)">-6.4</span></td><td><span style="color:var(--g)">+0.1</span> → <span style="color:var(--g)">+0.4</span></td></tr>
+<tr><td>W5</td><td>10%</td><td>256</td><td>あり</td><td>0.063</td><td>0.077</td><td>3686</td><td>2357 / 3235</td><td>0.528</td><td><span style="color:var(--r)">-5.4</span> → <span style="color:var(--r)">-3.3</span></td><td><span style="color:var(--b)">+1.7</span> → <span style="color:var(--b)">+1.1</span></td></tr>
+<tr><td>単一サイズ</td><td>30%</td><td>256</td><td>なし</td><td>0.132</td><td>0.135</td><td>5338</td><td>3333 / 4046</td><td>0.763</td><td><span style="color:var(--b)">-1.6</span> → <span style="color:var(--b)">-1.6</span></td><td><span style="color:var(--b)">-1.6</span> → <span style="color:var(--b)">-1.6</span></td></tr>
+<tr><td>W3</td><td>20%</td><td>64</td><td>あり</td><td>0.184</td><td>0.197</td><td>2005</td><td>702 / 1634</td><td>0.400</td><td><span style="color:var(--r)">-20.8</span> → <span style="color:var(--r)">-9.6</span></td><td><span style="color:var(--g)">+0.3</span> → <span style="color:var(--g)">+0.2</span></td></tr>
+<tr><td>W3</td><td>20%</td><td>1024</td><td>あり</td><td>0.025</td><td>0.033</td><td>13233</td><td>10971 / 12350</td><td>0.429</td><td><span style="color:var(--r)">-3.7</span> → <span style="color:var(--b)">-2.4</span></td><td><span style="color:var(--g)">+0.7</span> → <span style="color:var(--g)">+0.4</span></td></tr>
+<tr><td>W3</td><td>20%</td><td>4096</td><td>あり</td><td>0.015</td><td>0.022</td><td>18732</td><td>17734 / 18571</td><td>0.407</td><td><span style="color:var(--g)">-0.8</span> → <span style="color:var(--g)">-0.2</span></td><td><span style="color:var(--g)">+0.6</span> → <span style="color:var(--g)">-0.2</span></td></tr>
+<tr><td>W1</td><td>30%</td><td>64</td><td>あり</td><td>0.300</td><td>0.249</td><td>1516</td><td>870 / 1722</td><td>0.667</td><td><span style="color:var(--r)">-7.3</span> → <span style="color:var(--b)">-1.9</span></td><td><span style="color:var(--b)">+2.2</span> → <span style="color:var(--g)">-0.2</span></td></tr>
+<tr><td>W1</td><td>30%</td><td>1024</td><td>あり</td><td>0.036</td><td>0.043</td><td>14879</td><td>10649 / 12403</td><td>0.682</td><td><span style="color:var(--r)">-3.8</span> → <span style="color:var(--r)">-3.8</span></td><td><span style="color:var(--b)">+1.5</span> → <span style="color:var(--b)">+1.7</span></td></tr>
+<tr><td>W1</td><td>30%</td><td>4096</td><td>あり</td><td>0.018</td><td>0.022</td><td>24476</td><td>21870 / 23483</td><td>0.647</td><td><span style="color:var(--g)">-1.0</span> → <span style="color:var(--g)">-0.4</span></td><td><span style="color:var(--b)">+1.4</span> → <span style="color:var(--g)">+0.1</span></td></tr>
+<tr><td>単一サイズ</td><td>30%</td><td>64</td><td>なし</td><td>0.284</td><td>0.235</td><td>1087</td><td>885 / 705</td><td>0.757</td><td><span style="color:var(--b)">-1.2</span> → <span style="color:var(--b)">-1.5</span></td><td><span style="color:var(--b)">-1.2</span> → <span style="color:var(--b)">-1.5</span></td></tr>
+<tr><td>単一サイズ</td><td>30%</td><td>1024</td><td>なし</td><td>0.045</td><td>0.043</td><td>16214</td><td>12077 / 14599</td><td>0.762</td><td><span style="color:var(--b)">-1.1</span> → <span style="color:var(--b)">-1.0</span></td><td><span style="color:var(--b)">-1.1</span> → <span style="color:var(--b)">-1.0</span></td></tr>
+<tr><td>単一サイズ</td><td>30%</td><td>4096</td><td>なし</td><td>0.015</td><td>0.015</td><td>43521</td><td>38999 / 47393</td><td>0.760</td><td><span style="color:var(--g)">-0.5</span> → <span style="color:var(--g)">-0.3</span></td><td><span style="color:var(--g)">-0.5</span> → <span style="color:var(--g)">-0.3</span></td></tr>
+</table></div><p>CV の式は、分類なしでは実測と 5% 以内で合い、分類ありでは 15〜50% 高めに出る。補正を入れると \(T\) は実測に近づき、W3・W5 と \(N\) の大きい場合の BHR のずれは縮む（W3 20%・256 で −14.4 → −6.4pt）。一方で W1・単一サイズはほとんど変わらず、\(N=64\) ではかえって悪くなることがある。§5.2 の直接計測と合わせて、この補正は既定にしない。</p>
+
+<h3>5.2 直接計測：寿命の式そのものは正しい</h3>
+<p>追い出しのログに中の物の ID を出し（<code>RF_EVLOG_IDS=1</code>）、Region ごとに \(\Lambda=\sum\lambda(\mathrm{id})\) を計算して、\(\Lambda T\) の区間ごとに寿命を式と比べた（<code>tools/synth/life_law.py</code>）。ヒット数 ÷ (\(\Lambda\) × 寿命) は 1.00〜1.02 で、\(\Lambda\) の数え方は正しい。</p>
+<div class="tbl"><table><tr><th>負荷・\(N\)</th><th>分類</th><th>\(\Lambda T\)</th><th>Region 数</th><th>実測 寿命×\(\Lambda\)</th><th>\(e^{\Lambda T}-1\)（\(T\) 一定）</th><th>\(1/p-1\)（揺らぎあり）</th><th>\(T_{\rm eff}/T\)</th></tr>
+<tr><td>W3 20%・256</td><td>小物</td><td>5.5</td><td>373</td><td>248</td><td>242</td><td>228</td><td>1.006</td></tr>
+<tr><td>W3 20%・256</td><td>大物</td><td>2.0</td><td>18,927</td><td>6.5</td><td>6.4</td><td>6.3</td><td>1.012</td></tr>
+<tr><td>W3 20%・256</td><td>大物</td><td>3.5</td><td>1,902</td><td>32.0</td><td>31.0</td><td>30.3</td><td>1.012</td></tr>
+<tr><td>W3 20%・1024</td><td>小物</td><td>4.0</td><td>1,420</td><td>54.2</td><td>54.6</td><td>54.3</td><td>1.001</td></tr>
+<tr><td>W3 20%・1024</td><td>大物</td><td>1.0</td><td>92,350</td><td>1.7</td><td>1.6</td><td>1.6</td><td>1.012</td></tr>
+<tr><td>単一サイズ 30%・256</td><td>—</td><td>4.5</td><td>2,755</td><td>119</td><td>91</td><td>76</td><td>1.064</td></tr>
+<tr><td>単一サイズ 30%・256</td><td>—</td><td>5.5</td><td>870</td><td>282</td><td>233</td><td>179</td><td>1.027</td></tr></table></div>
+<p>実測の平均追い出し年齢を \(T\) に入れると、2 クラスの W3 では寿命の式が 1〜2% で成り立つ。単一サイズでは実測の方が<b>長生き</b>する。どちらの場合も、揺らぎを入れた \(1/p-1\) は実測から離れる。したがって、§5.1 の補正が W3 で数字を良くしたのは、別の誤差を偶然打ち消したためで、機構としては正しくない。</p>
+
+<h3>5.3 どの物でモデルが外れるか</h3>
+<p>RegionFlash にミスのログ（<code>RF_MISSLOG</code>）を入れ、トレースの要求数と合わせて、順位帯ごとのヒット率を測った（<code>tools/synth/presence.py</code>）。W3・20%・\(N=1024\) で、モデルの \(T\) は実測値に固定。</p>
+<div class="tbl"><table><tr><th>クラス</th><th>順位帯</th><th>実測ヒット率</th><th>モデル</th></tr>
+<tr><td>小物</td><td>1〜999</td><td>1.000 / 1.000 / 0.9998</td><td>1.000 / 1.000 / 0.9978</td></tr>
+<tr><td>小物</td><td>1,000〜9,999</td><td>0.874</td><td>0.928</td></tr>
+<tr><td>小物</td><td>10,000〜49,999</td><td>0.359</td><td>0.612</td></tr>
+<tr><td>小物</td><td>50,000〜99,999</td><td>0.120</td><td>0.309</td></tr>
+<tr><td>小物</td><td>150,000〜200,000</td><td>0.047</td><td>0.141</td></tr>
+<tr><td>大物</td><td>10〜99 / 100〜999 / 1,000〜9,999 / 10,000〜</td><td>0.961 / 0.656 / 0.269 / 0.130</td><td>0.961 / 0.658 / 0.269 / 0.129</td></tr></table></div>
+<p>モデルは温かい物（順位 100〜999）のミスを実測の約 10 倍に見積もり（0.22% 対 0.02%）、冷たい物のヒット率を 2〜3 倍高く見積もっていた。大物クラスは順位帯ごとに一致する。</p>
+
+<h3>5.4 根本原因：立ち上がりの隔離</h3>
+<svg viewBox="0 0 900 250" role="img" aria-label="立ち上がりの隔離">
+ <g font-size="12">
+ <text x="10" y="20" font-weight="700">① 空から埋める間（全部がミス）</text>
+ <text x="10" y="38" fill="var(--mut)">初回の要求の順＝人気の順に近い順で詰まる</text>
+ <g stroke="var(--line)">
+ <rect x="10" y="50" width="90" height="34" rx="5" fill="var(--r)" fill-opacity=".55"/><rect x="105" y="50" width="90" height="34" rx="5" fill="var(--r)" fill-opacity=".35"/>
+ <rect x="200" y="50" width="90" height="34" rx="5" fill="var(--b)" fill-opacity=".3"/><rect x="295" y="50" width="90" height="34" rx="5" fill="var(--a)" fill-opacity=".2"/></g>
+ <text x="16" y="72">熱い物ばかり</text><text x="111" y="72">温かい物</text><text x="206" y="72">ぬるい物</text><text x="301" y="72">冷たい物</text>
+ <text x="10" y="104">ΛT ≫ 1 → 寿命 e<tspan baseline-shift="super" font-size="0.7em">ΛT</tspan> が観測期間を超える</text>
+ <text x="460" y="20" font-weight="700">② その後（実測）</text>
+ <g stroke="var(--line)">
+ <rect x="460" y="50" width="90" height="34" rx="5" fill="var(--r)" fill-opacity=".55"/><rect x="555" y="50" width="90" height="34" rx="5" fill="var(--r)" fill-opacity=".35"/>
+ <rect x="650" y="50" width="70" height="34" rx="5" fill="var(--a)" fill-opacity=".2"/><rect x="725" y="50" width="70" height="34" rx="5" fill="var(--a)" fill-opacity=".2"/><rect x="800" y="50" width="70" height="34" rx="5" fill="var(--a)" fill-opacity=".2"/></g>
+ <text x="466" y="72">不死（隔離）</text><text x="561" y="72">不死（隔離）</text><text x="655" y="72">冷</text><text x="730" y="72">冷</text><text x="805" y="72">冷</text>
+ <text x="460" y="104">熱い・温かい物は二度とミスしない → 挿入の流れは冷たい物だけ</text>
+ <text x="460" y="122">→ 新しい Region は Λ が小さく短命 → 冷たい物のヒットは低い</text>
+ <text x="10" y="160" font-weight="700">③ 定常モデル（隔離なし）の見方</text>
+ <text x="10" y="180">温かい物もときどきミスして、冷たい物と同じ Region に入り直す（iid の組成）</text>
+ <text x="10" y="198">→ 温かい物が冷たい隣人の Region を長生きさせる → 冷たい物のヒットを過大、小物の取り分を過大、大物の BHR を過小</text>
+ <text x="10" y="226" fill="var(--mut)">隔離された状態は準安定で、トレースを 4 倍に延ばしても崩れない（寿命が e<tspan baseline-shift="super" font-size="0.7em">ΛT</tspan> のため）。定常モデルが表すのは、到達に天文学的な時間がかかる極限。</text>
+ </g>
+</svg>
+<p><b>計測</b>：終了時に残っている全 Region を出す計測（<code>RF_ENDDUMP</code>）を足し、封じた全 Region の組成を調べた（<code>tools/synth/clustering.py</code>）。W3・20%・\(N=1024\) では、封じた後に追い出されずに残った小物の Region のうち、69 個が最初の 100 万要求で封じたもので、\(\Lambda T\) は 9〜4917 だった。順位 1〜99 の物は全部、100〜999 は 889/900 個がその中にいた。後から封じた Region の組成は iid（温かい物の個数の分散/平均 0.97）で、モデルの組成の仮定そのものは正しい。</p>
+<p><b>モデルへの組み込み</b>（<code>synth_model -H &lt;観測期間&gt;</code>）：</p>
+<div class="math"><ol>
+<li>各物の初回の要求時刻 \(\tau_i\sim\mathrm{Exp}(\lambda_i)\) を引き、\(\tau\) の順に、分類ごとの Region に詰める（容量が埋まるまで）。</li>
+<li>初期 Region \(j\) の寿命 \((e^{\Lambda_jT}-1)/\Lambda_j\) が観測期間 \(H\) を超えれば「不死」：中の物は在籍率 1 で、ミスしない。</li>
+<li>残りの物と、残りの容量 \(C-N_{\rm imm}R\)（\(N_{\rm imm}\) は不死の Region の数）で、これまでの定常モデルを解く。</li>
+<li>不死の判定は \(T\) に依るので、\(T\) と不死の集合を交互に解き直す。</li>
+</ol><p>充填期の終わりが Che の \(T\) と一致すること、生存確率 \(e^{-H/\mathbb{E}D}\) の根拠は <a href="region_model_appendix.html">付録</a> §F・命題 E.2。</p></div>
+<div class="tbl"><table><tr><th>構成</th><th>実測 OHR / BHR</th><th>定常モデル</th><th>隔離あり</th><th>\(T\) 実測 / 定常 / 隔離あり</th></tr>
+<tr><td>W1 10%・分類あり</td><td>0.640 / 0.518</td><td>0.645 / 0.485</td><td><b>0.641 / 0.515</b></td><td>3,871 / 2,820 / 3,834</td></tr>
+<tr><td>W1 30%・分類あり</td><td>0.839 / 0.673</td><td>0.851 / 0.615</td><td><b>0.841 / 0.660</b></td><td>5,430 / 3,205 / 4,944</td></tr>
+<tr><td>W1 30%・分類なし</td><td>0.682 / 0.752</td><td>0.674 / 0.739</td><td><b>0.683 / 0.752</b></td><td>4,499 / 3,323 / 4,671</td></tr>
+<tr><td>W3 20%・分類あり</td><td>0.764 / 0.416</td><td>0.766 / 0.272</td><td><b>0.766 / 0.396</b></td><td>5,875 / 2,901 / 5,468</td></tr>
+<tr><td>W5 10%・\(k=3\)</td><td>0.601 / 0.528</td><td>0.617 / 0.474</td><td><b>0.604 / 0.517</b></td><td>3,686 / 2,357 / 3,408</td></tr>
+<tr><td>単一サイズ 30%</td><td>0.763</td><td>0.747</td><td><b>0.764</b></td><td>5,338 / 3,333 / 5,649</td></tr></table></div>
+
+<div class="card ok"><b>今の結論（11-05 追記）</b>
+<ul>
+<li><b>Region LRU の式は 2 つの部分からなる</b>：(1) 立ち上がりに熱い物が詰まった初期 Region のうち、寿命が観測期間を超えるものは不死になる（隔離）。(2) 残りの物は、物から見て滞在 \(L=U+\int_0^T\mathbb{E}[e^{\Lambda t}]\,dt\) の FIFO で、同居の物は挿入の流れから独立に引く（定常）。この 2 つで、本文の全負荷の Region LRU を OHR 平均 0.2pt、BHR 平均 0.1〜0.8pt で当てる。</li>
+<li><b>\(T\) の揺らぎ</b>：大きさの式 \(\mathrm{sd}(T)=1/\sqrt{2\sum m\lambda}\) は実測と合うが、寿命への効果は観測されなかった（§5.1・§5.2）。補正は <code>-c</code> で選べるが既定にはしない。</li>
+<li><b>残る誤差</b>：Region 数が少ない場合（\(N=64\)）は 2〜4pt 残る。初期の詰め込みの近似（初回の要求の順だけを見て、立ち上がり中の追い出しを無視している）が粗いため。</li>
+<li><b>実務への意味</b>：Region キャッシュは、立ち上がりで熱い物を「固定の区画」に隔離する。人気が変わらない合成負荷では、この隔離は最後まで残り、サイズ分類の効果の評価にも入り込む。人気が時間で変わる実トレースでは、隔離された Region は古い人気を抱えたまま居座る（居座り型の損失、chat_summary.md の H0）と予想される。合成トレースの評価では、温めの方法（空から始めるか、定常状態から始めるか）を結果と一緒に明記する必要がある。</li>
+</ul></div>
+
+<h2>6. 人気が変わる負荷での隔離（11-05 追記）</h2>
+<p><b>仮説</b>：人気が変わると隔離された初期 Region の \(\Lambda\)（今の人気で数えた値）が下がり、隔離は崩れる。崩れる途中では、古い人気を抱えた Region が容量を占める（居座り）。</p>
+<p><b>負荷</b>：老化型（<code>synth_gen</code> の 5 番目の欄 period）。period 要求ごとに新しい物が 1 位に入り、既存の物は 1 位ずつ下がる。一巡時間 \(\tau=\text{物の数}\times\text{period}\) を、両クラスで同じにして ∞・8,000 万・2,000 万・500 万と変えた（トレースは 2,000 万要求）。人気の分布（順位 → \(\lambda\)）は老化しても同じなので、モデルの値は老化なしと同じ。計測は <code>tools/synth/drift.py</code>・<code>squat.py</code>。</p>
+<div class="tbl"><table><tr><th>負荷・容量</th><th>一巡時間 \(\tau\)</th><th>立ち上がりの Region（小物 / 大物）</th><th>Region LRU 分類あり OHR / BHR</th><th>定常モデル</th><th>隔離ありモデル</th><th>Region LRU 分類なし OHR / BHR</th><th>物 LRU OHR</th><th>老化による OHR の損失：分類あり / 分類なし / 物 LRU</th></tr>
+<tr><td>W1 10%</td><td>∞（老化なし）</td><td>30 / 10</td><td>0.640 / 0.518</td><td>0.645 / 0.485</td><td>0.641 / 0.515</td><td>0.518 / 0.566</td><td>0.530</td><td>—</td></tr>
+<tr><td>W1 10%</td><td>8,000 万</td><td>0 / 0</td><td>0.638 / 0.485</td><td>0.645 / 0.485</td><td>0.641 / 0.515</td><td>0.502 / 0.552</td><td>0.529</td><td>-0.3 / -1.6 / -0.1</td></tr>
+<tr><td>W1 10%</td><td>2,000 万</td><td>0 / 0</td><td>0.626 / 0.493</td><td>0.645 / 0.485</td><td>0.641 / 0.515</td><td>0.494 / 0.548</td><td>0.524</td><td>-1.4 / -2.4 / -0.6</td></tr>
+<tr><td>W1 10%</td><td>500 万</td><td>0 / 0</td><td>0.599 / 0.495</td><td>0.645 / 0.485</td><td>0.641 / 0.515</td><td>0.476 / 0.539</td><td>0.504</td><td>-4.2 / -4.2 / -2.6</td></tr>
+<tr><td>W1 30%</td><td>∞（老化なし）</td><td>59 / 15</td><td>0.839 / 0.673</td><td>0.852 / 0.615</td><td>0.841 / 0.659</td><td>0.682 / 0.752</td><td>0.695</td><td>—</td></tr>
+<tr><td>W1 30%</td><td>8,000 万</td><td>0 / 0</td><td>0.831 / 0.642</td><td>0.852 / 0.615</td><td>0.841 / 0.659</td><td>0.664 / 0.735</td><td>0.693</td><td>-0.8 / -1.8 / -0.2</td></tr>
+<tr><td>W1 30%</td><td>2,000 万</td><td>0 / 0</td><td>0.812 / 0.654</td><td>0.852 / 0.615</td><td>0.841 / 0.659</td><td>0.659 / 0.732</td><td>0.688</td><td>-2.6 / -2.3 / -0.7</td></tr>
+<tr><td>W1 30%</td><td>500 万</td><td>0 / 0</td><td>0.777 / 0.656</td><td>0.852 / 0.615</td><td>0.841 / 0.659</td><td>0.643 / 0.723</td><td>0.666</td><td>-6.2 / -3.9 / -2.9</td></tr>
+<tr><td>W3 20%</td><td>∞（老化なし）</td><td>26 / 3</td><td>0.764 / 0.416</td><td>0.766 / 0.272</td><td>0.766 / 0.396</td><td>0.687 / 0.460</td><td>0.698</td><td>—</td></tr>
+<tr><td>W3 20%</td><td>8,000 万</td><td>0 / 0</td><td>0.763 / 0.371</td><td>0.766 / 0.272</td><td>0.766 / 0.396</td><td>0.673 / 0.448</td><td>0.697</td><td>-0.1 / -1.3 / -0.1</td></tr>
+<tr><td>W3 20%</td><td>2,000 万</td><td>0 / 0</td><td>0.754 / 0.391</td><td>0.766 / 0.272</td><td>0.766 / 0.396</td><td>0.667 / 0.445</td><td>0.692</td><td>-1.0 / -2.0 / -0.6</td></tr>
+<tr><td>W3 20%</td><td>500 万</td><td>0 / 0</td><td>0.728 / 0.399</td><td>0.766 / 0.272</td><td>0.766 / 0.396</td><td>0.651 / 0.438</td><td>0.671</td><td>-3.6 / -3.5 / -2.7</td></tr>
+</table></div>
+
+<h3>6.1 分かったこと</h3>
+<ul>
+<li><b>立ち上がりの隔離は、ゆっくりした老化でも完全に消える</b>。\(\tau\) = 8,000 万（トレース長の 4 倍）でも、立ち上がりに封じた Region は終了時に 0 個（老化なしでは小物 26〜59 個）。100 万要求ごとのヒット率は最初の窓を除いて平らで、時間とともに損失が増えたり減ったりする過渡は見えない。<b>立ち上がりの隔離が長く居座る、という形の損失は起きない</b>。隔離は、人気が永遠に変わらない合成負荷に特有の現象。</li>
+<li><b>代わりに「生まれた時に熱い Region」が流れ続ける</b>。新しい物は 1 位で入ってきて、最初の要求は必ずミスなので、挿入の流れには常に熱い新顔が混ざる。W1 30% では、生き残っている小物の Region の封じた時の \(\Lambda T\) は 500〜1000（老化なしでは 7）。その後、中の物が老化して今の \(\Lambda T\) は 8〜12 に下がるが、0.2〜4M 要求（\(T\) の数十〜千倍）生き続ける。</li>
+<li><b>老化の損失は Region キャッシュの方が大きい</b>：W1 30% の OHR の損失は、物 LRU が −0.2 / −0.7 / −2.9pt（\(\tau\) = 8,000 万 / 2,000 万 / 500 万）に対して、Region LRU の分類ありは −0.8 / −2.6 / −6.2pt。物 LRU の損失は新しい物の初回ミスでほぼ説明できるので、差の 0.6〜3.3pt が Region に固有の損失。</li>
+<li><b>モデルとの関係</b>：老化があると、実測は定常モデルと隔離ありモデルの間に来る（\(\tau\) = 8,000 万で、W1 10% の BHR は定常モデルに一致、W1 30%・W3 は間）。どちらも「新しい熱い物の挿入」と「初回ミス」を含まないので、老化のある負荷を当てるには、この 2 つを足す必要がある。</li>
+<li><b>居座りを直接測る試み（不採用）</b>：残っている Region の中で今の \(\lambda T\lt0.1\) の物の割合を測ったが、老化なしでも 0.93〜0.97 で差が出なかった。Region キャッシュでは物の滞在が \(T\) ではなく Region の寿命（\(T\) の数十〜千倍）で決まるため、\(T\) は物差しにならない。Region に固有の 0.6〜3.3pt の損失が居座りによるものかは、まだ確かめていない。</li>
+</ul>
+<h3>6.2 老化のモデル（<code>tools/synth/synth_age.c</code>、途中経過）</h3>
+<p>物を年齢 \(a\) で表す（順位 \(r=1+\lfloor a/P\rfloor\)、どの時点でも順位ごとに物が 1 個）。\(h(a)\) は年齢 \(a\) の物の在籍率。</p>
+<div class="math">
+<p><b>物単位 LRU</b>（生まれる前は \(\lambda=0\) なので、初回ミスが入る）</p>
+\[ h(a)=1-\exp\!\Big(-\int_{a-T}^{a}\lambda(u)\,du\Big) \]
+<p><b>Region LRU</b>（再生方程式）</p>
+\[ h(a)=\int_0^a\lambda(a')\,\big(1-h(a')\big)\,G(a\mid a')\,da' \]
+\[ G(a\mid a')=\mathbb{E}_m\!\Big[\exp\Big(-\int_{a'}^{a}\eta\big(\lambda(u)+\Lambda_{\text{その他}}(u-a')+m\,\lambda_{\text{新顔}}(u-a')\big)\,du\Big)\Big],\qquad \eta(\Lambda)=\frac{\Lambda}{e^{\Lambda T}-1} \]
+<p>\(m\) は Region の中の熱い新顔の数で、\(m\sim\mathrm{Poisson}(\nu)\)。同居の物も一緒に老化する。\(\eta=1/\mathbb{E}D\) は寿命の式 \((e^{\Lambda T}-1)/\Lambda\) の逆数で、死亡率の平均場近似（<a href="region_model_appendix.html">付録</a> §J）。</p></div>
+<ul>
+<li><b>物単位 LRU</b>：12 構成すべてで実測と 0.25pt 以内。初回ミスを含めて完成。</li>
+<li><b>Region LRU</b>：単一サイズ（\(\tau\) = 2,000 万）で −0.9pt、\(T\) は 3,745 対 3,752。W1 30% の分類ありは 3 段の \(\tau\) で OHR/BHR とも 1.9pt 以内、W3 20% の分類ありは 1.4pt 以内。</li>
+<li><b>新顔の数のばらつき</b>：新顔は 1 Region に 0.25 個（混在・W1 10%）〜 60 個（分類あり・W1 30%）。少ないとポアソン的で、寿命は新顔 0 / 1 / 2 個で 11,949 / 45,846 / 97,149 要求（実測）。平均場で均すと全 Region が長生きになり、混在の最悪点は −18pt。ポアソンで平均すると −3pt に縮んだ。</li>
+<li><b>残る誤差（未解決）</b>：容量 10% と分類なしの構成で、OHR が 9〜22pt 低く、\(T\) が実測の半分以下に解かれる。モデルは混在の Region で大物のミスを少なく見積もり、1 Region の物の数を約 440 個と数える（実測は約 40 個、ミスの 22% が大物）。大物の在籍率の求め方の見直しが次の作業。</li>
+</ul>
+
+<div class="card warn"><b>評価への意味</b>：老化のない合成負荷を空から始めると、立ち上がりの隔離が結果に入り込む（§5.4）。人気がわずかでも変われば隔離は消えるので、実トレースに近い条件を見たいなら、老化つきの負荷か、定常モデル（<code>-H 0</code>）を基準にする。サイズ分類の効果（分類あり − 分類なし）を老化つきで比べると、W1 30% で \(\tau\) = 8,000 万なら OHR +16.7pt（老化なし +15.7pt）、\(\tau\) = 500 万なら +13.4pt。サイズ分類の利得そのものは、老化があっても残る。</div>
+
+<h2>7. 次の作業</h2>
+<ol>
+<li>老化のある負荷のモデル：新しい物の初回ミスと、「熱い新顔の挿入」を挿入の流れに足す。Region に固有の 0.6〜3.3pt の損失を式で分解し、居座り（古い人気の Region が容量を占める）か、便乗（熱い新顔に守られた冷たい同居の物）かを決める。</li>
+<li>\(N\) が小さい場合の初期の詰め込みの近似を改善する（立ち上がり中の追い出しを入れる）。</li>
+<li>合成トレースを zstd で固めて <code>og_trace_stats</code> を当て、「サイズの寄与」「要求とバイトの偏り」と、ここでの利得を同じ図に並べる（trace_characteristics.md §7 の動機の図）。</li>
+<li>IRM にない要素を 1 つずつ足す：一回きりの物の割合、サイズ変化、時間局所性（ショット）。実トレースとの差がどれで説明できるかを見る。</li>
+<li>DRAM 層と再挿入を入れた場合の式（DRAM は物 LRU の前段、再挿入は \(L\) を延ばす操作として書ける見込み）。</li>
+</ol>
+</main>
+</body>
+</html>

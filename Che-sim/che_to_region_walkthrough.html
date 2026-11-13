@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Che から Region 分類へ</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1;
+  --sh:#2b6cb0;--sc:#90b4dd;--lh:#c05621;--lc:#f0b27a;--mh:#6b46c1;--mc:#c3b1ea;--slide:#fbfcfe}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;
+  --sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26;--mh:#9f7aea;--mc:#4a3a6e;--slide:#181c23}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;
+  --sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26;--mh:#9f7aea;--mc:#4a3a6e;--slide:#181c23}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:960px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:24px;margin:0 0 4px}
+.sub{color:var(--mut);margin:0 0 18px}
+.chap{font-size:13px;color:var(--a);font-weight:700;letter-spacing:.05em;margin:44px 0 6px;border-top:2px solid var(--a);padding-top:6px}
+.slide{background:var(--slide);border:1px solid var(--line);border-radius:10px;padding:14px 20px 12px;margin:14px 0;position:relative}
+.slide h2{font-size:19px;margin:0 0 4px;padding-right:56px}
+.no{position:absolute;top:12px;right:16px;font-size:12px;color:var(--mut);border:1px solid var(--line);border-radius:10px;padding:0 8px}
+.msg{font-weight:700;color:var(--a);margin:0 0 8px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+@media (max-width:720px){.cols{grid-template-columns:1fr}}
+.math{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:0 12px;margin:6px 0;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:6px 0}
+th,td{border-bottom:1px solid var(--line);padding:4px 7px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+details{margin:8px 0 2px;border-top:1px dashed var(--line);padding-top:4px}summary{cursor:pointer;color:var(--mut);font-size:13.5px}
+details[open] summary{margin-bottom:4px}
+svg{max-width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:12px}
+.mut{color:var(--mut)}.g{color:var(--g)}.r{color:var(--r)}
+.bar{display:inline-block;height:10px;border-radius:2px;vertical-align:middle}
+.key{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;margin:0 3px 0 10px}
+ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}]})"></script>
+</head>
+<body>
+<main>
+<h1>LRU の Che 近似から、Region LRU のサイズ分類まで：1 つの数値例で通して計算する</h1>
+<p class="sub">2026-11-06。1 枚の枠が 1 枚のスライドに当たる（右上の番号）。枠の中の本文をスライドに、「補足」を発表者メモに使う想定。
+数値はすべて <code>tools/synth/toy_walk.py</code>（結果は <code>tools/synth/results/toy_walk.json</code>）の出力で、
+モデル本体の <code>synth_model</code> とシミュレーション（libCacheSim／RegionFlash、3,000 万要求）で照合した。
+導出の細部は <a href="region_lru_derivation.html">region_lru_derivation.html</a>。</p>
+
+<!-- ============================================================ -->
+<div class="chap">第 0 章　全体の地図</div>
+<section class="slide"><span class="no">1</span>
+<h2>この資料の流れ</h2>
+<p class="msg">同じ 1 つのキャッシュを、式を 1 段ずつ足しながら 7 回計算する。</p>
+<svg viewBox="0 0 900 150" role="img" aria-label="7 段の流れ図">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<g font-size="12">
+<rect x="4" y="10" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--a)"/><text x="104" y="32" text-anchor="middle" font-weight="700">① 物単位 LRU</text><text x="104" y="51" text-anchor="middle">Che：h = 1 − e^(−λT)</text>
+<rect x="234" y="10" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--a)"/><text x="334" y="32" text-anchor="middle" font-weight="700">② 物単位で分類</text><text x="334" y="51" text-anchor="middle">限界ヒット/バイトをそろえる</text>
+<rect x="464" y="10" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--b)"/><text x="564" y="32" text-anchor="middle" font-weight="700">③ Region FIFO</text><text x="564" y="51" text-anchor="middle">h = λL/(1+λL)、L = T</text>
+<rect x="694" y="10" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--b)"/><text x="794" y="32" text-anchor="middle" font-weight="700">④ Region LRU の寿命</text><text x="794" y="51" text-anchor="middle">(e^(ΛT) − 1)/Λ</text>
+<rect x="119" y="88" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--b)"/><text x="219" y="110" text-anchor="middle" font-weight="700">⑤ Λ を物から組み立てる</text><text x="219" y="129" text-anchor="middle">M(t)、不動点、容量</text>
+<rect x="349" y="88" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--g)"/><text x="449" y="110" text-anchor="middle" font-weight="700">⑥ サイズ分類の効果</text><text x="449" y="129" text-anchor="middle">Λ を分けると寿命が割れる</text>
+<rect x="579" y="88" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--g)"/><text x="679" y="110" text-anchor="middle" font-weight="700">⑦ 補正と検証</text><text x="679" y="129" text-anchor="middle">立ち上がりの隔離、実測</text>
+<path d="M204,37H232" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M434,37H462" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M664,37H692" stroke="var(--mut)" marker-end="url(#ar)"/>
+<path d="M794,64V76H219V86" fill="none" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M319,115H347" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M549,115H577" stroke="var(--mut)" marker-end="url(#ar)"/>
+</g></svg>
+<ul>
+<li>青の枠：物 1 個ずつ消すキャッシュ（教科書の LRU）。</li>
+<li>橙の枠：Region（大きな箱）ごとまとめて消すキャッシュ（SSD キャッシュ）。</li>
+<li>緑の枠：本題。サイズで Region を分けると、なぜ・どれだけ効くか。</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 1 章　例題</div>
+<section class="slide"><span class="no">2</span>
+<h2>例題のワークロード：4 つのグループだけ</h2>
+<p class="msg">小物（4 KiB）と大物（64 KiB）に、それぞれ「熱い」「冷たい」の 2 グループ。同じグループの物は全員同じ人気。</p>
+<div class="tbl"><table>
+<tr><th>グループ</th><th class="n">大きさ s</th><th class="n">物の数 N</th><th class="n">ユニーク量</th><th class="n">要求の割合</th><th class="n">1 個の要求率 λ</th><th class="n">λ/s（1 単位あたり）</th><th>λ/s の大小（対数）</th></tr>
+<tr><td><span class="key" style="background:var(--sh);margin-left:0"></span>S熱</td><td class="n">4 KiB（1）</td><td class="n">8,000</td><td class="n">31 MiB</td><td class="n">60%</td><td class="n">7.50×10⁻⁵</td><td class="n">7.50×10⁻⁵</td><td><span class="bar" style="width:120px;background:var(--sh)"></span></td></tr>
+<tr><td><span class="key" style="background:var(--sc);margin-left:0"></span>S冷</td><td class="n">4 KiB（1）</td><td class="n">72,000</td><td class="n">281 MiB</td><td class="n">15%</td><td class="n">2.08×10⁻⁶</td><td class="n">2.08×10⁻⁶</td><td><span class="bar" style="width:58px;background:var(--sc)"></span></td></tr>
+<tr><td><span class="key" style="background:var(--lh);margin-left:0"></span>L熱</td><td class="n">64 KiB（16）</td><td class="n">800</td><td class="n">50 MiB</td><td class="n">20%</td><td class="n">2.50×10⁻⁴</td><td class="n">1.56×10⁻⁵</td><td><span class="bar" style="width:93px;background:var(--lh)"></span></td></tr>
+<tr><td><span class="key" style="background:var(--lc);margin-left:0"></span>L冷</td><td class="n">64 KiB（16）</td><td class="n">7,200</td><td class="n">450 MiB</td><td class="n">5%</td><td class="n">6.94×10⁻⁶</td><td class="n">4.34×10⁻⁷</td><td><span class="bar" style="width:30px;background:var(--lc)"></span></td></tr>
+</table></div>
+<div class="cols">
+<ul>
+<li>大きさの単位は 4 KiB = 1。時間の単位は「要求 1 回」（λ の合計 = 1）。</li>
+<li>キャッシュ容量 C = 128 MiB = <b>32,768 単位</b>（ユニーク量 812 MiB の 15.8%）。</li>
+<li>Region R = 512 KiB = <b>128 単位</b>、Region は 256 個。小物なら 128 個、大物なら 8 個入る。</li>
+</ul>
+<ul>
+<li>要求は小物：大物 = 3 : 1（これまでの W1 と同じ）。</li>
+<li>λ は「要求の割合 ÷ 物の数」。例：S熱は 0.60 ÷ 8,000 = 7.5×10⁻⁵。</li>
+<li><b>λ/s（1 バイトあたりの人気）</b>の順は S熱 &gt; L熱 &gt; S冷 &gt; L冷。この順がこの先ずっと効く。</li>
+</ul>
+</div>
+<details><summary>補足：なぜこの例題か</summary>
+<p>グループ内の人気をそろえた（Zipf の α = 0）ので、式の和が 4 項になり、手で追える。小物と大物の両方に熱い物と冷たい物を置いたのは、後で「サイズだけで分けたときに、冷たい小物がどう振る舞うか」を見せるため。トレースは <code>synth_gen toy.bin 30000000 1 4K:8000:0.60:0 4K:72000:0.15:0 64K:800:0.20:0 64K:7200:0.05:0</code>。</p>
+</details>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 2 章　物単位 LRU の Che 近似</div>
+<section class="slide"><span class="no">3</span>
+<h2>Che 近似の考え方：「最後の要求から T 以内なら、まだいる」</h2>
+<p class="msg">LRU で追い出されるのは、最後の要求からの経過時間がいちばん長い物。その経過時間（追い出し年齢）を一定値 T とみなす。</p>
+<div class="cols">
+<svg viewBox="0 0 440 150" role="img" aria-label="Che 近似の時間軸">
+<line x1="20" y1="80" x2="420" y2="80" stroke="var(--mut)"/>
+<text x="420" y="100" text-anchor="end" class="mut">時間 →</text>
+<g stroke="var(--a)" stroke-width="3"><line x1="60" y1="66" x2="60" y2="80"/><line x1="140" y1="66" x2="140" y2="80"/><line x1="300" y1="66" x2="300" y2="80"/></g>
+<text x="60" y="60" text-anchor="middle">要求</text><text x="140" y="60" text-anchor="middle">要求</text><text x="300" y="60" text-anchor="middle">要求</text>
+<rect x="140" y="84" width="120" height="14" fill="var(--g)" opacity=".35"/><text x="200" y="95" text-anchor="middle" font-size="11">在籍（T）</text>
+<rect x="60" y="84" width="80" height="14" fill="var(--g)" opacity=".35"/>
+<path d="M140,112H260" stroke="var(--fg)" marker-start="url(#ar)" marker-end="url(#ar)"/><text x="200" y="128" text-anchor="middle">T</text>
+<text x="300" y="118" text-anchor="middle" class="r">ミス（間隔 &gt; T）</text>
+<text x="140" y="118" text-anchor="middle" class="g" fill="var(--g)">ヒット</text>
+</svg>
+<div>
+<ul>
+<li>要求は率 λ のポアソン過程。前の要求から T 以内に次が来る確率がヒット率：</li>
+</ul>
+<div class="math">\[ h = 1 - e^{-\lambda T} \]</div>
+<ul>
+<li>T はキャッシュが満杯になる条件で決まる：</li>
+</ul>
+<div class="math">\[ \sum_{g} N_g\, s_g\,\bigl(1-e^{-\lambda_g T}\bigr) = C \]</div>
+</div>
+</div>
+<details><summary>補足：なぜ T を一定とみなせるか</summary>
+<p>物が多いと、追い出し年齢は多数の物の寄せ集めで決まり、ほとんど揺れない（大数の法則）。Fricker–Robert–Roberts (2012) が IRM で正当化している。この例でも実測と 0.04pt 以内で合う（スライド 4）。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">4</span>
+<h2>計算 ①：T を二分法で求め、ヒット率を出す</h2>
+<p class="msg">T = 16,125 要求。OHR 62.8%、BHR 76.9%。熱い大物（L熱）が 98% 残り、容量の 38% を取る。</p>
+<div class="cols">
+<div class="tbl"><table>
+<tr><th class="n">T の候補</th><th class="n">占有（単位）</th><th>判定（C = 32,768）</th></tr>
+<tr><td class="n">10,000</td><td class="n">25,183</td><td>足りない → T を伸ばす</td></tr>
+<tr><td class="n">100,000</td><td class="n">92,011</td><td>多すぎ → 縮める</td></tr>
+<tr><td class="n">31,623</td><td class="n">47,352</td><td>多すぎ</td></tr>
+<tr><td class="n">17,783</td><td class="n">34,543</td><td>多すぎ</td></tr>
+<tr><td class="n">13,335</td><td class="n">29,563</td><td>足りない</td></tr>
+<tr><td class="n">…</td><td class="n">…</td><td></td></tr>
+<tr><td class="n"><b>16,125</b></td><td class="n"><b>32,768</b></td><td>一致</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>グループ</th><th class="n">λT</th><th class="n">h = 1 − e^(−λT)</th><th class="n">占有 N s h</th></tr>
+<tr><td>S熱</td><td class="n">1.209</td><td class="n">0.702</td><td class="n">5,613</td></tr>
+<tr><td>S冷</td><td class="n">0.034</td><td class="n">0.033</td><td class="n">2,379</td></tr>
+<tr><td>L熱</td><td class="n">4.031</td><td class="n">0.982</td><td class="n">12,573</td></tr>
+<tr><td>L冷</td><td class="n">0.112</td><td class="n">0.106</td><td class="n">12,204</td></tr>
+<tr><td><b>合計</b></td><td></td><td></td><td class="n"><b>32,768</b></td></tr>
+</table></div>
+</div>
+<div class="math">\[ \text{OHR}=\sum_g p_g h_g = 0.60(0.702)+0.15(0.033)+0.20(0.982)+0.05(0.106)=0.628 \]
+\[ \text{BHR}=\frac{\sum_g p_g s_g h_g}{\sum_g p_g s_g}=\frac{0.421+0.005+16(0.196)+16(0.005)}{4.75}=0.769 \]</div>
+<p class="mut">\(p_g\) は要求の割合。実測（libCacheSim の LRU）は OHR 62.7%、BHR 76.9%。</p>
+<details><summary>補足：二分法の進め方</summary>
+<p>占有は T について増加なので、T の候補を対数で真ん中に取り、占有が C より少なければ T を伸ばし、多ければ縮める。表は 10² と 10⁶ の間から始めた最初の数手。</p>
+</details>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 3 章　物単位でサイズ分類する（基準として）</div>
+<section class="slide"><span class="no">5</span>
+<h2>計算 ②：小物と大物で LRU を 2 つに分け、容量を最適に配る</h2>
+<p class="msg">分けると OHR は 62.8% → 78.1%（+15.3pt）、BHR は 76.9% → 70.9%（−6.0pt）。容量 1 単位あたりの限界ヒットをそろえるのが最適。</p>
+<div class="cols">
+<div>
+<p>分類 k の容量を少し増やしたときのヒットの増え方（限界ヒット/単位）：</p>
+<div class="math">\[ \frac{dH_k}{dC_k}=\frac{\sum_{g\in k}N_g\lambda_g^2e^{-\lambda_gT_k}}{\sum_{g\in k}N_g s_g\lambda_g e^{-\lambda_gT_k}} \]</div>
+<p>共有の LRU（T = 16,125）で測ると：</p>
+<ul>
+<li>小物：4.24×10⁻⁵</li>
+<li>大物：1.55×10⁻⁶（<b>27 分の 1</b>）</li>
+</ul>
+<p>→ 容量を大物から小物へ移すほど OHR が増える。両方が 6.32×10⁻⁶ でそろうまで移す。</p>
+</div>
+<div class="tbl"><table>
+<tr><th></th><th class="n">共有 LRU</th><th class="n">分けて最適化</th></tr>
+<tr><td>T（小物 / 大物）</td><td class="n">16,125 / 16,125</td><td class="n">57,205 / 7,584</td></tr>
+<tr><td>小物の容量</td><td class="n">24.4%</td><td class="n">48.8%</td></tr>
+<tr><td>h（S熱 / S冷）</td><td class="n">0.702 / 0.033</td><td class="n">0.986 / 0.112</td></tr>
+<tr><td>h（L熱 / L冷）</td><td class="n">0.982 / 0.106</td><td class="n">0.850 / 0.051</td></tr>
+<tr><td>OHR</td><td class="n">62.8%</td><td class="n"><b class="g">78.1%</b></td></tr>
+<tr><td>BHR</td><td class="n">76.9%</td><td class="n"><b class="r">70.9%</b></td></tr>
+</table></div>
+</div>
+<details><summary>補足：これが「基準」である理由</summary>
+<p>物単位なら、分類の効果は「容量の配り方」だけで決まり、上の式で最適が計算できる。Region キャッシュでは配り方を直接は指定できず、Region の寿命から自然に決まる。第 6 章で、その自然な配り方がこの最適とどう違うかを見る。限界の式は \(H_k=\sum N_g\lambda_g(1-e^{-\lambda_gT_k})\) と \(C_k=\sum N_g s_g(1-e^{-\lambda_gT_k})\) を T_k で微分して割ったもの。共有 LRU は BHR についての最適に近い（1/s の重みがない）。</p>
+</details>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 4 章　Region キャッシュ：物から見ると FIFO</div>
+<section class="slide"><span class="no">6</span>
+<h2>物から見た在籍率：\(h = \lambda L/(1+\lambda L)\)</h2>
+<p class="msg">Region キャッシュでは、ヒットしても物は動かない。物は「入る → 滞在 L → Region ごと消える → 次の要求でミスして入り直す」を繰り返す。</p>
+<svg viewBox="0 0 900 120" role="img" aria-label="在籍と不在のサイクル">
+<g font-size="12">
+<rect x="20" y="30" width="250" height="26" fill="var(--g)" opacity=".4"/><text x="145" y="48" text-anchor="middle">在籍（平均 L）：要求は全部ヒット</text>
+<rect x="270" y="30" width="130" height="26" fill="var(--line)"/><text x="335" y="48" text-anchor="middle">不在（平均 1/λ）</text>
+<rect x="400" y="30" width="250" height="26" fill="var(--g)" opacity=".4"/><text x="525" y="48" text-anchor="middle">在籍（平均 L）</text>
+<rect x="650" y="30" width="130" height="26" fill="var(--line)"/><text x="715" y="48" text-anchor="middle">不在</text>
+<text x="20" y="22" class="r" fill="var(--r)">ミス → 挿入</text><text x="400" y="22" class="r" fill="var(--r)">ミス → 挿入</text>
+<text x="270" y="76" text-anchor="middle">Region が消える</text><text x="650" y="76" text-anchor="middle">Region が消える</text>
+<path d="M20,96H400" stroke="var(--fg)" marker-start="url(#ar)" marker-end="url(#ar)"/><text x="210" y="112" text-anchor="middle">1 サイクル = L + 1/λ（ミス 1 回）</text>
+</g></svg>
+<div class="cols">
+<div class="math">\[ h=\frac{\text{在籍の時間}}{\text{1 サイクルの時間}}=\frac{L}{L+1/\lambda}=\frac{\lambda L}{1+\lambda L} \]</div>
+<ul>
+<li>不在の平均が 1/λ なのは、消えた時点から次の要求までの待ちだから（ポアソンの無記憶性）。</li>
+<li>要求はポアソンなので「在籍している時間の割合」＝「要求がヒットする割合」（PASTA）。</li>
+<li>1 − h = 1/(1+λL) がミス率。<b>挿入の率は \(m=\lambda/(1+\lambda L)\)</b>。</li>
+</ul>
+</div>
+</section>
+
+<section class="slide"><span class="no">7</span>
+<h2>計算 ③：Region FIFO では L = T（全員同じ）なので、分類は効かない</h2>
+<p class="msg">FIFO では Region は封じてから T 後に必ず消える。分類しても寿命の配り方は変わらない。差は詰め残しの分だけ（+1.5pt）。</p>
+<div class="cols">
+<div class="tbl"><table>
+<tr><th>グループ</th><th class="n">λL（L = 20,489）</th><th class="n">h = λL/(1+λL)</th></tr>
+<tr><td>S熱</td><td class="n">1.537</td><td class="n">0.606</td></tr>
+<tr><td>S冷</td><td class="n">0.043</td><td class="n">0.041</td></tr>
+<tr><td>L熱</td><td class="n">5.092</td><td class="n">0.836</td></tr>
+<tr><td>L冷</td><td class="n">0.141</td><td class="n">0.124</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>Region FIFO</th><th class="n">モデル OHR / BHR</th><th class="n">実測 OHR / BHR</th></tr>
+<tr><td>分類なし（混在）</td><td class="n">52.8% / 65.0%</td><td class="n">52.7% / 65.0%</td></tr>
+<tr><td>サイズ分類</td><td class="n">54.3% / 66.2%</td><td class="n">54.2% / 66.1%</td></tr>
+</table>
+<p class="mut">混在では、64 KiB が入らなくなった時点で Region を封じるので、平均 4.5% が空のまま。分類すると 128 単位にぴったり詰まる。</p></div>
+</div>
+<ul>
+<li>物単位 LRU（62.8%）より 8〜10pt 低い。ヒットしても延命されないので、熱い物も一定時間で追い出される。</li>
+<li>L = T ＋ 封じるまでの待ち U（小物の Region は U = 167 要求、T = 20,322 の 1% 未満）。</li>
+</ul>
+<details><summary>補足：容量の式</summary>
+<div class="math">\[ \sum_g \frac{N_g s_g h_g}{\phi_g}=C,\qquad \phi=\text{Region の充填率（分類あり 1.000、混在 0.955）} \]</div>
+<p>詰め残しも容量を食うので、占有を充填率で割る。T はこの式を二分法で解いて 20,322（分類あり）・18,808（混在）。</p>
+</details>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 5 章　Region LRU：寿命は touch の率 Λ で指数的に伸びる</div>
+<section class="slide"><span class="no">8</span>
+<h2>Region LRU の寿命：「何も来ない時間が T を超えたら死ぬ」</h2>
+<p class="msg">中のどれか 1 つがヒットするたびに Region の時計が戻る。中の物の要求率の和 Λ が大きいほど、寿命は指数的に長くなる。</p>
+<svg viewBox="0 0 900 120" role="img" aria-label="Region の寿命の時間軸">
+<g font-size="12">
+<line x1="20" y1="60" x2="880" y2="60" stroke="var(--mut)"/>
+<text x="20" y="50">封じる</text><line x1="20" y1="52" x2="20" y2="68" stroke="var(--fg)" stroke-width="2"/>
+<g stroke="var(--b)" stroke-width="3"><line x1="110" y1="52" x2="110" y2="68"/><line x1="160" y1="52" x2="160" y2="68"/><line x1="290" y1="52" x2="290" y2="68"/><line x1="350" y1="52" x2="350" y2="68"/><line x1="470" y1="52" x2="470" y2="68"/><line x1="520" y1="52" x2="520" y2="68"/></g>
+<text x="290" y="44" text-anchor="middle">touch（中の物のどれかがヒット）＝間隔はどれも T 未満</text>
+<rect x="520" y="72" width="240" height="12" fill="var(--r)" opacity=".35"/><text x="640" y="100" text-anchor="middle" fill="var(--r)">T だけ何も来ない → 追い出し</text>
+<path d="M20,100H760" stroke="var(--fg)" marker-end="url(#ar)"/><text x="390" y="116" text-anchor="middle">寿命 = 封じてから最後の touch まで ＋ T</text>
+</g></svg>
+<div class="cols">
+<div class="math">\[ \mathbb{E}[\text{寿命}]=\frac{e^{\Lambda T}-1}{\Lambda}=\int_0^T e^{\Lambda t}\,dt \]</div>
+<div>
+<p>数値で感じる（T = 1,800 のとき）：</p>
+<ul>
+<li>Λ = 1×10⁻³ → ΛT = 1.8 → 寿命 <b>5,050</b></li>
+<li>Λ = 3×10⁻³ → ΛT = 5.4 → 寿命 <b>73,470</b></li>
+</ul>
+<p>Λ が 3 倍で寿命は <b>14.5 倍</b>。</p>
+</div>
+</div>
+<details><summary>補足：導出の 3 行</summary>
+<p>touch の間隔は率 Λ の指数分布。1 回の間隔が T を超える確率は \(p=e^{-\Lambda T}\) なので、死ぬまでの「T 未満の間隔」の数は幾何分布で平均 \((1-p)/p=e^{\Lambda T}-1\)。T 未満の間隔 1 回の平均は \(1/\Lambda - Te^{-\Lambda T}/(1-e^{-\Lambda T})\)。掛けて最後の T を足すと \((e^{\Lambda T}-1)/\Lambda\)。詳しくは derivation の §3。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">9</span>
+<h2>Λ を物から組み立てる：同居の物は「挿入の流れ」から来る</h2>
+<p class="msg">Region の中身は、ミスして入ってきた物。熱い物はめったにミスしないので、同居の物は冷たい物に偏る。</p>
+<div class="cols">
+<div>
+<div class="math">\[ L_i=\int_0^T e^{\lambda_i t}\,M_k(t)^{\,n_k-1}\,dt,\qquad M_k(t)=\frac{\sum_{j\in k}N_j m_j e^{\lambda_j t}}{\sum_{j\in k}N_j m_j} \]</div>
+<ul>
+<li>\(e^{\lambda_i t}\)：自分の分。\(M_k(t)^{n_k-1}\)：同居の \(n_k-1\) 個の分。</li>
+<li>\(M_k\) は「挿入された物の λ」についての \(\mathbb{E}[e^{\lambda t}]\)。</li>
+<li>挿入の率 \(m_j=\lambda_j/(1+\lambda_jL_j)\) が L に依るので、L と m を交互に更新して解く（不動点）。</li>
+</ul>
+</div>
+<div class="tbl"><p><b>小物の Region（サイズ分類あり、T = 1,724）の場合</b></p><table>
+<tr><th></th><th class="n">S熱</th><th class="n">S冷</th></tr>
+<tr><td>λ</td><td class="n">7.50×10⁻⁵</td><td class="n">2.08×10⁻⁶</td></tr>
+<tr><td>ミスする割合 1/(1+λL)</td><td class="n">10.0%</td><td class="n">81.7%</td></tr>
+<tr><td>挿入の率 N m</td><td class="n">0.060</td><td class="n">0.122</td></tr>
+<tr><td>挿入に占める割合</td><td class="n">32.9%</td><td class="n">67.1%</td></tr>
+<tr><td>\(e^{\lambda T}\)</td><td class="n">1.138</td><td class="n">1.004</td></tr>
+</table>
+<div class="math">\[ M_S(T)=0.329(1.138)+0.671(1.004)=1.048 \]
+\[ M_S(T)^{127}=380\quad(\text{平均の λ で } e^{127\,\bar\lambda T}=303) \]</div>
+</div>
+</div>
+<details><summary>補足：平均場との差（イェンセン）</summary>
+<p>同居の物の λ を先に平均すると \(e^{127\bar\lambda T}\) になるが、指数は下に凸なので \(\mathbb{E}[e^{\lambda t}]\ge e^{\mathbb{E}[\lambda]t}\)。まれに熱い物が混ざると寿命が大きく伸びる分を、M はそのまま含む。ここでは 380 対 303 で 25% の差。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">10</span>
+<h2>容量の条件で T を決める（二重のループ）</h2>
+<p class="msg">内側：T を固定して L と m の不動点を解く。外側：占有が C になる T を二分法で探す。</p>
+<svg viewBox="0 0 900 130" role="img" aria-label="二重ループ">
+<g font-size="12">
+<rect x="20" y="20" width="220" height="90" rx="8" fill="var(--card)" stroke="var(--a)"/><text x="130" y="44" text-anchor="middle" font-weight="700">外側：T を決める</text><text x="130" y="66" text-anchor="middle">占有 &lt; C なら T を伸ばす</text><text x="130" y="86" text-anchor="middle">占有 &gt; C なら縮める</text>
+<rect x="300" y="20" width="580" height="90" rx="8" fill="var(--card)" stroke="var(--b)"/><text x="590" y="44" text-anchor="middle" font-weight="700">内側：T を固定して不動点</text>
+<text x="590" y="66" text-anchor="middle">L（初期値 = T）→ m = λ/(1+λL) → M(t) → L = ∫ e^(λt) M^(n−1) dt → …</text>
+<text x="590" y="88" text-anchor="middle">収束したら h = λL/(1+λL)、占有 = Σ N s h / φ</text>
+<path d="M240,65H298" stroke="var(--mut)" marker-end="url(#ar)"/>
+</g></svg>
+<div class="math">\[ \sum_g\frac{N_g s_g h_g}{\phi_g}=C,\qquad h_g=\frac{\lambda_gL_g}{1+\lambda_gL_g} \]</div>
+<ul>
+<li>この例題では内側は 15〜30 回で収束（log L の変化 &lt; 10⁻⁶）。</li>
+<li>Region LRU の T は「Region の最後の touch からの年齢」。Region は頻繁に touch されるので、T は 1,700〜1,800 と、物単位 LRU の T（16,125）よりずっと短い。<b>意味の違う量</b>なので直接は比べない。</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 6 章　サイズ分類が効く理由</div>
+<section class="slide"><span class="no">11</span>
+<h2>分類すると Λ が割れ、寿命が指数的に割れる</h2>
+<p class="msg">混在では、どの Region も Λ ≈ 1.9×10⁻³ にならされる。分けると小物の Region は 3.3×10⁻³、大物は 1.2×10⁻³。寿命は 55T 対 3.4T に開く。</p>
+<div class="cols" style="grid-template-columns:1fr">
+<svg viewBox="0 0 600 300" role="img" aria-label="ΛT と寿命の関係" style="max-width:600px;margin:0 auto">
+<g font-size="12">
+<line x1="60" y1="260" x2="560" y2="260" stroke="var(--mut)"/><line x1="60" y1="40" x2="60" y2="260" stroke="var(--mut)"/>
+<g class="mut" fill="var(--mut)">
+<text x="60" y="276" text-anchor="middle">0</text><text x="143.3" y="276" text-anchor="middle">1</text><text x="226.7" y="276" text-anchor="middle">2</text><text x="310" y="276" text-anchor="middle">3</text><text x="393.3" y="276" text-anchor="middle">4</text><text x="476.7" y="276" text-anchor="middle">5</text><text x="560" y="276" text-anchor="middle">6</text>
+<text x="310" y="294" text-anchor="middle">ΛT（Region の touch の率 × T）</text>
+<text x="54" y="264" text-anchor="end">1</text><text x="54" y="154" text-anchor="end">10</text><text x="54" y="44" text-anchor="end">100</text>
+<text x="14" y="150" transform="rotate(-90 14 150)" text-anchor="middle">寿命 ÷ T（対数）</text>
+</g>
+<line x1="60" y1="150" x2="560" y2="150" stroke="var(--line)" stroke-dasharray="3 3"/><line x1="60" y1="40" x2="560" y2="40" stroke="var(--line)" stroke-dasharray="3 3"/>
+<polyline fill="none" stroke="var(--fg)" stroke-width="2" points="60,260 101.7,247.6 143.3,234.1 185,218.4 226.7,204.5 268.3,188.4 310,171.6 351.7,154.9 393.3,136 435,117.4 476.7,98.4 518.3,78.9 560,59.1"/>
+<circle cx="235" cy="201.3" r="6" fill="var(--lh)"/><text x="243" y="218">大物 分類（2.10, 3.4）</text>
+<circle cx="335" cy="161.1" r="6" fill="var(--mut)"/><circle cx="360.8" cy="150.2" r="6" fill="var(--mut)"/><text x="300" y="132" text-anchor="middle">混在（3.3〜3.6, 8〜10）</text>
+<circle cx="540" cy="68.6" r="6" fill="var(--sh)"/><text x="530" y="58" text-anchor="end">小物 分類（5.76, 55）</text>
+</g></svg>
+<div class="tbl"><table>
+<tr><th>Region の種類</th><th class="n">物の数</th><th class="n">Λ</th><th class="n">ΛT</th><th class="n">寿命（平均場）</th></tr>
+<tr><td>混在（小物から始まる）</td><td class="n">31 + 5.7</td><td class="n">1.99×10⁻³</td><td class="n">3.61</td><td class="n">18,100</td></tr>
+<tr><td>混在（大物から始まる）</td><td class="n">26.6 + 6.0</td><td class="n">1.82×10⁻³</td><td class="n">3.30</td><td class="n">14,400</td></tr>
+<tr><td>分類：小物</td><td class="n">128</td><td class="n">3.34×10⁻³</td><td class="n">5.76</td><td class="n"><b>94,600</b></td></tr>
+<tr><td>分類：大物</td><td class="n">8</td><td class="n">1.22×10⁻³</td><td class="n">2.10</td><td class="n"><b>5,890</b></td></tr>
+</table>
+<div class="math">\[ \Lambda_k\approx n_k\,\mathbb{E}_{\text{ins}}[\lambda]=R\cdot\mathbb{E}_{\text{ins}}\!\left[\frac{\lambda}{s}\right] \]</div>
+<p>Λ の比は 2.7 倍なのに、寿命の比は <b>16 倍</b>。</p></div>
+</div>
+<details><summary>補足：表の数字の出し方</summary>
+<p>Λ は「物の数 × 挿入された物の λ の平均」。小物の分類では 128 × 2.61×10⁻⁵ = 3.34×10⁻³、大物は 8 × 1.52×10⁻⁴ = 1.22×10⁻³。寿命は \((e^{\Lambda T}-1)/\Lambda\)（平均場）。モデル本体はスライド 9 の M を使うので、S熱の滞在は 119,700、L熱は 7,140 と少し長い。グラフの縦軸は寿命 ÷ T = \((e^{x}-1)/x\)（x = ΛT）で、どの Region も同じ 1 本の曲線に乗る。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">12</span>
+<h2>寿命が容量の配り方を決める</h2>
+<p class="msg">Region が生まれる率は書き込み量で決まり、容量は「生まれる率 × 寿命」。寿命の長い小物の Region が容量を取る：小物の容量は 27% → 62%。</p>
+<svg viewBox="0 0 900 230" role="img" aria-label="方式ごとの容量の内訳">
+<g font-size="12">
+<text x="250" y="16" class="mut" fill="var(--mut)">容量 32,768 単位の内訳</text>
+<g><text x="240" y="44" text-anchor="end">物単位 LRU</text><rect x="250" y="32" width="102.8" height="18" fill="var(--sh)"/><rect x="352.8" y="32" width="43.6" height="18" fill="var(--sc)"/><rect x="396.4" y="32" width="230.2" height="18" fill="var(--lh)"/><rect x="626.6" y="32" width="223.4" height="18" fill="var(--lc)"/><text x="856" y="46" font-size="11">24%</text><text x="856" y="16" font-size="11" fill="var(--mut)">小物</text></g>
+<g><text x="240" y="76" text-anchor="end">物単位・最適な分割</text><rect x="250" y="64" width="144.5" height="18" fill="var(--sh)"/><rect x="394.5" y="64" width="148.1" height="18" fill="var(--sc)"/><rect x="542.6" y="64" width="199.2" height="18" fill="var(--lh)"/><rect x="741.8" y="64" width="108.2" height="18" fill="var(--lc)"/><text x="856" y="78" font-size="11">49%</text></g>
+<g><text x="240" y="108" text-anchor="end">Region FIFO（分類）</text><rect x="250" y="96" width="88.7" height="18" fill="var(--sh)"/><rect x="338.7" y="96" width="54" height="18" fill="var(--sc)"/><rect x="392.7" y="96" width="195.9" height="18" fill="var(--lh)"/><rect x="588.6" y="96" width="261.4" height="18" fill="var(--lc)"/><text x="856" y="110" font-size="11">24%</text></g>
+<g><text x="240" y="140" text-anchor="end">Region LRU（混在）</text><rect x="250" y="128" width="101.1" height="18" fill="var(--sh)"/><rect x="351.1" y="128" width="63.6" height="18" fill="var(--sc)"/><rect x="414.7" y="128" width="209.2" height="18" fill="var(--lh)"/><rect x="623.9" y="128" width="226.1" height="18" fill="var(--lc)"/><text x="856" y="142" font-size="11">27%</text></g>
+<g><text x="240" y="172" text-anchor="end">Region LRU（サイズ分類）</text><rect x="250" y="160" width="131.8" height="18" fill="var(--sh)"/><rect x="381.8" y="160" width="241.7" height="18" fill="var(--sc)"/><rect x="623.5" y="160" width="150.2" height="18" fill="var(--lh)"/><rect x="773.7" y="160" width="76.3" height="18" fill="var(--lc)"/><text x="856" y="174" font-size="11">62%</text></g>
+<g transform="translate(250,200)"><rect width="12" height="12" fill="var(--sh)"/><text x="17" y="11">S熱</text><rect x="70" width="12" height="12" fill="var(--sc)"/><text x="87" y="11">S冷</text><rect x="140" width="12" height="12" fill="var(--lh)"/><text x="157" y="11">L熱</text><rect x="210" width="12" height="12" fill="var(--lc)"/><text x="227" y="11">L冷</text></g>
+</g></svg>
+<ul>
+<li>Region LRU の分類は、物単位の最適（49%）を<b>通り越して</b>小物に寄せる（62%）。寿命が Λ に指数で効くため、ブレーキが弱い。</li>
+<li>行き過ぎを止めるのは負の帰還：小物が残るほど小物のミスが減り、挿入された物の λ（\(\mathbb{E}_{\text{ins}}[\lambda]\)）が下がって Λ が下がる。</li>
+<li>Region FIFO は寿命が全員 T なので、配り方は物単位 LRU とほぼ同じ（24%）。</li>
+</ul>
+</section>
+
+<section class="slide"><span class="no">13</span>
+<h2>結果：OHR は大きく上がり、BHR は下がる</h2>
+<p class="msg">Region LRU のサイズ分類で OHR 57.7% → 69.7%（モデル、定常）。BHR は 67.6% → 55.7%。実測では立ち上がりの効果が加わって 73.7% / 62.9%（第 7 章）。</p>
+<div class="tbl"><table>
+<tr><th>方式</th><th class="n">モデル OHR</th><th class="n">モデル BHR</th><th class="n">実測 OHR</th><th class="n">実測 BHR</th><th>OHR（バーはモデル）</th></tr>
+<tr><td>物単位 LRU</td><td class="n">62.8%</td><td class="n">76.9%</td><td class="n">62.7%</td><td class="n">76.9%</td><td><span class="bar" style="width:126px;background:var(--a)"></span></td></tr>
+<tr><td>物単位・最適な分割</td><td class="n">78.1%</td><td class="n">70.9%</td><td class="n mut">—</td><td class="n mut">—</td><td><span class="bar" style="width:156px;background:var(--a)"></span></td></tr>
+<tr><td>Region FIFO 混在</td><td class="n">52.8%</td><td class="n">65.0%</td><td class="n">52.7%</td><td class="n">65.0%</td><td><span class="bar" style="width:106px;background:var(--b)"></span></td></tr>
+<tr><td>Region FIFO 分類</td><td class="n">54.3%</td><td class="n">66.2%</td><td class="n">54.2%</td><td class="n">66.1%</td><td><span class="bar" style="width:109px;background:var(--b)"></span></td></tr>
+<tr><td>Region LRU 混在</td><td class="n">57.7%</td><td class="n">67.6%</td><td class="n">57.7%</td><td class="n">67.6%</td><td><span class="bar" style="width:115px;background:var(--b)"></span></td></tr>
+<tr><td>Region LRU 分類（定常）</td><td class="n">69.7%</td><td class="n">55.7%</td><td class="n" rowspan="2">73.7%</td><td class="n" rowspan="2">62.9%</td><td><span class="bar" style="width:139px;background:var(--g)"></span></td></tr>
+<tr><td>　＋立ち上がりの隔離</td><td class="n">73.8%</td><td class="n">63.4%</td><td><span class="bar" style="width:148px;background:var(--g)"></span></td></tr>
+</table></div>
+<ul>
+<li>モデルと実測の差はどの行も 0.5pt 以内（立ち上がりの補正を入れた行で比べる）。</li>
+<li>BHR が下がるのは、容量の 40% を冷たい小物（S冷）が取るから（次のスライド）。</li>
+</ul>
+<details><summary>補足：実測の条件</summary>
+<p>libCacheSim の RegionFlash、DRAM なし、全受け入れ、3,000 万要求のうち先頭 750 万で温める。分類は <code>hint=fixed:tau=16384</code>（4 KiB と 64 KiB の間）、混在は <code>hint=none</code>。物単位・最適な分割は以前の検証で 0.3pt 以内に合っているので、ここでは測っていない。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">14</span>
+<h2>サイズだけで分けると「便乗」が起きる</h2>
+<p class="msg">冷たい小物は、熱い小物と同じ Region に入るので一緒に延命される。要求の 2.8% しか当たらないのに、容量の 40% を取る。</p>
+<div class="cols">
+<div class="tbl"><table>
+<tr><th>Region LRU 分類（定常）</th><th class="n">容量</th><th class="n">h</th><th class="n">ヒット（全要求に占める）</th></tr>
+<tr><td>S熱</td><td class="n">22.0%</td><td class="n">0.900</td><td class="n">54.0%</td></tr>
+<tr><td>S冷</td><td class="n"><b class="r">40.3%</b></td><td class="n">0.183</td><td class="n"><b class="r">2.8%</b></td></tr>
+<tr><td>L熱</td><td class="n">25.0%</td><td class="n">0.641</td><td class="n">12.8%</td></tr>
+<tr><td>L冷</td><td class="n">12.7%</td><td class="n">0.036</td><td class="n">0.2%</td></tr>
+</table></div>
+<div>
+<p><b>次の一手（モデルのみ、未実測）</b>：サイズに加えて熱い/冷たいでも分ける（4 分類）と、便乗が消える。</p>
+<ul>
+<li>モデル：OHR <b>81.2%</b>、BHR <b>81.3%</b></li>
+<li>参考：知っている λ で λ/s の順に詰める上限（静的ナップサック）は 82.5% / 80.5%</li>
+</ul>
+<p class="mut">ただし、この 4 分類は人気を前もって知っている理想の分類。書き込み時に分かる情報でどこまで近づけるかが、サイズ＋頻度分類の研究の本題になる。</p>
+</div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 7 章　補正と検証</div>
+<section class="slide"><span class="no">15</span>
+<h2>立ち上がりの隔離：最初に詰まった熱い Region は死なない</h2>
+<p class="msg">空のキャッシュでは最初の要求が全部ミスし、熱い物ほど先に来るので、初期の Region に S熱 が固まる。寿命が観測期間を超えるので事実上不死になる。</p>
+<div class="cols">
+<ul>
+<li>S熱 だけの Region：Λ = 128 × 7.5×10⁻⁵ = 9.6×10⁻³、ΛT ≈ 17〜21（T = 1,724〜2,163）。寿命 \((e^{17}-1)/\Lambda\) でも 10⁹ 要求を超え、3,000 万要求の観測では消えない。</li>
+<li>モデル（<code>synth_model -H 3e7</code>）：256 個のうち <b>59 個</b>の Region が不死。その物は在籍率 1、残りの容量で定常の式を解き直す。</li>
+<li>結果：OHR 69.7% → <b>73.8%</b>、BHR 55.7% → <b>63.4%</b>（実測 73.7% / 62.9%）。</li>
+</ul>
+<div>
+<p>定常の式では、熱い物と冷たい物は挿入の流れの割合で混ざる（S熱 33%）。立ち上がりでは熱い物だけの Region ができるので、便乗が減り、成績が良くなる。</p>
+<p class="mut">混在の Region LRU では不死の Region は 0 個（大物と冷たい小物が混ざって Λ が足りない）。封じるまでの待ち U の補正は、この例では 0.01pt 以下。</p>
+</div>
+</div>
+<details><summary>補足：なぜ定常の式だけでは足りないか</summary>
+<p>定常の式は「同居の物は挿入の流れから独立に引く」（仮定 A6）。立ち上がりだけはこの仮定が成り立たず、初回の要求の順に並ぶ。人気が変わる負荷（docs/synth_size_class.html §6）では、この隔離は消える。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">16</span>
+<h2>まとめ：1 行ずつの筋</h2>
+<ol>
+<li><b>物単位 LRU</b>：追い出し年齢 T を一定とみなし、\(h=1-e^{-\lambda T}\)。例題で OHR 62.8%（実測 62.7%）。</li>
+<li><b>物単位で分類</b>：限界ヒット/バイトをそろえると OHR 78.1%。これが分類の効果の基準。</li>
+<li><b>Region キャッシュ</b>：物から見ると滞在 L の FIFO なので \(h=\lambda L/(1+\lambda L)\)。</li>
+<li><b>Region FIFO</b>：L = T で全員同じ。分類しても詰め残しの分（+1.5pt）しか変わらない。</li>
+<li><b>Region LRU</b>：寿命 \((e^{\Lambda T}-1)/\Lambda\)。Λ は同居の物の λ の和で、挿入の流れから決まる（不動点）。</li>
+<li><b>サイズ分類</b>：Λ が小物 3.3×10⁻³ ／ 大物 1.2×10⁻³ に割れ、寿命は 16 倍に開く。小物の容量が 27% → 62%、OHR +12pt（実測 +16pt）、BHR は下がる。</li>
+<li><b>限界と次の一手</b>：サイズだけでは冷たい小物が便乗して容量の 40% を取る。頻度でも分ければ上限近く（モデル 81%）まで届く。</li>
+</ol>
+<details><summary>補足：再現の手順</summary>
+<p><code>python3 tools/synth/toy_walk.py &gt; tools/synth/results/toy_walk.json</code>（全ステップの途中の値）。
+モデル本体：<code>synth_model -R 512K -f 0.157538461538 -g 0,0,1,1 [-H 3e7] 4K:8000:0.60:0 4K:72000:0.15:0 64K:800:0.20:0 64K:7200:0.05:0</code>。
+実測：上のトレースで <code>cachesim toy.bin oracleGeneral RegionFlash 134217728 -e "dram-size=0,region-size=524288,region-evict=lru,warmup-req=7500000,hint=fixed:tau=16384,…"</code>。</p>
+</details>
+</section>
+
+<!-- ============================================================ -->
+<div class="chap">第 8 章　3 サイズ版：何をどう分けても、冷たい物が容量の半分近くを取る</div>
+<section class="slide"><span class="no">17</span>
+<h2>3 サイズ版の例題と結果</h2>
+<p class="msg">中サイズ（16 KiB）を足して 6 グループにした。3 つに分けると OHR は最大（65.6%）になるが、BHR は最低（56.9%）。モデルと実測の差は 0.5pt 以内。</p>
+<div class="cols">
+<div class="tbl"><table>
+<tr><th>グループ</th><th class="n">大きさ</th><th class="n">物の数</th><th class="n">要求の割合</th><th class="n">λ/s</th></tr>
+<tr><td><span class="key" style="background:var(--sh);margin-left:0"></span>S熱</td><td class="n">4 KiB（1）</td><td class="n">8,000</td><td class="n">40%</td><td class="n">5.0×10⁻⁵</td></tr>
+<tr><td><span class="key" style="background:var(--sc);margin-left:0"></span>S冷</td><td class="n">4 KiB（1）</td><td class="n">72,000</td><td class="n">10%</td><td class="n">1.4×10⁻⁶</td></tr>
+<tr><td><span class="key" style="background:var(--mh);margin-left:0"></span>M熱</td><td class="n">16 KiB（4）</td><td class="n">2,000</td><td class="n">24%</td><td class="n">3.0×10⁻⁵</td></tr>
+<tr><td><span class="key" style="background:var(--mc);margin-left:0"></span>M冷</td><td class="n">16 KiB（4）</td><td class="n">18,000</td><td class="n">6%</td><td class="n">8.3×10⁻⁷</td></tr>
+<tr><td><span class="key" style="background:var(--lh);margin-left:0"></span>L熱</td><td class="n">64 KiB（16）</td><td class="n">800</td><td class="n">16%</td><td class="n">1.25×10⁻⁵</td></tr>
+<tr><td><span class="key" style="background:var(--lc);margin-left:0"></span>L冷</td><td class="n">64 KiB（16）</td><td class="n">7,200</td><td class="n">4%</td><td class="n">3.5×10⁻⁷</td></tr>
+</table>
+<p class="mut">要求は 5 : 3 : 2（これまでの W5 と同じ比）。どのサイズも「物の 10% が要求の 80%」。容量 160 MiB（ユニーク量 1,125 MiB の 14.2%）、Region 512 KiB × 320 個。</p></div>
+<div class="tbl"><table>
+<tr><th>方式（Region LRU）</th><th class="n">モデル OHR / BHR</th><th class="n">実測 OHR / BHR</th></tr>
+<tr><td>物単位 LRU（参考）</td><td class="n">61.3 / 74.4</td><td class="n">61.2 / 74.4</td></tr>
+<tr><td>混在</td><td class="n">55.8 / 64.8</td><td class="n">56.0 / 64.9</td></tr>
+<tr><td>S ｜ M+L</td><td class="n">63.2 / 59.0</td><td class="n">63.7 / 59.5</td></tr>
+<tr><td>S+M ｜ L</td><td class="n">63.1 / 58.1</td><td class="n">62.9 / 57.9</td></tr>
+<tr><td><b>S ｜ M ｜ L</b></td><td class="n"><b>65.6 / 56.9</b></td><td class="n"><b>65.8 / 57.1</b></td></tr>
+<tr><td class="mut">サイズ×熱冷の 6 分類（理想）</td><td class="n mut">80.8 / 81.0</td><td class="n mut">未実測</td></tr>
+</table>
+<p class="mut">モデルは <code>synth_model -H 3e7</code>（立ち上がりの補正込み。この例では不死の Region は 0 個）。実測は 3,000 万要求、<code>hint=fixed:tau=8192/32768</code> など。</p></div>
+</div>
+</section>
+
+<section class="slide"><span class="no">18</span>
+<h2>容量の内訳：分け方を変えると、冷たい物の「居場所」が移るだけ</h2>
+<p class="msg">冷たい物（淡い色）の合計はどの分け方でも 46〜48%。分類が決めるのは「どのサイズの冷たい物が便乗するか」で、その分の容量は L熱 から削られる。</p>
+<svg viewBox="0 0 900 270" role="img" aria-label="3 サイズ版の容量の内訳">
+<g font-size="12">
+<text x="250" y="16" fill="var(--mut)">容量 40,960 単位の内訳</text><text x="856" y="16" font-size="11" fill="var(--mut)">冷 / L熱</text>
+<g><text x="240" y="44" text-anchor="end">物単位 LRU</text><rect x="250" y="32" width="69.1" height="18" fill="var(--sh)"/><rect x="319.1" y="32" width="25.7" height="18" fill="var(--sc)"/><rect x="344.8" y="32" width="103.3" height="18" fill="var(--mh)"/><rect x="448.1" y="32" width="60.8" height="18" fill="var(--mc)"/><rect x="508.9" y="32" width="182.2" height="18" fill="var(--lh)"/><rect x="691.1" y="32" width="158.9" height="18" fill="var(--lc)"/><text x="856" y="46" font-size="11">41 / 30%</text></g>
+<g><text x="240" y="76" text-anchor="end">混在</text><rect x="250" y="64" width="69.6" height="18" fill="var(--sh)"/><rect x="319.6" y="64" width="36.8" height="18" fill="var(--sc)"/><rect x="356.4" y="64" width="93.8" height="18" fill="var(--mh)"/><rect x="450.2" y="64" width="77.8" height="18" fill="var(--mc)"/><rect x="528" y="64" width="162.1" height="18" fill="var(--lh)"/><rect x="690.1" y="64" width="159.9" height="18" fill="var(--lc)"/><text x="856" y="78" font-size="11">46 / 27%</text></g>
+<g><text x="240" y="108" text-anchor="end">S ｜ M+L</text><rect x="250" y="96" width="100.6" height="18" fill="var(--sh)"/><rect x="350.6" y="96" width="140.2" height="18" fill="var(--sc)"/><rect x="490.8" y="96" width="77.8" height="18" fill="var(--mh)"/><rect x="568.6" y="96" width="43.6" height="18" fill="var(--mc)"/><rect x="612.2" y="96" width="141.8" height="18" fill="var(--lh)"/><rect x="754" y="96" width="96" height="18" fill="var(--lc)"/><text x="856" y="110" font-size="11">47 / 24%</text></g>
+<g><text x="240" y="140" text-anchor="end">S+M ｜ L</text><rect x="250" y="128" width="88.6" height="18" fill="var(--sh)"/><rect x="338.6" y="128" width="75.8" height="18" fill="var(--sc)"/><rect x="414.4" y="128" width="104.3" height="18" fill="var(--mh)"/><rect x="518.7" y="128" width="151" height="18" fill="var(--mc)"/><rect x="669.7" y="128" width="119.8" height="18" fill="var(--lh)"/><rect x="789.5" y="128" width="60.5" height="18" fill="var(--lc)"/><text x="856" y="142" font-size="11">48 / 20%</text></g>
+<g><text x="240" y="172" text-anchor="end">S ｜ M ｜ L</text><rect x="250" y="160" width="100.4" height="18" fill="var(--sh)"/><rect x="350.4" y="160" width="139.4" height="18" fill="var(--sc)"/><rect x="489.8" y="160" width="93.9" height="18" fill="var(--mh)"/><rect x="583.7" y="160" width="89" height="18" fill="var(--mc)"/><rect x="672.7" y="160" width="118.7" height="18" fill="var(--lh)"/><rect x="791.4" y="160" width="58.6" height="18" fill="var(--lc)"/><text x="856" y="174" font-size="11">48 / 20%</text></g>
+<g><text x="240" y="204" text-anchor="end">6 分類（理想）</text><rect x="250" y="192" width="117.2" height="18" fill="var(--sh)"/><rect x="367.2" y="192" width="31.4" height="18" fill="var(--sc)"/><rect x="398.6" y="192" width="117.2" height="18" fill="var(--mh)"/><rect x="515.8" y="192" width="50.2" height="18" fill="var(--mc)"/><rect x="566" y="192" width="187.5" height="18" fill="var(--lh)"/><rect x="753.5" y="192" width="96.5" height="18" fill="var(--lc)"/><text x="856" y="206" font-size="11">30 / 31%</text></g>
+<g transform="translate(250,232)"><rect width="12" height="12" fill="var(--sh)"/><text x="17" y="11">S熱</text><rect x="62" width="12" height="12" fill="var(--sc)"/><text x="79" y="11">S冷</text><rect x="124" width="12" height="12" fill="var(--mh)"/><text x="141" y="11">M熱</text><rect x="186" width="12" height="12" fill="var(--mc)"/><text x="203" y="11">M冷</text><rect x="248" width="12" height="12" fill="var(--lh)"/><text x="265" y="11">L熱</text><rect x="310" width="12" height="12" fill="var(--lc)"/><text x="327" y="11">L冷</text></g>
+</g></svg>
+<ul>
+<li>混在では便乗するのは主に L冷（27%）。S を分けると S冷 が 23% に、S+M を一緒にすると M冷 が 25% に増え、その分 L冷 と L熱 が減る。</li>
+<li>2 サイズ版でも同じ：冷たい物の合計は混在 48%、分類 53%（スライド 12）。</li>
+</ul>
+</section>
+
+<section class="slide"><span class="no">19</span>
+<h2>BHR を決めているのは「L熱 に残る容量」</h2>
+<p class="msg">バイトで数えた要求の 52% が L熱。BHR は L熱 の容量に沿って動く。冷たい小物を減らしても、空いた容量が L熱 に回らなければ BHR は戻らない。</p>
+<div class="cols">
+<div class="tbl"><table>
+<tr><th>方式</th><th class="n">冷たい物の容量</th><th class="n">L熱 の容量</th><th class="n">L熱 の h</th><th class="n">BHR</th></tr>
+<tr><td>6 分類（理想）</td><td class="n">30%</td><td class="n">31%</td><td class="n">1.00</td><td class="n">81.0%</td></tr>
+<tr><td>混在</td><td class="n">46%</td><td class="n">27%</td><td class="n">0.83</td><td class="n">64.8%</td></tr>
+<tr><td>S ｜ M+L</td><td class="n">47%</td><td class="n">24%</td><td class="n">0.73</td><td class="n">59.0%</td></tr>
+<tr><td>S+M ｜ L</td><td class="n">48%</td><td class="n">20%</td><td class="n">0.64</td><td class="n">58.1%</td></tr>
+<tr><td>S ｜ M ｜ L</td><td class="n">48%</td><td class="n">20%</td><td class="n">0.63</td><td class="n">56.9%</td></tr>
+</table>
+<p class="mut">BHR の内訳（S｜M｜L）：L熱 33.1pt、M熱 15.7pt、S熱 7.0pt、冷たい物 3 グループ合わせて 1.1pt。</p></div>
+<div>
+<p><b>読み取れること</b></p>
+<ul>
+<li>サイズ分類の BHR は「小サイズ帯の冷たい物がどれだけ容量を取るか」で決まる。ただし正確には、<b>冷たい物の合計（約 47%）はサイズの分け方では減らない</b>。分け方は、どのサイズの冷たい物が残るかを入れ替えるだけ。</li>
+<li>冷たい物は、熱い物と同じ Region に入って一緒に延命される。熱い物と冷たい物が同じ挿入の流れから Region に詰まる限り、この便乗は避けられない。</li>
+<li>冷たい物の合計を減らせるのは、熱い/冷たいで分ける方法だけ（6 分類で 30%、BHR 81%）。サイズで分ける数を増やすほど、OHR は上がり BHR は下がる。</li>
+</ul>
+</div>
+</div>
+<details><summary>補足：数字の出どころ</summary>
+<p>容量と h は <code>synth_model -S 2000 -R 512K -f 0.142222 -g &lt;分け方&gt; -H 3e7 4K:8000:0.40:0 4K:72000:0.10:0 16K:2000:0.24:0 16K:18000:0.06:0 64K:800:0.16:0 64K:7200:0.04:0</code> の Ck と hk。BHR の内訳は \(p_g s_g h_g/\sum p s\)（\(\sum p s = 4.9\)）。L熱 の分は 16 × 0.16 × 0.633 ÷ 4.9 = 0.331。</p>
+</details>
+</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合成負荷とキャッシュのモデル入門</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.8 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:900px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:19px;margin:44px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}h3{font-size:16px;margin:22px 0 6px}
+.sub{color:var(--mut);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
+.ok{border-left:4px solid var(--g)}.warn{border-left:4px solid var(--b)}
+.eg{background:var(--card);border:1px dashed var(--line);border-radius:8px;padding:10px 14px;margin:10px 0}
+.eg b:first-child{color:var(--a)}
+table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 7px;text-align:right;vertical-align:top}th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:600}
+code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+.f{display:block;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin:8px 0;font-family:ui-monospace,Consolas,monospace;white-space:pre-wrap;font-size:14px}
+svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-size:12px}
+.tbl{overflow-x:auto}
+.sym td:first-child{font-family:ui-monospace,Consolas,monospace;white-space:nowrap}.sym td,.sym th{text-align:left}
+#gl td,#gl+div td,#gl+div th{text-align:left}
+.tbl td:nth-child(3){text-align:left}
+.toc a{color:var(--a);text-decoration:none}
+</style>
+</head>
+<body>
+<main>
+<h1>合成負荷とキャッシュのモデル入門</h1>
+<p class="sub">2026-11-05。前提知識ゼロの人向け。「サイズ分類別キャッシュ」の研究で使った合成ワークロードの中身と、その結果を説明する式を、たとえ話と図で順に説明する。詳しい結果は <code>docs/synth_size_class.html</code>、数値の出典は <code>tools/synth/results/</code>（ワークロードの諸元は <code>workload_stats.json</code>）。</p>
+
+<div class="card toc"><b>目次</b><br>
+<a href="#s1">1. キャッシュとは</a>　<a href="#s2">2. 成績の付け方：OHR と BHR</a>　<a href="#s3">3. 合成ワークロードの作り方</a>　<a href="#s4">4. ワークロードの諸元（数値）</a>　<a href="#s5">5. キャッシュの設定</a><br>
+<a href="#m1">6. 式①価値</a>　<a href="#m2">7. 式② Che 近似</a>　<a href="#m3">8. 式③サイズで分割</a>　<a href="#m4">9. 式④ Region FIFO</a>　<a href="#m5">10. 式⑤ Region LRU</a>　<a href="#m6">11. 式⑥立ち上がりの隔離</a>　<a href="#m7">12. 式⑦老化</a><br>
+<a href="#res">13. 結果のまとめ</a>　<a href="#gl">14. 用語集</a></div>
+
+<h2 id="s1">1. キャッシュとは</h2>
+<p>キャッシュは「よく使う物を、近くの小さな置き場に置いておく仕組み」である。図書館でたとえると、書庫（遠いが全部ある）と、机の上（近いが少ししか置けない）の関係に当たる。</p>
+<svg viewBox="0 0 860 210" role="img" aria-label="キャッシュのたとえ">
+ <rect x="10" y="20" width="250" height="170" rx="10" fill="var(--card)" stroke="var(--line)"/>
+ <text x="24" y="44" font-weight="700">書庫（バックエンド）</text><text x="24" y="64" fill="var(--mut)">全部ある・取りに行くと遅い</text>
+ <g fill="var(--a)" fill-opacity=".35"><rect x="24" y="80" width="14" height="90"/><rect x="42" y="80" width="14" height="90"/><rect x="60" y="80" width="14" height="90"/><rect x="78" y="80" width="14" height="90"/><rect x="96" y="80" width="14" height="90"/><rect x="114" y="80" width="14" height="90"/><rect x="132" y="80" width="14" height="90"/><rect x="150" y="80" width="14" height="90"/><rect x="168" y="80" width="14" height="90"/><rect x="186" y="80" width="14" height="90"/><rect x="204" y="80" width="14" height="90"/><rect x="222" y="80" width="14" height="90"/></g>
+ <rect x="330" y="60" width="200" height="110" rx="10" fill="var(--card)" stroke="var(--g)"/>
+ <text x="344" y="84" font-weight="700">机の上（キャッシュ）</text><text x="344" y="104" fill="var(--mut)">少ししか置けない・すぐ取れる</text>
+ <g fill="var(--g)" fill-opacity=".5"><rect x="344" y="118" width="14" height="40"/><rect x="362" y="118" width="14" height="40"/><rect x="380" y="118" width="14" height="40"/></g>
+ <circle cx="700" cy="110" r="34" fill="var(--b)" fill-opacity=".25" stroke="var(--b)"/><text x="700" y="115" text-anchor="middle">利用者</text>
+ <line x1="530" y1="100" x2="664" y2="100" stroke="var(--g)" stroke-width="2"/><text x="560" y="92" fill="var(--g)">ヒット：机にあった</text>
+ <line x1="260" y1="40" x2="690" y2="78" stroke="var(--r)" stroke-width="2" stroke-dasharray="5 4"/><text x="420" y="44" fill="var(--r)">ミス：書庫まで取りに行く</text>
+</svg>
+<ul>
+<li><b>要求（リクエスト）</b>：利用者が「この本（物）がほしい」と言うこと。</li>
+<li><b>ヒット</b>：机の上（キャッシュ）にあった。速い。<b>ミス</b>：なかったので書庫から持ってくる。遅く、書庫にも負担がかかる。</li>
+<li>机に置ける量は決まっているので、何を残して何を片付けるか（<b>追い出し</b>）が腕の見せ所になる。</li>
+<li>ここで扱う「物」は、写真や動画の断片のようなデータで、<b>大きさ（サイズ）がまちまち</b>である。小さい物（例 36 KiB）と大きい物（例 1 MiB）が混ざっている。</li>
+</ul>
+
+<h2 id="s2">2. 成績の付け方：OHR と BHR</h2>
+<p>キャッシュの成績は 2 通りに付けられる。どちらを重く見るかで「良いキャッシュ」が変わる。</p>
+<div class="tbl"><table><tr><th>指標</th><th>数え方</th><th>たとえ</th><th>効く場面</th></tr>
+<tr><td><b>OHR</b>（物のヒット率）</td><td>ヒットした要求の数 ÷ 全要求の数</td><td>「何回、書庫に行かずに済んだか」</td><td>書庫に行く<b>回数</b>が高くつく（待ち時間・1 回ごとの手数料）</td></tr>
+<tr><td><b>BHR</b>（バイトのヒット率）</td><td>ヒットした要求のバイト数 ÷ 全要求のバイト数</td><td>「運ばずに済んだ<b>重さ</b>はどれだけか」</td><td>運ぶ<b>量</b>が高くつく（回線の帯域・転送料金）</td></tr></table></div>
+<p>OMR = 1 − OHR、BMR = 1 − BHR はそれぞれミスの割合。小さい物をたくさん残すと OHR は上がるが、大きい物を書庫から運ぶ量が増えて BHR は下がりやすい。<b>この 2 つは引っ張り合う</b>。これが全体を通しての大事な点である。</p>
+
+<h2 id="s3">3. 合成ワークロードの作り方</h2>
+<p>実際の利用記録（トレース）は複雑すぎて、何が効いたのかを切り分けにくい。そこで、<b>サイズが 2〜3 種類しかない、作り物の要求の列</b>を生成した（<code>tools/synth/synth_gen.c</code>）。つまみは 3 つだけである。</p>
+<ol>
+<li><b>サイズの種類と値</b>：例 36 KiB と 1 MiB の 2 種類。</li>
+<li><b>種類ごとの物の数と、要求の割合</b>：例 小物 20 万個に要求の 75%、大物 2 万個に 25%（3:1）。</li>
+<li><b>種類ごとの人気の偏り（Zipf の傾き α）</b>。</li>
+</ol>
+<h3>Zipf（ジップ）分布とは</h3>
+<p>「1 番人気の物は 2 番人気の物の 2^α 倍、3 番人気の 3^α 倍よく要求される」という人気の偏りの型。順位 r の物の要求率は <code>r^(−α)</code> に比例する。α が大きいほど、一部の人気者に要求が集中する。</p>
+<svg viewBox="0 0 860 230" role="img" aria-label="Zipf の形">
+ <rect x="60" y="15" width="380" height="180" fill="none" stroke="var(--line)"/>
+ <polyline fill="none" stroke="var(--a)" stroke-width="2.5" points="60,25 79,103 98,127 136,148 174,158 250,170 326,176 440,181"/>
+ <polyline fill="none" stroke="var(--b)" stroke-width="2.5" points="60,25 79,121 98,148 136,166 174,173 250,180 326,183 440,186"/>
+ <polyline fill="none" stroke="var(--g)" stroke-width="2.5" points="60,25 79,79 98,100 136,122 174,135 250,150 326,158 440,166"/>
+ <text x="250" y="212" text-anchor="middle">人気の順位 →</text><text x="30" y="110" transform="rotate(-90 30 110)" text-anchor="middle">要求率</text>
+ <text x="455" y="60" fill="var(--b)">α = 1.1（急）：上位に集中</text><text x="455" y="85" fill="var(--a)">α = 0.9（標準）</text><text x="455" y="110" fill="var(--g)">α = 0.6（平ら）：広く薄く</text>
+ <text x="455" y="150" fill="var(--mut)">W1 の小物（α=0.9）では、</text><text x="455" y="170" fill="var(--mut)">上位 1% の物が要求の 48.9%、</text><text x="455" y="190" fill="var(--mut)">上位 10% が 71.5% を受ける</text>
+</svg>
+<p>要求は 1 回ずつ独立にくじ引きで作る（<b>IRM</b>：独立参照モデル）。まず要求の割合に従って「小物か大物か」を引き、次にその種類の中で Zipf に従って「何番目の物か」を引く。これを <b>2,000 万回</b>繰り返す。最初の <b>500 万回</b>はキャッシュを温める期間として成績に入れない。</p>
+
+<h2 id="s4">4. ワークロードの諸元（数値）</h2>
+<p>「ユニーク」とは「異なる物」のこと。<b>ユニークデータ量</b> = 物の数 × サイズ で、全種類を足したものを<b>足跡</b>（フットプリント：全部を置くのに必要な容量）と呼ぶ。1 KiB = 1,024 バイト、1 MiB = 1,024 KiB、1 GiB = 1,024 MiB。</p>
+<div class="tbl"><table>
+<tr><th>名前</th><th>目的</th><th>種類（サイズ × 物の数）</th><th>ユニークデータ量</th><th>足跡</th><th>要求の割合（回数）</th><th>バイトで見た要求の割合</th><th>α</th><th>全体の上位 1% / 10% の物の取り分</th></tr>
+<tr><td>W1</td><td>基本形</td><td>36 KiB × 200,000<br>1 MiB × 20,000</td><td>6.87 GiB<br>19.53 GiB</td><td>26.40 GiB</td><td>75% : 25%（3:1）</td><td>9.5% : 90.5%</td><td>0.9 / 0.9</td><td>48.8% / 72.5%</td></tr>
+<tr><td>W1b</td><td>要求の比を 6:1 に</td><td>同上</td><td>同上</td><td>26.40 GiB</td><td>85.7% : 14.3%</td><td>17.4% : 82.6%</td><td>0.9 / 0.9</td><td>48.3% / 71.3%</td></tr>
+<tr><td>W2</td><td>対照：λ/s をそろえる</td><td>36 KiB × 20,000<br>1 MiB × 20,000</td><td>0.69 GiB<br>19.53 GiB</td><td>20.22 GiB</td><td>3.4% : 96.6%（1:28.4）</td><td>0.1% : 99.9%</td><td>0.9 / 0.9</td><td>48.8% / 75.4%</td></tr>
+<tr><td>W3</td><td>小物が急・大物が平ら</td><td>W1 と同じ</td><td>6.87 / 19.53 GiB</td><td>26.40 GiB</td><td>75% : 25%</td><td>9.5% : 90.5%</td><td>1.1 / 0.6</td><td>63.0% / 85.7%</td></tr>
+<tr><td>W3r</td><td>その逆</td><td>W1 と同じ</td><td>6.87 / 19.53 GiB</td><td>26.40 GiB</td><td>75% : 25%</td><td>9.5% : 90.5%</td><td>0.6 / 1.1</td><td>29.8% / 51.2%</td></tr>
+<tr><td>W5</td><td>3 サイズ</td><td>8 KiB × 400,000<br>128 KiB × 50,000<br>1 MiB × 10,000</td><td>3.05 GiB<br>6.10 GiB<br>9.77 GiB</td><td>18.92 GiB</td><td>50% : 30% : 20%</td><td>1.6% : 15.5% : 82.9%</td><td>0.9 ×3</td><td>52.9% / 77.8%</td></tr>
+<tr><td>単一サイズ</td><td>サイズの差なし</td><td>36 KiB × 200,000</td><td>6.87 GiB</td><td>6.87 GiB</td><td>100%</td><td>100%</td><td>0.9</td><td>48.9% / 71.5%</td></tr>
+</table></div>
+<p><b>読み方</b>：W1 では、要求の<b>回数</b>の 75% は小物に来るが、運ぶ<b>バイト</b>の 90.5% は大物である。平均の要求サイズは 283 KiB（289,792 バイト）。小物は「回数は多いがバイトは少ない」、大物はその逆。この非対称がサイズ分類の効きどころになる。</p>
+<h3>2,000 万要求で、実際に要求される物の数</h3>
+<div class="tbl"><table><tr><th>名前</th><th>種類</th><th>1 回以上要求される物（期待値）</th><th>ちょうど 1 回だけの物（期待値）</th><th>トレースで数えた異なる物の数</th></tr>
+<tr><td>W1</td><td>小物 / 大物</td><td>199,999 / 20,000</td><td>6 / 0</td><td>220,000（温めの後 219,984）</td></tr>
+<tr><td>W3</td><td>小物 / 大物</td><td>197,770 / 20,000</td><td>7,989 / 0</td><td>217,724（温めの後 214,288）</td></tr>
+<tr><td>W2</td><td>小物 / 大物</td><td>19,983 / 20,000</td><td>100 / 0</td><td>—</td></tr>
+<tr><td>W5</td><td>8K / 128K / 1M</td><td>397,065 / 50,000 / 10,000</td><td>11,923 / 0 / 0</td><td>—</td></tr>
+</table></div>
+<p>期待値は「物 i の要求率 λ_i（1 要求あたりの確率）なら、2,000 万回のうち 1 回以上引かれる確率は 1 − e^{−2,000万·λ_i}」を全部の物について足したもの。W3 の実数 217,724 個と期待値 217,770 個はほぼ一致する。ほとんどの物が何度も要求されるので、「一度きりの物」はほぼ無い（実トレースとの大きな違いの一つ）。</p>
+<h3>人気が変わる（老化する）ワークロード</h3>
+<p>W1・W3 に「老化」を足した版も作った。<b>period 要求ごとに新しい物が 1 位に生まれ、他の物はみな 1 位ずつ順位が下がる</b>。新しいニュースや動画が人気を取り、古い物が忘れられていく様子の模型である。全員が入れ替わるまでの時間を<b>一巡時間 τ</b> = 物の数 × period と呼ぶ。どの時点を見ても人気の形（Zipf）は同じである。</p>
+<div class="tbl"><table><tr><th>一巡時間 τ（要求）</th><th>period 小物 / 大物</th><th>新しい物が生まれる数（100 万要求あたり）小物 / 大物</th><th>2,000 万要求で使われる ID の数 小物 / 大物</th><th>トレースの異なる物（W1）</th></tr>
+<tr><td>∞（老化なし）</td><td>—</td><td>0 / 0</td><td>200,000 / 20,000</td><td>220,000</td></tr>
+<tr><td>8,000 万（トレース長の 4 倍）</td><td>400 / 4,000</td><td>2,500 / 250</td><td>250,001 / 25,001</td><td>—</td></tr>
+<tr><td>2,000 万</td><td>100 / 1,000</td><td>10,000 / 1,000</td><td>400,001 / 40,001</td><td>421,785</td></tr>
+<tr><td>500 万</td><td>25 / 250</td><td>40,000 / 4,000</td><td>1,000,001 / 100,001</td><td>—</td></tr></table></div>
+
+<h2 id="s5">5. キャッシュの設定</h2>
+<p>容量は足跡の 5・10・20・30%。キャッシュは <b>Region</b>（大きな箱）256 個に分かれていて、物は箱に詰めて書き、箱ごとまとめて捨てる（フラッシュ SSD の性質に合わせた方式。§9 で説明）。</p>
+<div class="tbl"><table><tr><th>負荷</th><th>容量（足跡の割合）</th><th>容量</th><th>Region 1 個の大きさ（容量 ÷ 256）</th><th>1 Region に入る物の数</th></tr>
+<tr><td>W1・W3 など</td><td>5% / 10% / 20% / 30%</td><td>1.32 / 2.64 / 5.28 / 7.92 GiB</td><td>5.28 / 10.56 / 21.12 / 31.68 MiB</td><td>小物 150 / 300 / 600 / 901 個、大物 5 / 10 / 21 / 31 個</td></tr>
+<tr><td>W2</td><td>同上</td><td>1.01 / 2.02 / 4.04 / 6.07 GiB</td><td>4.04 / 8.09 / 16.17 / 24.26 MiB</td><td>小物 115 / 230 / 460 / 690、大物 4 / 8 / 16 / 24</td></tr>
+<tr><td>W5</td><td>同上</td><td>0.95 / 1.89 / 3.78 / 5.68 GiB</td><td>3.78 / 7.57 / 15.14 / 22.71 MiB</td><td>8K 484〜2,906、128K 30〜181、1M 3〜22</td></tr>
+<tr><td>単一サイズ</td><td>同上</td><td>0.34 / 0.69 / 1.37 / 2.06 GiB</td><td>1.37 / 2.75 / 5.49 / 8.24 MiB</td><td>39 / 78 / 156 / 234</td></tr></table></div>
+<p>シミュレータは libCacheSim（物単位の LRU）と RegionFlash（Region 単位）。DRAM の前段はなし、全部の物を受け入れる設定である。</p>
+
+<h2 id="m1">6. 式①：物の「価値」は λ ÷ s</h2>
+<div class="f">価値（OHR を上げたいとき）  v = λ / s
+価値（BHR を上げたいとき）  v = λ</div>
+<div class="tbl sym"><table><tr><th>記号</th><th>意味</th></tr><tr><td>λ（ラムダ）</td><td>その物の要求率。1 要求あたり、その物が引かれる確率</td></tr><tr><td>s</td><td>その物の大きさ（バイト）</td></tr></table></div>
+<p><b>たとえ</b>：机の 1 cm² あたり、何回「書庫に行かずに済む」か。小さくてよく読まれる本ほど、机の面積あたりの節約が大きい。BHR では節約は重さで数えるので、大きさで割る必要がなく、よく読まれるかどうか（λ）だけで決まる。</p>
+<div class="eg"><b>数値例（W1）</b>：小物の 1 位は λ = 0.75 × 4.09% = 0.0307、大きさ 36 KiB → 1 KiB あたり 0.00085。大物の 1 位は λ = 0.25 × 5.72% = 0.0143、大きさ 1,024 KiB → 1 KiB あたり 0.000014。<b>同じ 1 位どうしでも、面積あたりの価値は小物が約 61 倍</b>。</div>
+
+<h2 id="m2">7. 式②：Che 近似（物単位の LRU）</h2>
+<p><b>LRU</b>（Least Recently Used）は「いちばん長く使われていない物から捨てる」方式。机の上の本を、使った順に並べ直し、いっぱいになったら一番下の本を書庫に戻すイメージ。</p>
+<p><b>Che（チェ）近似</b>は、これを 1 つの数 T で表す。「最後に読まれてから T 要求の間に次の要求が来れば机の上に残っている（ヒット）、来なければ捨てられている（ミス）」と考える。T を<b>特性時間</b>と呼ぶ。</p>
+<svg viewBox="0 0 860 120" role="img" aria-label="Che 近似の T">
+ <line x1="40" y1="60" x2="820" y2="60" stroke="var(--mut)"/>
+ <circle cx="120" cy="60" r="7" fill="var(--a)"/><text x="100" y="40">要求</text>
+ <rect x="120" y="70" width="300" height="12" fill="var(--g)" fill-opacity=".35"/><text x="190" y="100" fill="var(--g)">この T の間に次が来ればヒット</text>
+ <circle cx="330" cy="60" r="7" fill="var(--g)"/><text x="310" y="40" fill="var(--g)">ヒット</text>
+ <rect x="330" y="70" width="300" height="12" fill="var(--g)" fill-opacity=".35"/>
+ <circle cx="760" cy="60" r="7" fill="var(--r)"/><text x="740" y="40" fill="var(--r)">ミス（T を過ぎていた）</text>
+</svg>
+<div class="f">ヒット率   h = 1 − e^{−λT}
+容量の式   Σ_i s_i (1 − e^{−λ_i T}) = C      （机の上の物の大きさの合計 = 机の広さ）</div>
+<p>2 本目の式から T を決め、1 本目に入れて全部の物のヒット率を出す。λ の大きい物ほど T の間に次が来やすいので、ヒット率が高い。</p>
+<div class="eg"><b>数値例（W1・容量 10%）</b>：T = 18,950 要求。1 万要求に 1 回読まれる物（λ = 10⁻⁴）は h = 1 − e^{−1.9} = 0.85、10 万要求に 1 回の物は h = 0.17。全体で OHR 0.530、BHR 0.593。シミュレーションは 0.530 / 0.593 で、<b>差は 0.01pt</b>。</div>
+<p><b>弱点</b>：全員に同じ T を与えるので、大きい物も小さい物も同じ扱いになる。価値は λ/s なのに、LRU は λ しか見ていない。</p>
+
+<h2 id="m3">8. 式③：サイズで机を仕切る（静的な分割）</h2>
+<p>机を「小物の棚」と「大物の棚」に仕切り、それぞれで LRU を回す。各棚は自分の T_k を持つ。</p>
+<div class="f">棚 k の容量   Σ_{i∈k} s_i (1 − e^{−λ_i T_k}) = C_k,   C_1 + C_2 = C
+最もよい仕切り方  「容量を 1 バイト増やしたときのヒットの増え方」が全部の棚で等しくなる位置</div>
+<p><b>たとえ</b>：お小遣いの配分。どの使い道に追加の 100 円を回しても嬉しさが同じになるまで配る、のと同じ考え方。これは「棚の境目にいる物の λ/s をそろえる」ことに当たる。BHR を最大にしたいなら、λ をそろえる（式の 1/s を外す）。</p>
+<div class="eg"><b>数値例（W1・容量 10%）</b>：OHR が最大になるのは、机の 81% を小物に回したとき。OHR 0.530 → <b>0.688</b>、BHR 0.593 → <b>0.431</b>。BHR を最大にする仕切り方だと OHR 0.493・BHR 0.594 で、仕切らない LRU とほとんど同じ。上限（λ/s の順に詰めた理想）は OHR 0.768。<br>
+→ <b>仕切らない LRU は BHR についてほぼ最適で、サイズで仕切ると OHR 側に振れる</b>。シミュレーションとの差は 0.3pt 以下。</div>
+
+<h2 id="m4">9. 式④：Region と Region FIFO</h2>
+<p>フラッシュ SSD は、小さく書き換えるのが苦手で、大きな単位でまとめて消すのが得意である。そこで物を <b>Region</b>（大きな箱）に詰めて書き、捨てるときは<b>箱ごと</b>捨てる。中に人気の物が残っていても一緒に捨てられる（巻き添え）。</p>
+<svg viewBox="0 0 860 150" role="img" aria-label="Region">
+ <g stroke="var(--line)"><rect x="20" y="30" width="170" height="70" rx="8" fill="var(--a)" fill-opacity=".15"/><rect x="210" y="30" width="170" height="70" rx="8" fill="var(--a)" fill-opacity=".15"/><rect x="400" y="30" width="170" height="70" rx="8" fill="var(--a)" fill-opacity=".15"/><rect x="590" y="30" width="170" height="70" rx="8" fill="var(--g)" fill-opacity=".15" stroke-dasharray="5 4"/></g>
+ <text x="30" y="22">一番古い箱（次に捨てる）</text><text x="600" y="22" fill="var(--g)">書き込み中の箱</text>
+ <g fill="var(--b)"><rect x="30" y="45" width="12" height="40"/><rect x="46" y="45" width="12" height="40"/><rect x="62" y="45" width="12" height="40"/><rect x="78" y="45" width="40" height="40" fill="var(--p)"/><rect x="122" y="45" width="12" height="40"/></g>
+ <text x="30" y="125">箱を捨てると、中の物は全部消える（人気の物も）</text>
+</svg>
+<p><b>Region FIFO</b> は「一番古い箱から順に捨てる」。どの箱も、書いてから同じ時間 T だけ生きる。物から見ると「入ってから T だけ机にいる」ことになる。</p>
+<div class="f">ヒット率   h = λT / (1 + λT)
+（入ってから T の間に来た要求がヒット。捨てられた後の最初の要求でミスして、また入る）</div>
+<p><b>サイズで分けても何も変わらない</b>：小物の箱も大物の箱も同じ T で捨てられるので、誰の扱いも変わらない。シミュレーションでも差は ±0.3pt 以内だった。</p>
+<div class="eg"><b>数値例（W1・容量 10%）</b>：T = 20,309 要求、OHR 0.486（分類なし・あり、とも）。</div>
+
+<h2 id="m5">10. 式⑤：Region LRU（このモデルの中心）</h2>
+<p><b>Region LRU</b> は「一番長く触られていない箱から捨てる」。中のどれか 1 つの物でも読まれると、その箱は「触られた」ことになり、長生きする。</p>
+<div class="f">箱の touch 率     Λ = 中の物の λ の和（中の誰かが読まれる頻度）
+箱の寿命（平均）  L = (e^{ΛT} − 1) / Λ      （最後に触られてから T たつと捨てられる）
+物のヒット率      h = λL / (1 + λL)         （物から見ると「滞在 L の FIFO」）</div>
+<div class="tbl sym"><table><tr><th>記号</th><th>意味</th></tr><tr><td>Λ（大文字ラムダ）</td><td>箱の中の物の要求率の合計</td></tr><tr><td>T</td><td>箱が捨てられるまでの「無アクセスの許容時間」（Che の T の箱版）</td></tr><tr><td>L</td><td>箱が封じられてから捨てられるまでの平均時間</td></tr></table></div>
+<p><b>たとえ</b>：箱 = 部屋、物 = 住人。誰か 1 人でも部屋を使えば、部屋は取り壊されない。住人が多く、人気者がいる部屋ほど長持ちする。</p>
+<svg viewBox="0 0 640 250" role="img" aria-label="寿命と ΛT">
+ <rect x="60" y="20" width="540" height="190" fill="none" stroke="var(--line)"/>
+ <polyline fill="none" stroke="var(--a)" stroke-width="2.4" points="73,210 87,199 114,183 141,170 168,158 195,145 222,133 249,121 276,109 303,97 330,84 357,72 384,60 411,48 438,36 465,24"/>
+ <g fill="var(--mut)"><text x="60" y="226" text-anchor="middle">0</text><text x="195" y="226" text-anchor="middle">5</text><text x="330" y="226" text-anchor="middle">10</text><text x="465" y="226" text-anchor="middle">15</text>
+ <text x="52" y="210" text-anchor="end">1</text><text x="52" y="149" text-anchor="end">100</text><text x="52" y="93" text-anchor="end">1万</text><text x="52" y="37" text-anchor="end">100万</text></g>
+ <text x="330" y="246" text-anchor="middle">ΛT（箱の touch 率 × T）</text>
+ <circle cx="157" cy="163" r="5" fill="var(--b)"/><text x="165" y="183" fill="var(--b)">大物の箱（W1・30%、ΛT≈3.6）</text>
+ <circle cx="265" cy="114" r="5" fill="var(--a)"/><text x="272" y="134" fill="var(--a)">小物の箱（ΛT≈7.6）</text>
+ <text x="380" y="70" fill="var(--mut)">ΛT が 1 増えると寿命は約 2.7 倍</text>
+</svg>
+<p><b>サイズで分けると効く理由</b>：小物の箱には物がたくさん（W1・10% で 300 個）入るので Λ が大きく、寿命が<b>指数的に</b>延びる。大物の箱は 10 個しか入らないので短命。結果として、仕切りの割合を決めなくても、机の上が自然に小物に寄る。W1・容量 10% で、小物が占める割合は分類なしの 13% から分類ありの 62% に増える。</p>
+<div class="eg"><b>数値例（W1・容量 30%、実測）</b>：小物の箱は ΛT ≈ 7.6 で寿命 約 100 万要求（ログで測った平均 101 万）、大物の箱は ΛT ≈ 3.6 で寿命 約 3.6 万要求（ログで測った平均 36,220）。<br>
+モデルの精度（全負荷・全容量 24 点）：分類なしの OHR は平均 0.4pt の差。分類ありの OHR は 0.6pt だが、<b>BHR は平均 3.5pt、最大 14pt ずれた</b>。この原因が次の §11。</div>
+
+<h2 id="m6">11. 式⑥：立ち上がりの隔離</h2>
+<p>空の机から始めると、最初はすべてがミスなので、最初に要求された物、つまり人気者ばかりが最初の箱にまとめて詰まる。この箱は Λ がとても大きく、寿命 e^{ΛT} が実験の長さを超えて事実上「不死」になる。人気者はそこに<b>隔離</b>され、二度とミスしない。</p>
+<svg viewBox="0 0 860 150" role="img" aria-label="立ち上がりの隔離">
+ <g stroke="var(--line)"><rect x="20" y="40" width="120" height="50" rx="6" fill="var(--r)" fill-opacity=".5"/><rect x="150" y="40" width="120" height="50" rx="6" fill="var(--r)" fill-opacity=".3"/><rect x="330" y="40" width="100" height="50" rx="6" fill="var(--a)" fill-opacity=".2"/><rect x="440" y="40" width="100" height="50" rx="6" fill="var(--a)" fill-opacity=".2"/><rect x="550" y="40" width="100" height="50" rx="6" fill="var(--a)" fill-opacity=".2"/></g>
+ <text x="28" y="70">人気者ばかり</text><text x="158" y="70">準人気者</text><text x="338" y="70">冷たい物</text><text x="448" y="70">冷たい物</text><text x="558" y="70">冷たい物</text>
+ <text x="20" y="30" font-weight="700">最初に作られた箱：不死</text><text x="330" y="30" font-weight="700">その後の箱：短命</text>
+ <text x="20" y="120">人気者は二度とミスしない → その後に箱に入るのは冷たい物ばかり → 新しい箱は Λ が小さく短命</text>
+</svg>
+<div class="f">-H（観測期間）：初回の要求の順に物を箱へ詰めて最初の箱を作り、
+            寿命 (e^{ΛT}−1)/Λ が観測期間 H を超える箱を「不死」とする。
+            残りの物と残りの容量で §10 の式を解く。</div>
+<div class="eg"><b>証拠（W3・容量 20%・Region 1,024 個）</b>：終了時に残っていた小物の箱のうち 69 個は、最初の 100 万要求で作られたもの（ΛT = 9〜4,917）。人気 1〜99 位の物は全部、100〜999 位は 900 個中 889 個がその中にいた。<br>
+<b>効果</b>：分類ありの BHR のずれが、平均 3.5pt → <b>0.8pt</b>、最大 14.4pt → <b>2.6pt</b>。単一サイズで T が実測（5,338）より 25〜40% 短く出ていた謎も解けた（直した後のモデルでは 5,649）。</div>
+<p class="card warn"><b>撤回した診断</b>：最初は「Region の数が有限なので T が揺らぎ、長生きの箱が殺されるのが原因」と考えた。揺らぎの大きさの式 sd(T) = 1/√(2Σ m_i λ_i) は実測と合ったが、箱ごとに寿命を測ると、揺らぎで寿命が縮む効果は見えなかった。<b>本当の原因は上の「隔離」</b>だった。</p>
+
+<h2 id="m7">12. 式⑦：人気が変わる（老化する）ときのモデル　<span style="color:var(--b)">途中経過</span></h2>
+<p>人気が少しでも変わると、隔離は消える。一巡時間がトレース長の 4 倍（τ = 8,000 万）というゆっくりした老化でも、最初の箱は終了時に 1 個も残らなかった（老化なしでは小物 26〜59 個）。</p>
+<p>老化のモデルでは、物を「年齢 a」（生まれてからの要求数）で表す。順位は r = 1 + a/period、要求率は λ(a) で、年齢とともに下がる。</p>
+<div class="f">物単位 LRU    在籍率 = 1 − exp(−∫_{a−T}^{a} λ)        （生まれる前は λ = 0 なので、最初の要求は必ずミス）
+Region LRU   在籍率 p(a) = ∫_0^a λ(a')(1 − p(a')) × [年齢 a' で入った箱が年齢 a まで生きている確率] da'
+             箱の生存は「中の物の λ の和」で決まり、中の物も一緒に老化する
+             箱 1 個あたりの「熱い新顔」の数 m はポアソン分布（平均 ν）として、生存確率を m で平均する</div>
+<p><b>たとえ</b>：新入生（新顔）は入ってすぐ大人気で、部屋（箱）に入るとその部屋を長持ちさせる。新入生が何人入るかは部屋によってばらつく（0 人の部屋はすぐ取り壊され、3 人の部屋は長持ちする）。平均の人数で全部の部屋を計算すると、全部の部屋が長持ちすると誤って見積もってしまう。</p>
+<div class="eg"><b>確定している数値</b>：物単位 LRU の老化モデルは、12 構成すべてで実測と 0.25pt 以内（初回のミスを正しく含む）。単一サイズの Region LRU は OHR 0.730（実測 0.738、−0.9pt）、T 3,745（実測 3,752）。新顔の数のばらつきを入れると、混在の最悪点のずれが −18pt → −3pt。<br>
+<b>未確定</b>：全構成での Region LRU の精度は検証中。</div>
+
+<h2 id="res">13. 結果のまとめ</h2>
+<div class="tbl"><table><tr><th>問い</th><th>答え</th><th>根拠</th></tr>
+<tr><td>サイズで分けると得か</td><td>OHR は大きく上がり、BHR は下がる</td><td>W1 の静的な分割で OHR +14〜18pt、BHR −14〜19pt。Region LRU の分類では OHR +10〜16pt、BHR −2〜8pt（実測）</td></tr>
+<tr><td>サイズそのものが効くのか</td><td>違う。効くのは「価値 λ/s のばらつき」</td><td>λ/s を両種類でそろえた W2 では、利得が +0.7pt（静的分割）・+0.5pt（Region LRU）に縮む</td></tr>
+<tr><td>Region FIFO で分類は効くか</td><td>効かない</td><td>全部の箱が同じ時間で捨てられる。実測 ±0.3pt</td></tr>
+<tr><td>式で予測できるか</td><td>できる</td><td>物 LRU 0.01pt、静的分割 0.02pt、Region LRU（隔離あり）OHR 0.2pt・BHR 0.1〜0.8pt（平均）</td></tr>
+<tr><td>人気の偏りの形は効くか</td><td>小物の人気が平らなほど分類が効く</td><td>W3r（小物 α=0.6）で静的分割 +27pt（容量 20%）、W3（小物 α=1.1）で +10pt（容量 10%）</td></tr>
+<tr><td>3 種類に分ける意味は</td><td>小さい</td><td>W5 で 3 分割の上乗せは最良の 2 分割に対して +1.8pt（モデル）</td></tr>
+<tr><td>人気が変わると</td><td>隔離は消える。Region の損失は物 LRU の 2〜4 倍。分類の利得は残る</td><td>W1・30% の老化による損失：物 LRU −0.2 / −0.7 / −2.9pt、Region LRU（分類あり）−0.8 / −2.6 / −6.2pt。分類の利得 +16.7pt（τ=8,000 万）、+13.4pt（τ=500 万）</td></tr>
+</table></div>
+
+<h2 id="gl">14. 用語集</h2>
+<div class="tbl"><table>
+<tr><th>用語</th><th>意味</th></tr>
+<tr><td>キャッシュ</td><td>よく使う物を近くの小さな置き場に置く仕組み。机の上</td></tr>
+<tr><td>要求（リクエスト）</td><td>ある物がほしいという 1 回の問い合わせ</td></tr>
+<tr><td>ヒット / ミス</td><td>キャッシュにあった / なかった</td></tr>
+<tr><td>OHR / OMR</td><td>物のヒット率（回数で数える）/ 1 − OHR</td></tr>
+<tr><td>BHR / BMR</td><td>バイトのヒット率（大きさで重み付け）/ 1 − BHR</td></tr>
+<tr><td>pt（ポイント）</td><td>割合の差。0.530 → 0.688 は +15.8pt</td></tr>
+<tr><td>ユニーク数</td><td>異なる物の数</td></tr>
+<tr><td>ユニークデータ量・足跡</td><td>物の数 × サイズ の合計。全部を置くのに必要な容量</td></tr>
+<tr><td>トレース</td><td>要求を時刻順に並べた記録。ここでは生成した 2,000 万要求</td></tr>
+<tr><td>温め</td><td>最初の 500 万要求。成績に入れない</td></tr>
+<tr><td>IRM</td><td>独立参照モデル。毎回の要求を独立にくじ引きで作る</td></tr>
+<tr><td>Zipf 分布・α</td><td>順位 r の物の人気が r^(−α) に比例する偏りの型。α が大きいほど上位に集中</td></tr>
+<tr><td>λ（ラムダ）</td><td>物の要求率（1 要求あたりにその物が引かれる確率）</td></tr>
+<tr><td>s</td><td>物の大きさ</td></tr>
+<tr><td>LRU</td><td>いちばん長く使われていない物から捨てる方式</td></tr>
+<tr><td>FIFO</td><td>先に入れた物から捨てる方式</td></tr>
+<tr><td>Che 近似・T</td><td>LRU を「最後の要求から T 以内に次が来ればヒット」と近似する方法。T は特性時間</td></tr>
+<tr><td>静的な分割</td><td>容量を種類ごとに固定の割合で仕切ること</td></tr>
+<tr><td>Region</td><td>物を詰めて書き、まとめて捨てる大きな箱。ここでは容量 ÷ 256 の大きさ</td></tr>
+<tr><td>Region LRU / FIFO</td><td>いちばん長く触られていない箱 / 一番古い箱から捨てる方式</td></tr>
+<tr><td>Λ（大文字ラムダ）</td><td>箱の中の物の λ の和。箱が触られる頻度</td></tr>
+<tr><td>L</td><td>箱の平均寿命 (e^{ΛT}−1)/Λ</td></tr>
+<tr><td>サイズ分類</td><td>小物と大物を別々の箱に詰めること</td></tr>
+<tr><td>隔離</td><td>立ち上がりに人気者が詰まった箱が不死になり、人気者がそこから出なくなること</td></tr>
+<tr><td>老化・period・τ</td><td>新しい物が 1 位に生まれ順位が下がっていく人気の変化。period 要求ごとに 1 つ生まれ、τ = 物の数 × period で一巡する</td></tr>
+<tr><td>ポアソン分布</td><td>まれな出来事が何回起きるかの分布。平均 ν のとき、0 回の確率は e^{−ν}</td></tr>
+</table></div>
+</main>
+</body>
+</html>

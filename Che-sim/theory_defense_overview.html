@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>理論的背景の通し：Che から自動調整まで</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1;--slide:#fbfcfe;
+  --sh:#2b6cb0;--sc:#90b4dd;--lh:#c05621;--lc:#f0b27a;--mh:#6b46c1;--mc:#c3b1ea}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;--slide:#181c23;
+  --sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26;--mh:#9f7aea;--mc:#4a3a6e}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;--slide:#181c23;
+  --sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26;--mh:#9f7aea;--mc:#4a3a6e}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:980px;margin:0 auto;padding:24px 16px 72px}
+h1{font-size:24px;margin:0 0 4px}
+.sub{color:var(--mut);margin:0 0 18px}
+.chap{font-size:13px;color:var(--a);font-weight:700;letter-spacing:.05em;margin:46px 0 6px;border-top:2px solid var(--a);padding-top:6px}
+.slide{background:var(--slide);border:1px solid var(--line);border-radius:10px;padding:14px 20px 12px;margin:14px 0;position:relative}
+.slide h2{font-size:19px;margin:0 0 4px;padding-right:56px}
+.no{position:absolute;top:12px;right:16px;font-size:12px;color:var(--mut);border:1px solid var(--line);border-radius:10px;padding:0 8px}
+.msg{font-weight:700;color:var(--a);margin:0 0 8px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+@media (max-width:720px){.cols{grid-template-columns:1fr}}
+.math{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:0 12px;margin:6px 0;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:6px 0}
+th,td{border-bottom:1px solid var(--line);padding:4px 7px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+details{margin:8px 0 2px;border-top:1px dashed var(--line);padding-top:4px}summary{cursor:pointer;color:var(--mut);font-size:13.5px}
+details[open] summary{margin-bottom:4px}
+svg{max-width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:12px}
+.mut{color:var(--mut)}.g{color:var(--g)}.r{color:var(--r)}
+.tag{display:inline-block;font-size:11.5px;border-radius:9px;padding:0 8px;margin-right:4px;border:1px solid}
+.t-pf{color:var(--g);border-color:var(--g)}.t-ap{color:var(--b);border-color:var(--b)}.t-em{color:var(--a);border-color:var(--a)}.t-no{color:var(--r);border-color:var(--r)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 14px;margin:10px 0}
+.warn{border-left:4px solid var(--r)}.ok{border-left:4px solid var(--g)}.as{border-left:4px solid var(--a)}
+.bar{display:inline-block;height:10px;border-radius:2px;vertical-align:middle}
+ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
+.q{font-weight:700}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"></script>
+</head>
+<body>
+<main>
+<h1>理論的背景の通し：Che 近似 → Region キャッシュ → サイズ分類 → 実行中の自動調整</h1>
+<p class="sub">2026-11-13。<code>auto_tuning_theory.md</code>・<code>region_lru_derivation.html</code>・<code>che_to_region_walkthrough.html</code>・<code>region_model_appendix.html</code> を 1 本の筋に並べ直したもの。
+1 枚の枠 = 1 スライド（右上の番号）。「補足」は発表者メモ。多分割（3 分類以上）は第 5〜6 章。
+各主張に <span class="tag t-pf">証明</span>（式の上で導出）<span class="tag t-ap">近似</span>（仮定つき）<span class="tag t-em">実測</span>（実験で確認）<span class="tag t-no">未保証</span> の札を付けた。教授に詰められたら、まず札を答える。</p>
+
+<!-- ================================================================ -->
+<div class="chap">第 0 章　全体の地図</div>
+<section class="slide"><span class="no">1</span>
+<h2>一本の筋：「モデルで形を決め、実行中の測定で値を決める」</h2>
+<p class="msg">理論は「どういう形の規則が最適か」を与える。値（閾値 n、容量の下限 ff）は、モデルに頼らず測って決める。</p>
+<svg viewBox="0 0 920 250" role="img" aria-label="理論の全体図">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<g font-size="12">
+<rect x="6" y="10" width="170" height="70" rx="8" fill="var(--card)" stroke="var(--a)"/><text x="91" y="32" text-anchor="middle" font-weight="700">① 土台</text><text x="91" y="50" text-anchor="middle">IRM（ポアソン）</text><text x="91" y="67" text-anchor="middle">Che：h = 1−e^(−λT)</text>
+<rect x="196" y="10" width="170" height="70" rx="8" fill="var(--card)" stroke="var(--a)"/><text x="281" y="32" text-anchor="middle" font-weight="700">② 静的な分割</text><text x="281" y="50" text-anchor="middle">J は凹 → KKT が最適</text><text x="281" y="67" text-anchor="middle">K 分類でも同じ</text>
+<rect x="386" y="10" width="170" height="70" rx="8" fill="var(--card)" stroke="var(--b)"/><text x="471" y="32" text-anchor="middle" font-weight="700">③ Region の物は FIFO</text><text x="471" y="50" text-anchor="middle">h = λL/(1+λL)</text><text x="471" y="67" text-anchor="middle">LRU：L=(e^(ΛT)−1)/Λ</text>
+<rect x="576" y="10" width="170" height="70" rx="8" fill="var(--card)" stroke="var(--g)"/><text x="661" y="32" text-anchor="middle" font-weight="700">④ 分類の効果</text><text x="661" y="50" text-anchor="middle">Λ が割れ寿命が指数で割れる</text><text x="661" y="67" text-anchor="middle">小物へ寄せ過ぎ＋便乗</text>
+<rect x="766" y="10" width="148" height="70" rx="8" fill="var(--card)" stroke="var(--p)"/><text x="840" y="32" text-anchor="middle" font-weight="700">⑤ 自動調整</text><text x="840" y="50" text-anchor="middle">n：p(h) 単調</text><text x="840" y="67" text-anchor="middle">ff：山登り</text>
+<path d="M176,45H194" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M366,45H384" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M556,45H574" stroke="var(--mut)" marker-end="url(#ar)"/><path d="M746,45H764" stroke="var(--mut)" marker-end="url(#ar)"/>
+<text x="6" y="108" font-weight="700">各段が次の段に渡すもの</text>
+<text x="6" y="130">① → ② ：「物の在籍確率」を T の関数で書ける ⇒ 容量 C_k とヒット H_k が T_k の関数になる</text>
+<text x="6" y="150">② → ③ ：静的分割の最適（基準）。Region では配分を直接指定できず、寿命が自然に決める</text>
+<text x="6" y="170">③ → ④ ：寿命が Λ の指数 ⇒ 価値密度 λ/s の高い Region が容量を取る（効果の正体と、その欠陥）</text>
+<text x="6" y="190">④ → ⑤ ：欠陥（BMR 悪化・便乗）を、再挿入と容量の下限で取り戻す。値は実行中に測る</text>
+<text x="6" y="224" fill="var(--b)" font-weight="700">理論が効くのは「形」：閾値の規則 h ≥ n、J の山が 1 つ（凹）。値の決定はモデル不要（測定）。</text>
+</g></svg>
+<details><summary>補足：この資料の読み方</summary>
+<p>順序はそのまま話す順序。①②は教科書の部分（Che 2002、Fricker 2012）で、③④が自作の部分（Region 版）、⑤が実装した制御。教授に「どこまでが自分の貢献か」と聞かれたら、③④⑤。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">2</span>
+<h2>仮定の一覧と「外すと何が崩れるか」</h2>
+<p class="msg">すべての式は IRM（独立参照）と「追い出し年齢 T が一定」に乗っている。</p>
+<div class="tbl"><table>
+<tr><th>仮定</th><th>内容</th><th>使う所</th><th>外れたとき</th><th>札</th></tr>
+<tr><td>A1 IRM</td><td>物 i への要求は率 λ_i のポアソン、物どうし独立</td><td>在籍確率、寿命、同居の独立</td><td>時間局所性（束になる要求）で在籍率とヒット率がずれる。実トレースは近似</td><td><span class="tag t-ap">近似</span></td></tr>
+<tr><td>A2 全受け入れ・DRAM なし</td><td>ミスした物は必ず書き込み中の Region に入る</td><td>挿入率 = ミス率</td><td>受け入れ制御を入れると m_j が変わる</td><td><span class="tag t-ap">近似</span></td></tr>
+<tr><td>A3 Region 単位の削除</td><td>ヒットしても物は動かない。追い出すと中身は全部消える</td><td>物から見て FIFO</td><td>再挿入を入れると（§6 の n）、物は滞在を延長できる</td><td><span class="tag t-pf">定義</span></td></tr>
+<tr><td>A5 T 一定（Che）</td><td>追い出し年齢のばらつきを無視</td><td>全部</td><td>Region 数が少ないと誤差。CV：256 個で 0.1、4096 個で 0.015、64 個で 2〜4pt ずれ</td><td><span class="tag t-em">実測</span></td></tr>
+<tr><td>A6 同居の独立</td><td>同じ Region の物は挿入の流れから独立に引かれる</td><td>M_k(t)^(n−1)</td><td>温かい物の個数の分散／平均 = 0.97（独立 1.00）。立ち上がりだけ崩れる</td><td><span class="tag t-em">実測</span></td></tr>
+<tr><td>A7 定常</td><td>長期平均を扱う</td><td>全部</td><td>人気が変わる負荷は別モデル（Region 部分は未完）</td><td><span class="tag t-no">未保証</span></td></tr>
+</table></div>
+<details><summary>補足：検証の範囲</summary>
+<p>物単位 LRU・静的分割は 48 点で 0.3pt 以内。Region FIFO は 24 点で平均 0.1〜0.2pt。Region LRU は 24 構成で OHR 0.2pt、BHR 0.1〜0.8pt（隔離あり）。ただし検証は 1 Region の物の数 n ≤ 901。SSD 規模（n = 4,096〜10,016）では分類ありの BMR を 4〜6pt 悪く見積もる（未解決）。</p>
+</details>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 1 章　物単位 LRU：Che 近似</div>
+<section class="slide"><span class="no">3</span>
+<h2>「最後の要求から T 以内なら、まだいる」</h2>
+<p class="msg">追い出し年齢を一定値 T とみなすと、1 つの物の在籍確率は 1 つの指数式になる。T は容量の条件で決まる。</p>
+<div class="cols">
+<div>
+<div class="math">\[ h_i = 1-e^{-\lambda_i T}\ \ (\text{Che}),\qquad \sum_i s_i\,(1-e^{-\lambda_i T}) = C \]</div>
+<ul>
+<li>ポアソンの無記憶性：直前の要求までの時間は Exp(λ_i)。それが T 未満ならヒット。</li>
+<li>左辺は T について狭義増加 ⇒ T は一意、二分法で解ける <span class="tag t-pf">証明</span>。</li>
+<li>T 一定は物が多いほど正確（大数の法則。Fricker–Robert–Roberts 2012）<span class="tag t-ap">近似</span>。</li>
+</ul>
+</div>
+<svg viewBox="0 0 440 150" role="img" aria-label="Che 近似">
+<line x1="20" y1="80" x2="420" y2="80" stroke="var(--mut)"/>
+<g stroke="var(--a)" stroke-width="3"><line x1="60" y1="66" x2="60" y2="80"/><line x1="140" y1="66" x2="140" y2="80"/><line x1="300" y1="66" x2="300" y2="80"/></g>
+<text x="60" y="60" text-anchor="middle">要求</text><text x="140" y="60" text-anchor="middle">要求</text><text x="300" y="60" text-anchor="middle">要求</text>
+<rect x="60" y="84" width="80" height="14" fill="var(--g)" opacity=".35"/><rect x="140" y="84" width="120" height="14" fill="var(--g)" opacity=".35"/>
+<text x="200" y="95" text-anchor="middle" font-size="11">在籍（最後の要求から T）</text>
+<text x="140" y="118" text-anchor="middle" fill="var(--g)">ヒット（間隔 ≤ T）</text><text x="300" y="118" text-anchor="middle" fill="var(--r)">ミス（間隔 &gt; T）</text>
+</svg>
+</div>
+<details><summary>補足：例題の数字</summary>
+<p>4 群（小物 4 KiB・大物 64 KiB × 熱・冷）、容量 128 MiB：T = 16,125 要求、OHR 62.8%（実測 62.7%）、BHR 76.9%（実測 76.9%）。</p>
+</details>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 2 章　静的な分割：凹性と KKT（K 分類で成り立つ）</div>
+<section class="slide"><span class="no">4</span>
+<h2>容量を K 個に割って、それぞれ LRU を回す</h2>
+<p class="msg">目的 J は C_1,…,C_K について凹。したがって「限界値が等しい」配分が唯一の大域最適で、K がいくつでも同じ。</p>
+<div class="cols">
+<div>
+<div class="math">\[ \max_{\{C_k\}} J=\sum_k\Big[\tfrac{B_k}{\Lambda_B}+w\tfrac{H_k}{\Lambda}\Big],\quad \sum_{k=1}^{K}C_k=C \]
+\[ \frac{dH_k}{dC_k}=\frac{\sum\lambda_i^2e^{-\lambda_iT_k}}{\sum s_i\lambda_ie^{-\lambda_iT_k}}\ \overset{s_i=s_k}{=}\ \frac{\mathbb{E}_w[\lambda]}{s_k} \]
+\[ \frac{d}{dT}\mathbb{E}_w[\lambda]=-\mathrm{Var}_w(\lambda)\le0\ \Rightarrow\ \frac{d^2H_k}{dC_k^2}\le0 \]</div>
+<ul>
+<li>凹関数の和 + 線形制約 ⇒ KKT 条件が必要十分 <span class="tag t-pf">証明</span>。</li>
+<li>最適条件：C_k &gt; 0 の全分類で ∂J/∂C_k が同じ値 μ（K 個の未知数 T_k と 1 個の μ を解く）。</li>
+</ul>
+</div>
+<div>
+<p><b>例題（2 分類、共有 LRU の T = 16,125 で測る）</b></p>
+<div class="tbl"><table>
+<tr><th>分類</th><th class="n">限界ヒット/単位</th></tr>
+<tr><td>小物</td><td class="n">4.24×10⁻⁵</td></tr>
+<tr><td>大物</td><td class="n">1.55×10⁻⁶（27 分の 1）</td></tr>
+</table></div>
+<p>大物から小物へ容量を移すほど OHR が増える。6.32×10⁻⁶ でそろうまで移した最適：小物の容量 24% → 49%、OHR 62.8% → <b>78.1%</b>、BHR 76.9% → <b>70.9%</b>。</p>
+<p class="mut">共有 LRU が与えるのは「同じ T」で「同じ限界値」ではない。だから共有は最適でない。</p>
+</div>
+</div>
+<details><summary>補足：なぜ凹か（1 行ずつ）</summary>
+<p>連鎖律 dH/dC = (dH/dT)/(dC/dT)。サイズが分類内で同じなら重み w_i ∝ λ_i e^(−λ_i T) の加重平均 E_w[λ] を s で割った形。dw_i/dT = w_i(E_w[λ] − λ_i) なので d/dT E_w[λ] = −Var_w(λ)。dC/dT &gt; 0 だから 2 階微分は ≤ 0。サイズに幅があるときは −Cov_v(λ, λ/s) で、λ と λ/s が正に相関なら凹（条件つき）。数値でも差分と −Var が 9 桁一致。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">5</span>
+<h2>基準としての「上限」と、BHR の別の最適</h2>
+<p class="msg">先読みしない方策の OHR の上限は分数ナップサック（λ/s の大きい順に詰める）。BHR なら λ の順。</p>
+<div class="cols">
+<div>
+<div class="math">\[ \mathrm{OHR}\le\max_{0\le x\le1}\Big\{\sum_i\lambda_ix_i:\ \sum_is_ix_i\le C\Big\} \]</div>
+<ul>
+<li>x_i = 物 i の在籍時間の割合。先読みしないので、物 i の将来の要求は状態と独立（PASTA）⇒ ヒット割合 = x_i <span class="tag t-pf">証明</span>。</li>
+<li>例題（サイズ分類）：78.1%。サイズ × 熱冷の 4 分類のモデル：81.2%、上限 82.5%。</li>
+</ul>
+</div>
+<div>
+<p>BHR の最適は、ヒットを B_k = Σ s_i λ_i h_i に置き換えると、限界は E_w[λ]（s で割らない）。<b>共有 LRU が BHR 最適になるのは E_w[λ] が分類間で等しいときだけ</b>。実測では近い（W1・容量 10%：BHR 0.593 対 0.594）。</p>
+<p class="mut">OHR 最適と BHR 最適で、容量の配り方が逆向きになる。これが J = BHR + w·OHR の重み w の意味。</p>
+</div>
+</div>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 3 章　Region キャッシュ：物から見ると FIFO</div>
+<section class="slide"><span class="no">6</span>
+<h2>1 つの補題が全部を支える：h = λL/(1+λL)</h2>
+<p class="msg">ヒットしても物は動かない。物は「入る → 滞在 L → Region ごと消える → 次の要求でミス → 入り直す」を繰り返す。Region の事情は滞在 L にすべて押し込まれる。</p>
+<svg viewBox="0 0 900 120" role="img" aria-label="サイクル">
+<g font-size="12">
+<rect x="20" y="30" width="250" height="26" fill="var(--g)" opacity=".4"/><text x="145" y="48" text-anchor="middle">在籍（平均 L）：要求は全部ヒット</text>
+<rect x="270" y="30" width="130" height="26" fill="var(--line)"/><text x="335" y="48" text-anchor="middle">不在（平均 1/λ）</text>
+<rect x="400" y="30" width="250" height="26" fill="var(--g)" opacity=".4"/><text x="525" y="48" text-anchor="middle">在籍（平均 L）</text>
+<rect x="650" y="30" width="130" height="26" fill="var(--line)"/><text x="715" y="48" text-anchor="middle">不在</text>
+<text x="20" y="22" fill="var(--r)">ミス → 挿入</text><text x="400" y="22" fill="var(--r)">ミス → 挿入</text>
+<text x="270" y="76" text-anchor="middle">Region が消える</text><text x="650" y="76" text-anchor="middle">Region が消える</text>
+<path d="M20,96H400" stroke="var(--fg)" marker-start="url(#ar)" marker-end="url(#ar)"/><text x="210" y="112" text-anchor="middle">1 サイクル = L + 1/λ（挿入 1 回）</text>
+</g></svg>
+<div class="cols">
+<div class="math">\[ h=\frac{L}{L+1/\lambda}=\frac{\lambda L}{1+\lambda L},\qquad m=\frac{\lambda}{1+\lambda L}=\lambda(1-h) \]</div>
+<ul>
+<li>再生報酬の定理：時間平均 = 1 サイクルの報酬の平均 ÷ 長さの平均。L の分布の形は要らない（平均だけ）<span class="tag t-pf">証明</span>。</li>
+<li>L は全要求が作る停止時刻。Wald / 任意停止定理で、滞在中の物 i のヒット数の平均 = λ_i L。自己 touch（物自身のヒットが Region を延命する）があっても成り立つ。</li>
+<li>要求で数えたヒット率 = 時間で数えた在籍率（PASTA）。</li>
+</ul>
+</div>
+<details><summary>補足：数値確認</summary>
+<p>λ = 0.01、同居の touch 率 0.002、T = 300、10 万サイクル：要求で数えた h = 0.96744、時間で数えた h = 0.96751、式 0.96739。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">7</span>
+<h2>Region FIFO では L = T（全員同じ）⇒ 分類は効かない</h2>
+<p class="msg">FIFO は封じた順に消すので、どの Region も同じ時間 T で消える。物の在籍率は人気 λ だけで決まり、分類に依らない。</p>
+<div class="cols">
+<div>
+<div class="math">\[ h_i=\frac{\lambda_iT}{1+\lambda_iT},\qquad \sum_i\frac{s_ih_i}{\phi}=C \]</div>
+<ul>
+<li>T は封じた Region の数 ÷ 封じる率（Little の公式）。分類は U（封じるまでの待ち）と充填率 φ にしか入らず、どちらも小さい <span class="tag t-pf">証明</span>。</li>
+<li>例題：分類の利得は +1.5pt。混在の詰め残し（4.5%）の分だけで、φ を入れたモデルは 0.1pt で一致 <span class="tag t-em">実測</span>。</li>
+</ul>
+</div>
+<div class="tbl"><table>
+<tr><th>方式（例題）</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>物単位 LRU</td><td class="n">62.8</td><td class="n">76.9</td></tr>
+<tr><td>Region FIFO 混在</td><td class="n">52.8</td><td class="n">65.0</td></tr>
+<tr><td>Region FIFO サイズ分類</td><td class="n">54.3</td><td class="n">66.2</td></tr>
+</table>
+<p class="mut">物単位 LRU より 8〜10pt 低い：ヒットしても延命されないので、熱い物も一定時間で追い出される。</p></div>
+</div>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 4 章　Region LRU：寿命は touch 率 Λ の指数</div>
+<section class="slide"><span class="no">8</span>
+<h2>寿命：「何も来ない時間が T を超えたら死ぬ」</h2>
+<p class="msg">中のどれか 1 つがヒットするたびに Region の時計が戻る。中の物の要求率の和 Λ が大きいほど、寿命は指数的に長い。</p>
+<div class="cols">
+<div>
+<div class="math">\[ \mathbb{E}[D]=\frac{e^{\Lambda T}-1}{\Lambda}=\int_0^Te^{\Lambda t}dt \]</div>
+<ul>
+<li>touch の間隔は Exp(Λ)。T を超える確率 p = e^(−ΛT)。生き延びる間隔の数は幾何分布、平均 e^(ΛT)−1 <span class="tag t-pf">証明</span>。</li>
+<li>積分形にするのは、e^(Λt) について線形だから。次の段で「同居の物について平均」を積分の中に入れられる。</li>
+<li>ΛT ≳ 5 で D/E[D] は Exp(1) に近づく（Rényi の定理）。分散の式も導出済み。</li>
+<li>例：T=1,800 のとき Λ が 3 倍（ΛT=1.8→5.4）で寿命は <b>14.5 倍</b>。</li>
+</ul>
+</div>
+<svg viewBox="0 0 440 280" role="img" aria-label="寿命÷T と ΛT">
+<g font-size="12"><line x1="50" y1="240" x2="420" y2="240" stroke="var(--mut)"/><line x1="50" y1="30" x2="50" y2="240" stroke="var(--mut)"/>
+<text x="235" y="270" text-anchor="middle">ΛT</text><text x="14" y="140" transform="rotate(-90 14 140)" text-anchor="middle">寿命 ÷ T（対数）</text>
+<text x="50" y="256" text-anchor="middle">0</text><text x="142" y="256" text-anchor="middle">2</text><text x="235" y="256" text-anchor="middle">4</text><text x="327" y="256" text-anchor="middle">6</text><text x="420" y="256" text-anchor="middle">8</text>
+<text x="44" y="244" text-anchor="end">1</text><text x="44" y="170" text-anchor="end">10</text><text x="44" y="100" text-anchor="end">10²</text><text x="44" y="34" text-anchor="end">10³</text>
+<polyline fill="none" stroke="var(--fg)" stroke-width="2" points="50,240 96,232 142,213 188,190 235,166 281,141 327,118 373,93 420,69"/>
+<circle cx="188" cy="188" r="5" fill="var(--lh)"/><text x="196" y="205">大物の分類（ΛT≈2.1）</text>
+<circle cx="327" cy="118" r="5" fill="var(--sh)"/><text x="320" y="108" text-anchor="end">小物の分類（ΛT≈5.8）</text>
+</g></svg>
+</div>
+<details><summary>補足：実測との照合</summary>
+<p>Λ を物 ID から数え直し、ΛT 区間ごとに寿命×Λ と e^(ΛT)−1 を比べると、有効な T が実測の 1.00〜1.02 倍。Λ = 中の物の λ の和の確認：ヒット数÷(Λ×寿命) = 1.00〜1.02。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">9</span>
+<h2>Λ を物の側から組み立てる：不動点と容量の条件</h2>
+<p class="msg">同居の物は「ミスして入ってきた物」。熱い物はミスしにくいので同居の物は冷たい物に偏る。この偏りが寿命を決める。</p>
+<div class="math">\[ L_i=\int_0^Te^{\lambda_it}\,M_k(t)^{\,n_k-1}dt,\quad M_k(t)=\frac{\sum_{j\in k}m_je^{\lambda_jt}}{\sum_{j\in k}m_j},\quad m_j=\frac{\lambda_j}{1+\lambda_jL_j},\quad \sum_i\frac{s_ih_i}{\phi_{k(i)}}=C \]</div>
+<div class="cols">
+<ul>
+<li>e^(λ_i t)：自分の分（平均の外）。M^(n−1)：同居 n−1 個の分。同居が独立（A6）⇒ 積の期待値 = 期待値の積 <span class="tag t-pf">証明</span>（Palm–Khintchine で近似的に）。</li>
+<li>m が L に、L が m に依る ⇒ 不動点。存在は Brouwer で証明、<b>一意性は未証明</b>（両側からの連続法は同じ解に落ちた）<span class="tag t-no">未保証</span>。</li>
+<li>二重ループ：内側＝T 固定で L,m を反復、外側＝占有=C となる T を二分法。</li>
+</ul>
+<ul>
+<li>Jensen：平均場（λ を先に平均）は寿命を短く見積もる。まれな熱い同居物の効果が M には入る（例題で 380 対 303）。</li>
+<li>Region LRU の T は「Region の最後の touch からの年齢」。物単位 LRU の T（16,125）とは別の量で、直接は比べない（T≈1,700〜1,800）。</li>
+<li>立ち上がり：空から詰めると最初の Region に熱い物が固まり ΛT が巨大で不死になる。隔離を入れると BHR の誤差 3.5→0.8pt <span class="tag t-em">実測</span>。</li>
+</ul>
+</div>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 5 章　サイズ分類の効果と、多分割（K ≥ 3）で起きること</div>
+<section class="slide"><span class="no">10</span>
+<h2>分類すると Λ が割れ、寿命が指数的に割れる</h2>
+<p class="msg">混在では全 Region の Λ がならされる。サイズで分けると小物の Region だけ Λ が高く、長生きする。LRU は自然に容量を小物へ寄せる。</p>
+<div class="cols">
+<div>
+<div class="math">\[ \Lambda_k\approx n_k\,\mathbb{E}_{\rm ins}[\lambda]=R\cdot\mathbb{E}_{\rm ins}\!\Big[\frac{\lambda}{s}\Big] \]
+\[ C_k\ \approx\ \frac{(\text{分類 }k\text{ への挿入バイト率})}{\phi_k}\cdot\frac{e^{\Lambda_kT}-1}{\Lambda_k} \]</div>
+<ul>
+<li>Λ_k / R = Region 1 バイトあたりのヒット率 = <b>価値密度 λ/s</b> <span class="tag t-pf">証明（平均場）</span>。</li>
+<li>例題：Λ は 小物 3.3×10⁻³ ／ 大物 1.2×10⁻³（2.7 倍）、寿命は <b>16 倍</b>。混在は両方 ≈1.9×10⁻³。</li>
+<li>負の帰還：小物が容量を取るほど小物はミスせず、E_ins[λ] が下がり Λ が下がる。つり合いが不動点。</li>
+</ul>
+</div>
+<div class="tbl"><table>
+<tr><th>方式（例題）</th><th class="n">OHR</th><th class="n">BHR</th><th class="n">小物の容量</th></tr>
+<tr><td>Region LRU 混在</td><td class="n">57.7</td><td class="n">67.6</td><td class="n">27%</td></tr>
+<tr><td>Region LRU サイズ分類</td><td class="n">73.7</td><td class="n">62.9</td><td class="n">62%</td></tr>
+<tr><td>（基準）物単位の最適分割</td><td class="n">78.1</td><td class="n">70.9</td><td class="n">49%</td></tr>
+</table>
+<p class="mut">サイズ分類の行は立ち上がり隔離つき（モデル 73.8/63.4、実測 73.7/62.9）。</p></div>
+</div>
+</section>
+
+<section class="slide"><span class="no">11</span>
+<h2>自然な配分は KKT 最適ではない：小物へ「寄せ過ぎ」</h2>
+<p class="msg">Region LRU の配分は「各分類の末尾の年齢をそろえる」仕組みで決まり、「限界値をそろえる」仕組みではない。だから最適（49%）を通り越す（62%）。</p>
+<svg viewBox="0 0 900 190" role="img" aria-label="小物の容量の割合">
+<g font-size="12">
+<text x="250" y="14" fill="var(--mut)">小物（S熱 + S冷）の容量の割合</text>
+<g><text x="240" y="44" text-anchor="end">物単位 LRU（共有）</text><rect x="250" y="32" width="146" height="18" fill="var(--sh)"/><text x="402" y="46">24%</text></g>
+<g><text x="240" y="74" text-anchor="end">Region FIFO（分類）</text><rect x="250" y="62" width="146" height="18" fill="var(--sh)"/><text x="402" y="76">24%</text></g>
+<g><text x="240" y="104" text-anchor="end">Region LRU 混在</text><rect x="250" y="92" width="162" height="18" fill="var(--sh)"/><text x="418" y="106">27%</text></g>
+<g><text x="240" y="134" text-anchor="end">物単位・KKT 最適</text><rect x="250" y="122" width="294" height="18" fill="var(--g)"/><text x="550" y="136">49%（基準）</text></g>
+<g><text x="240" y="164" text-anchor="end">Region LRU 分類</text><rect x="250" y="152" width="372" height="18" fill="var(--r)"/><text x="628" y="166">62%（行き過ぎ）</text></g>
+</g></svg>
+<ul>
+<li>物単位 LRU でも「共有」は限界値が 27 倍違った（第 2 章）。Region LRU の自然な配分は別の方向にずれる。<b>どちらも KKT 点ではない</b>。</li>
+<li>行き過ぎの理由：寿命が Λ に指数的に効くので、価値密度が少し高いだけで容量を取り切る（ブレーキの負の帰還が弱い）。</li>
+<li>だから「容量の下限 ff」で外から補正する必要がある（第 6 章）。</li>
+</ul>
+</section>
+
+<section class="slide"><span class="no">12</span>
+<h2>多分割（3 サイズ版）：分類を増やすと OHR は上がり BHR は下がる</h2>
+<p class="msg">S ｜ M ｜ L の 3 分類で OHR は最大（65.6%）、BHR は最低（56.9%）。理由は冷たい物の便乗：合計容量は分け方でほぼ変わらない。</p>
+<div class="cols">
+<div class="tbl"><table>
+<tr><th>方式（Region LRU）</th><th class="n">モデル OHR/BHR</th><th class="n">実測 OHR/BHR</th></tr>
+<tr><td>物単位 LRU（参考）</td><td class="n">61.3 / 74.4</td><td class="n">61.2 / 74.4</td></tr>
+<tr><td>混在</td><td class="n">55.8 / 64.8</td><td class="n">56.0 / 64.9</td></tr>
+<tr><td>S ｜ M+L</td><td class="n">63.2 / 59.0</td><td class="n">63.7 / 59.5</td></tr>
+<tr><td>S+M ｜ L</td><td class="n">63.1 / 58.1</td><td class="n">62.9 / 57.9</td></tr>
+<tr><td><b>S ｜ M ｜ L</b></td><td class="n"><b>65.6 / 56.9</b></td><td class="n"><b>65.8 / 57.1</b></td></tr>
+<tr><td class="mut">サイズ × 熱冷の 6 分類（理想）</td><td class="n mut">80.8 / 81.0</td><td class="n mut">未実測</td></tr>
+</table>
+<p class="mut">6 グループ：S/M/L = 4/16/64 KiB、各サイズに熱（物の 10% が要求の 80%）と冷。容量 160 MiB、Region 512 KiB。</p></div>
+<div class="tbl"><table>
+<tr><th>方式</th><th class="n">冷たい物の容量</th><th class="n">L熱の容量</th><th class="n">L熱の h</th><th class="n">BHR</th></tr>
+<tr><td>6 分類（理想）</td><td class="n">30%</td><td class="n">31%</td><td class="n">1.00</td><td class="n">81.0</td></tr>
+<tr><td>混在</td><td class="n">46%</td><td class="n">27%</td><td class="n">0.83</td><td class="n">64.8</td></tr>
+<tr><td>S ｜ M+L</td><td class="n">47%</td><td class="n">24%</td><td class="n">0.73</td><td class="n">59.0</td></tr>
+<tr><td>S+M ｜ L</td><td class="n">48%</td><td class="n">20%</td><td class="n">0.64</td><td class="n">58.1</td></tr>
+<tr><td>S ｜ M ｜ L</td><td class="n">48%</td><td class="n">20%</td><td class="n">0.63</td><td class="n">56.9</td></tr>
+</table></div>
+</div>
+<ul>
+<li><b>便乗</b>：同じ Region の物は同じ D を持つので、熱い物の Region に入った冷たい物も長く居る（h_j = λ_jL/(1+λ_jL)）。サイズ分類は同じサイズの熱/冷を分けない ⇒ 冷たい物の合計は 46〜48% で不変 <span class="tag t-em">実測</span>。</li>
+<li>分け方が変えるのは「どのサイズの冷たい物が便乗するか」だけで、その分は L熱 から削られる。BHR の 52% は L熱 が稼ぐので、L熱の容量が BHR を決める。</li>
+<li>冷たい合計を減らせるのは熱/冷で分ける 6 分類だけ（30%）。<span class="tag t-no">ただし理想分類（人気を事前に知る）</span>。書き込み時の情報でどこまで近づくかが次の研究課題。</li>
+</ul>
+</section>
+
+<section class="slide"><span class="no">13</span>
+<h2>多分割で理論が言えること・言えないこと</h2>
+<p class="msg">K がいくつでも「最適配分は存在し、一意（KKT）」。ただし Region LRU の自然な配分はそれに一致する保証がない。</p>
+<div class="tbl"><table>
+<tr><th>主張</th><th>K = 2</th><th>K ≥ 3</th><th>札</th></tr>
+<tr><td>静的分割の J は凹、KKT が必要十分</td><td>成り立つ</td><td>そのまま成り立つ（自由度 K−1、凹関数の和 + 線形制約）</td><td><span class="tag t-pf">証明</span></td></tr>
+<tr><td>最適の条件</td><td>2 分類の限界値が等しい</td><td>C_k &gt; 0 の全分類で ∂J/∂C_k が等しい</td><td><span class="tag t-pf">証明</span></td></tr>
+<tr><td>Region LRU の寿命式・不動点</td><td>成り立つ</td><td>分類ごとに M_k を持つだけで同じ（分類間の結合は T と容量）</td><td><span class="tag t-ap">近似</span></td></tr>
+<tr><td>分類を増やすと OHR↑ BHR↓</td><td>2 サイズで確認</td><td>3 サイズで確認（モデル・実測とも 0.5pt 以内）</td><td><span class="tag t-em">実測</span></td></tr>
+<tr><td>冷たい物の便乗は分け方で減らない</td><td>混在 48% / 分類 53%</td><td>46〜48%（どの分け方でも）</td><td><span class="tag t-em">実測</span></td></tr>
+<tr><td>自然な配分が KKT 点</td><td>否（62% 対 49%）</td><td>否の見込み（同じ機構）。3 分類の最適配分は未計算</td><td><span class="tag t-no">未保証</span></td></tr>
+</table></div>
+<details><summary>補足：なぜ「分類を増やすほど」ではなく「何で分けるか」が本質か</summary>
+<p>便乗は「同じ挿入の流れに熱と冷が混ざる」ことが原因なので、サイズ軸を何分割しても消えない。消せる軸は人気（頻度）だけ。サイズ分類の価値は OHR 側（価値密度 λ/s が小物ほど高い傾向）にあり、BHR 側ではコスト。このトレードオフを、再挿入と容量の下限で調整するのが次章。</p>
+</details>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 6 章　実行中の自動調整（RegionFlash の実装の理論）</div>
+<section class="slide"><span class="no">14</span>
+<h2>再挿入の閾値 n：書き直しの損得から出発する</h2>
+<p class="msg">追い出す Region の中の物（大きさ s）を書き直すか。比べる範囲は「この物の次の 1 滞在」。</p>
+<div class="cols">
+<div>
+<ul>
+<li><b>書き直す</b>：いま s バイト書く。次の滞在で要求が来れば（確率 p）ヒット。</li>
+<li><b>書き直さない</b>：消える。次の要求で（同じ時間範囲で確率 p）ミスして、やはり s バイト書く。</li>
+</ul>
+<div class="math">\[ \Delta(\text{ミス})=-p,\qquad \Delta(\text{書き込み})=s-ps=(1-p)\,s\ \ge 0 \]</div>
+<p>防げるミス 1 回あたりの追加書き込み = (1−p)s/p。<b>p が大きいほど安い</b>。交換比率を決めれば p の下限 p* になる（既定 p* = 0.5：書き直し 1 回で平均 0.5 回以上のミスを防ぎ、正味の書き込み 0.5s 以下）。</p>
+</div>
+<div class="card warn"><b>ここが詰められる点</b>
+<ul>
+<li>p* = 0.5 は<b>導出した値ではなく、方針パラメータ（交換比率）</b>。理論が与えるのは「p* を決めれば n* が一意に決まる」まで。</li>
+<li>容量を奪う効果（書き直した物が次の滞在の間、他の物の場所を取る）は式に入っていない。p* を上げるほど小さい。<span class="tag t-no">未保証</span></li>
+</ul></div>
+</div>
+</section>
+
+<section class="slide"><span class="no">15</span>
+<h2>なぜ「h ≥ n なら書き直す」という形が最適か</h2>
+<p class="msg">λ が全員同じなら h は何も教えない。λ が混ざると p(h) は h について増える ⇒ 閾値の規則が最適。</p>
+<div class="cols">
+<div>
+<div class="math">\[ P(N\ge n)=a_\lambda^{\,n}\ \ (\text{幾何分布、無記憶})\ \Rightarrow\ p=a_\lambda\ \text{は }h\text{ に依らない（λ 一定）} \]
+\[ \pi(\lambda\mid h)\propto\pi(\lambda)(1-a_\lambda)a_\lambda^{\,h},\qquad p(h)=\mathbb{E}[a_\lambda\mid h] \]</div>
+<ul>
+<li>a_λ^h は a_λ について単調尤度比 ⇒ 事後分布は h について確率的に増加 ⇒ <b>p(h) は h の非減少関数</b> <span class="tag t-pf">証明</span>。</li>
+<li>よって {h : p(h) ≥ p*} = {h ≥ n*}。n* = min{h : p(h) ≥ p*}。</li>
+<li>p(h) の形は分類ごとに違う（π(λ) と T_c が違う）⇒ <b>n は分類ごとに持つ</b>（K 分類にそのまま拡張できる）。</li>
+</ul>
+</div>
+<svg viewBox="0 0 400 230" role="img" aria-label="p(h) の推定と閾値">
+<g font-size="12"><line x1="40" y1="190" x2="380" y2="190" stroke="var(--mut)"/><line x1="40" y1="20" x2="40" y2="190" stroke="var(--mut)"/>
+<text x="210" y="218" text-anchor="middle">今回の滞在のヒット数 h</text><text x="12" y="105" transform="rotate(-90 12 105)" text-anchor="middle">p̂(h)</text>
+<line x1="40" y1="105" x2="380" y2="105" stroke="var(--g)" stroke-dasharray="4 3"/><text x="382" y="100" text-anchor="end" fill="var(--g)">p* = 0.5</text>
+<polyline fill="none" stroke="var(--lh)" stroke-width="2" points="80,128 180,98 280,87"/><g fill="var(--lh)"><circle cx="80" cy="128" r="4"/><circle cx="180" cy="98" r="4"/><circle cx="280" cy="87" r="4"/></g>
+<polyline fill="none" stroke="var(--sh)" stroke-width="2" points="80,128 180,75 280,45"/><g fill="var(--sh)"><circle cx="80" cy="128" r="4"/><circle cx="180" cy="75" r="4"/><circle cx="280" cy="45" r="4"/></g>
+<text x="80" y="206" text-anchor="middle">1</text><text x="180" y="206" text-anchor="middle">2</text><text x="280" y="206" text-anchor="middle">3</text>
+<text x="292" y="86" fill="var(--lh)">大物：n = 3</text><text x="292" y="48" fill="var(--sh)">小物：n = 2</text>
+</g></svg>
+</div>
+<div class="tbl"><table>
+<tr><th>実測の p̂(h)（合成 95:5）</th><th class="n">h=1</th><th class="n">h=2</th><th class="n">h=3</th><th class="n">選んだ n</th></tr>
+<tr><td>大物（512 KiB）</td><td class="n">0.34</td><td class="n">0.49</td><td class="n">0.55</td><td class="n"><b>3</b></td></tr>
+<tr><td>小物（1 KiB）</td><td class="n">0.34</td><td class="n">0.66</td><td class="n">0.81</td><td class="n"><b>2</b></td></tr>
+</table></div>
+<details><summary>補足：推定の実装と、なぜ ε 探索が要るか</summary>
+<p>分類 c・ヒット数 h ごとに「書き直した数」「次の滞在で 1 回以上当たった数」を数え、p̂ = (当たり+1)/(試行+2)（ラプラス）。n_c = min{h : p̂_c(h) ≥ p*}。閾値より下の h も確率 ε = 0.02 で書き直す。そうしないと下の h の p̂ が更新されず、条件が変わっても閾値が下がらない（選択バイアス）。手で振った最良（大物 n=3）と一致、書き込みは n=1 より 16% 少ない <span class="tag t-em">実測</span>。</p>
+<p>限界：p は現在の T_c で測る。再挿入を増やすと T_c が短くなり p が下がる（帰還）。n は実行中に決め直し続けるので帰還の釣り合いに落ち着くが、それが J の最適である保証はない <span class="tag t-no">未保証</span>。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">16</span>
+<h2>容量の下限 ff：山登り（perturb and observe）</h2>
+<p class="msg">2 分類なら J(ff) は凹 ⇒ 山が 1 つ。山が 1 つなら「窓ごとに J を測り、上がれば同じ向き、下がれば逆向き」で最適の ±δ に収束する。限界値の推定は要らない。</p>
+<div class="cols">
+<div>
+<ul>
+<li>C_L = ff·C、C_S = (1−ff)C。J(ff) は凹関数の和を 1 本の線に制限したもの ⇒ 凹 <span class="tag t-pf">証明</span>。</li>
+<li>実装：δ = 0.02、窓 = 4N 回の追い出し、J = ヒットバイト/要求バイト + w × ヒット数/要求数。</li>
+<li>出発点：その窓に受け入れた「大物のバイトの割合」（BMR を重く見るとき C_L/C ≥ B_L/B が必要。累積で数えると分類閾値が決まるまで全部小物に数えられ、0.1 付近になった）。</li>
+</ul>
+</div>
+<svg viewBox="0 0 420 220" role="img" aria-label="山登り">
+<g font-size="12"><line x1="40" y1="190" x2="400" y2="190" stroke="var(--mut)"/><line x1="40" y1="20" x2="40" y2="190" stroke="var(--mut)"/>
+<text x="220" y="215" text-anchor="middle">ff（大物の下限）</text><text x="12" y="105" transform="rotate(-90 12 105)" text-anchor="middle">J</text>
+<path d="M60,170 Q200,10 380,150" fill="none" stroke="var(--fg)" stroke-width="2"/>
+<g fill="var(--b)"><circle cx="355" cy="139" r="4"/><circle cx="320" cy="108" r="4"/><circle cx="285" cy="75" r="4"/><circle cx="250" cy="54" r="4"/><circle cx="215" cy="47" r="4"/><circle cx="180" cy="56" r="4"/></g>
+<path d="M355,139L320,108L285,75L250,54L215,47L180,56L215,47" fill="none" stroke="var(--b)" stroke-dasharray="3 3"/>
+<text x="360" y="128" fill="var(--b)">出発 ≈ 0.99</text><text x="215" y="36" text-anchor="middle" fill="var(--g)">最適の ±δ を往復</text>
+</g></svg>
+</div>
+<details><summary>補足：窓の長さ（ここが一番詰められる）</summary>
+<p>ff を下げた直後、小物の容量増 → 小物ヒット増は T_S の時間で見える（速い）。大物の Region が早く追い出される損は、追い出した大物が次に要求されてミスになる時間（~T_L 以上）で見える（遅い）。窓 W が遅れより短いと得だけ見えて損が見えず、ΔJ が「下げるほど良い」に偏る。W ≫ max(小物の反応時間, 大物の再要求までの時間)。実測：窓 N 回（3:1、約 6.8 万要求）では ff が 0.1 まで落ち（固定の最良より −5〜−7pt）、窓 4N で −0.08pt。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">17</span>
+<h2>なぜ「末尾のヒット密度」で限界値を測らないか（mv が負けた理由）</h2>
+<p class="msg">物単位 LRU ならスタック性で「末尾のヒット密度 = 限界値」。Region LRU では成り立たないので、推定を避ける山登りを選んだ。</p>
+<div class="cols">
+<ul>
+<li>Region に m 個の物が入り、<b>どれか 1 つが当たると Region ごと先頭に戻る</b>。小物の Region（4 MiB に 1 KiB が 4,096 個）は、ほぼ全部に熱い物が数個あり、数百要求ごとに当たる ⇒ 末尾でも冷えていない。</li>
+<li>末尾へのヒット = 「Region が救われた回数」であって、追い出すと失うもの（中の熱い物の今後のヒット）ではない。</li>
+</ul>
+<div class="tbl"><table>
+<tr><th>小物の分類（95:5、w=0.1）</th><th class="n">固定の下限 0.9</th><th class="n">mv</th></tr>
+<tr><td>Region 数</td><td class="n">56</td><td class="n">193</td></tr>
+<tr><td>追い出した Region の最終 touch 年齢（下位 10%）</td><td class="n">2,322</td><td class="n">3 要求</td></tr>
+<tr><td>小物の SSD ヒット</td><td class="n">2,771 万</td><td class="n">2,195 万</td></tr>
+<tr><td>目的 J</td><td class="n">0.8048</td><td class="n">0.7783</td></tr>
+</table></div>
+</div>
+<p>mv は自分の目的でも 2.6pt 負けた <span class="tag t-em">実測</span>。「推定が難しい量は推定せず、結果 J を直接見る」が方針の根拠。</p>
+</section>
+
+<section class="slide"><span class="no">18</span>
+<h2>多分割での自動調整：何が保証され、何が保証されないか</h2>
+<p class="msg">実装の下限 ff は「1 分類（fc）にしか掛からない」。K ≥ 3 では 1 次元の山登りが、K−1 次元の最適の 1 本の切り口を探索するだけになる。</p>
+<div class="cols">
+<div>
+<p><b>いまの実装（<code>region_basic.c</code>）</b></p>
+<ul>
+<li>下限は分類 fc だけ。LRU の末尾が fc で、n[fc] ≤ ff·N なら、他の分類で最も古い Region を追い出す。</li>
+<li>残りの K−1 分類は<b>全体 LRU のままで、自然な配分（第 11 枚）に任される</b>。</li>
+<li>再挿入の n は分類ごとに独立に推定できる（K 分類でそのまま）。</li>
+</ul>
+<p><b>保証されること</b></p>
+<ul>
+<li>fc とそれ以外の合計の間の 1 次元の最適（J の山が 1 つ）。</li>
+<li>n_c の形の最適性（p(h) 単調、分類ごと）。</li>
+</ul>
+</div>
+<div>
+<p><b>保証されないこと</b></p>
+<ul>
+<li>下限が掛からない K−1 分類どうしの配分が KKT 点になること。自然な配分は小物へ寄せ過ぎる（第 11 枚）のと同じ機構で、ずれる見込み <span class="tag t-no">未保証</span>。</li>
+<li>下限が効いていないとき（ff ≤ 自然な取り分）は J(ff) が平らで、山登りの向きは測定ノイズで決まる。この読みは<b>コードから見たもので、実験では未確認</b> <span class="tag t-no">未確認</span>。</li>
+<li>3 分類以上で山登りを回した実験は<b>ない</b>。第 12 枚の 3 サイズ結果は下限なし。</li>
+</ul>
+</div>
+</div>
+<div class="card as"><b>拡張案（提案。実装も測定もまだ）</b>
+<ul>
+<li>K−1 個の分類に下限 ff_k を付け、窓ごとに 1 つずつ（巡回）摂動する座標上昇。J は凹なので、滑らかなら座標上昇は大域最適に収束する。</li>
+<li>代償：収束に K−1 倍の窓が要る。窓は 4N 回の追い出しで、要求が時間変化する場合の追従はさらに遅くなる。SPSA（全方向を同時に乱数で摂動）なら窓数は K に依らないが、ノイズが増える。</li>
+<li>先に測るべきこと：3 サイズ版で「L だけに下限」の 1 次元山登りの J が、全 K−1 次元の格子探索の最良からどれだけ離れるか。離れが小さければ 1 次元で足りる。</li>
+</ul></div>
+<details><summary>補足：「1 次元で足りる」見込みの根拠（弱い）</summary>
+<p>3 サイズ版では BHR の 52% を L熱が稼ぎ、L熱の容量が BHR を決めた（第 12 枚）。最も不足するのが最大サイズなら、最大サイズに下限を掛ける 1 次元でおおむね足りる可能性がある。ただし M と S の間の配分は残る。これは見込みであって、結果ではない。</p>
+</details>
+</section>
+
+<section class="slide"><span class="no">19</span>
+<h2>実測（2 分類）：山登りは固定の最良の格子とほぼ同じ</h2>
+<p class="msg">BMR を重く見る使い方（w ≤ 0.1）では差は 0.1pt 以内。w が大きいと出発点から遠く、窓が長いぶん回数が足りない。</p>
+<div class="tbl"><table>
+<tr><th>山登り − 固定下限の格子の最良（J、pt）</th><th class="n">95:5</th><th class="n">3:1</th></tr>
+<tr><td>w = 0.03</td><td class="n">−0.02</td><td class="n">−0.02</td></tr>
+<tr><td>w = 0.1</td><td class="n">−0.08</td><td class="n">−0.08</td></tr>
+<tr><td>w = 0.3</td><td class="n">−1.1</td><td class="n">−0.05</td></tr>
+<tr><td>w = 1</td><td class="n r">−9.8</td><td class="n">−0.7</td></tr>
+</table></div>
+<ul>
+<li>w ≥ 0.3 の 95:5：最適（ff 0.5〜0.7）が出発点（≈0.99）から遠く、窓 4N の山登りは 28 回しか回らない。</li>
+<li>条件：分類は SplitThreshold が実行中に決める、6,000 万要求、再挿入なし <span class="tag t-em">実測</span>（合成のみ。実トレースでの多分割は未実施）。</li>
+</ul>
+</section>
+
+<!-- ================================================================ -->
+<div class="chap">第 7 章　まとめと想定問答</div>
+<section class="slide"><span class="no">20</span>
+<h2>どこまでが証明で、どこからが近似・実測・未保証か</h2>
+<div class="tbl"><table>
+<tr><th>結論</th><th>根拠</th><th>札</th><th>弱点（詰められる所）</th></tr>
+<tr><td>Che：h = 1−e^(−λT)</td><td>無記憶性、T 一定</td><td><span class="tag t-ap">近似</span></td><td>IRM。物が少ないと T のばらつき</td></tr>
+<tr><td>静的分割の J は凹、KKT が最適（K 分類）</td><td>d/dT E_w[λ] = −Var_w</td><td><span class="tag t-pf">証明</span></td><td>サイズ幅のある分類は条件つき（Cov(λ, λ/s) ≥ 0）</td></tr>
+<tr><td>Region の物は FIFO：h = λL/(1+λL)</td><td>再生報酬、任意停止</td><td><span class="tag t-pf">証明</span></td><td>サイクルが独立同分布（A3）</td></tr>
+<tr><td>Region LRU 寿命 (e^(ΛT)−1)/Λ</td><td>幾何和 + Wald</td><td><span class="tag t-pf">証明</span></td><td>T 一定。Region が少ないと誤差</td></tr>
+<tr><td>同居の独立、M_k^(n−1)</td><td>Palm–Khintchine</td><td><span class="tag t-ap">近似</span><span class="tag t-em">実測</span></td><td>分散/平均 0.97。n 大（4,096〜）で分類ありの BMR を 4〜6pt 悪く見積もる</td></tr>
+<tr><td>不動点の存在 / 一意</td><td>Brouwer / —</td><td><span class="tag t-pf">存在</span><span class="tag t-no">一意は未証明</span></td><td>—</td></tr>
+<tr><td>分類は Region FIFO では効かず LRU で効く</td><td>寿命 = T / 指数</td><td><span class="tag t-pf">証明</span><span class="tag t-em">実測</span></td><td>—</td></tr>
+<tr><td>自然な配分は KKT 点でない</td><td>末尾年齢の平準化 ≠ 限界値</td><td><span class="tag t-em">実測</span></td><td>3 分類の最適は未計算</td></tr>
+<tr><td>再挿入 n：h ≥ n の形</td><td>p(h) 単調（単調尤度比）</td><td><span class="tag t-pf">証明</span></td><td>p* は方針値。容量を奪う効果・T 帰還は未保証</td></tr>
+<tr><td>ff の山登りは最適の ±δ へ</td><td>J 凹 + 窓 ≫ 遅れ</td><td><span class="tag t-pf">2 分類</span><span class="tag t-no">K≥3 未保証</span></td><td>ff が下限（平らな領域あり）、時間変化への追従</td></tr>
+</table></div>
+</section>
+
+<section class="slide"><span class="no">21</span>
+<h2>想定問答（教授からの詰め）</h2>
+<details open><summary class="q">Q1. 独立参照モデルは実トレースで成り立たないのでは？</summary>
+<p>成り立たない。モデルは合成（IRM）で検証した。ただし制御（n の推定、ff の山登り）は<b>測定にだけ依存し、IRM を使わない</b>。IRM が使われるのは「閾値の形（h ≥ n）」と「J の山が 1 つ」という定性的な形だけ。実トレースでは、この 2 点が成り立つかを実験で確認している（全量トレース）。</p></details>
+<details><summary class="q">Q2. p* = 0.5 の根拠は？</summary>
+<p>導出した値ではない。「防ぎたいミス 1 回に何倍まで書いてよいか」という交換比率で、方針パラメータ。理論が保証するのは、p* を決めれば n* が一意に決まること。感度は別途測るべき点として認める。</p></details>
+<details><summary class="q">Q3. なぜ閾値型の規則が最適と言えるのか？</summary>
+<p>λ が一定なら h は無情報（幾何分布は無記憶）。λ が混ざると、事後分布が h について確率的に増加するので p(h) が非減少。非減少な p(h) について p(h) ≥ p* の集合は {h ≥ n*} になる。ただし最適性は「次の 1 滞在」での比較で、容量を奪う効果と T の帰還は入っていない。</p></details>
+<details><summary class="q">Q4. 分類が 3 つ以上になったらどうなる？</summary>
+<p>静的分割の最適性（凹、KKT）は K でそのまま成り立つ。Region LRU の寿命式も分類ごとに M_k を持つだけ。ただし実装の下限は 1 分類にしか掛からず、残りの配分は自然な配分に任される。それが最適である保証はない（2 分類で 62% 対 49% とずれた機構と同じ）。K−1 次元の座標上昇か SPSA に拡張できるが、未実装・未測定。3 サイズ版の実測は下限なしの比較だけで、そこでは分類を増やすと OHR↑ BHR↓、冷たい物の便乗は分け方で不変だった。</p></details>
+<details><summary class="q">Q5. 山登りがちゃんと収束する保証は？</summary>
+<p>2 分類の静的分割では J が凹で、窓が測定の遅れより長ければ最適の ±δ へ収束する。注意点が 3 つ：(1) ff は固定分割ではなく「下限」。効かない領域では J が平ら。(2) 窓が短いと大物の損が見えず ff が下がり続ける（窓 N で −5〜−7pt、4N で −0.08pt）。(3) 要求が時間変化する場合の追従速度は未保証。</p></details>
+<details><summary class="q">Q6. 末尾のヒット密度で限界値を測る方が理論的に自然では？</summary>
+<p>物単位 LRU ではスタック性で正しい。Region LRU は 1 つ当たると Region ごと先頭に戻るので、末尾でも冷えていない。実測で mv は自分の目的でも 2.6pt 負けた。「推定が難しい量は推定せず、J を直接見る」。</p></details>
+<details><summary class="q">Q7. Region FIFO で分類が効かないのは厳密か？</summary>
+<p>モデル上は厳密（寿命が全員 T）。実測の +1.5pt は混在の詰め残し（φ = 0.955）だけで説明でき、φ を入れたモデルが 0.1pt で一致。</p></details>
+<details><summary class="q">Q8. サイズ分類が OHR を上げて BHR を下げる理由を一言で。</summary>
+<p>Region の touch 率は「R × 中の物の価値密度 λ/s」で、寿命はそれについて指数的。分類すると価値密度の高い小物の Region だけが長生きし、LRU が容量を小物に寄せる（OHR↑）。その分大物の取り分が減り BHR↓。さらに冷たい小物が熱い小物に便乗して容量の約半分を取る。BHR は再挿入（n）と大物の下限（ff）で取り戻す。</p></details>
+<details><summary class="q">Q9. 検証範囲の限界は？</summary>
+<p>1 Region の物の数 n ≤ 901 で検証。SSD 規模（n = 4,096〜10,016）では分類ありの BMR を 4〜6pt 悪く見積もる（未解決）。Region 数 64 個で 2〜4pt。人気が変わる負荷の Region 部分は未完成。不動点の一意性は未証明。</p></details>
+</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Region キャッシュモデルの付録</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.8 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 16px 72px}
+h1{font-size:23px;margin:0 0 4px}h2{font-size:19px;margin:44px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}h3{font-size:16px;margin:26px 0 6px}
+.sub{color:var(--mut);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:12px 0;overflow-x:auto}
+.ok{border-left:4px solid var(--g)}.warn{border-left:4px solid var(--b)}.as{border-left:4px solid var(--a)}
+.thm{border:1px solid var(--line);border-left:4px solid var(--p);border-radius:8px;padding:6px 16px;margin:14px 0;overflow-x:auto}
+.thm>b:first-child{color:var(--p)}
+.pf{border-left:2px solid var(--line);padding:2px 0 2px 14px;margin:6px 0 14px;overflow-x:auto}
+.pf::before{content:"証明";font-weight:700;color:var(--mut);margin-right:8px}
+.qed{float:right;color:var(--mut)}
+.katex-display{overflow-x:auto;overflow-y:hidden;padding:2px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-size:12px}
+ol li,ul li{margin:3px 0}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"></script>
+</head>
+<body>
+<main>
+<h1>付録：Region 単位キャッシュのヒット率モデル — 導出の詳細</h1>
+<p class="sub">2026-11-06。本文 <a href="synth_size_class.html">synth_size_class.html</a> §2 の式を、仮定・補題・命題・証明の形で書き下した論文付録の草稿。初学者向けの段階的な説明は <a href="region_lru_derivation.html">region_lru_derivation.html</a>、数値例で通した版は <a href="che_to_region_walkthrough.html">che_to_region_walkthrough.html</a>。補題の数値確認は <code>tools/synth/appendix_check.py</code>（結果 <code>results/appendix_check.json</code>）、数値例の値は <code>tools/synth/toy_walk.py</code>（<code>results/toy_walk.json</code>）。</p>
+
+<div class="card ok"><b>主結果（定常モデルの全体）</b>
+<p>物 \(i\) の要求率を \(\lambda_i\)、大きさを \(s_i\)、分類（書き込みの流れ）を \(k=\kappa(i)\) とする。Region LRU の定常ヒット率は、次の連立方程式の解として与えられる。</p>
+\[
+\begin{aligned}
+h_i &= \frac{\lambda_i \ell_i}{1+\lambda_i \ell_i}, &
+\ell_i &= U_k + \int_0^{T} e^{\lambda_i t}\,\Psi_i(t)\,dt, &
+\Psi_i(t) &= \mathbb{E}^0_i\!\Big[\prod_{j\in r\setminus i} e^{\lambda_j t}\Big],\\[4pt]
+m_j &= \frac{\lambda_j}{1+\lambda_j \ell_j}, &
+U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
+\sum_i \frac{s_i h_i}{\phi^*_i} &= C .
+\end{aligned}
+\]
+<p>単一サイズの分類では \(\Psi_i(t)=M_k(t)^{\,n_k-1}\)、\(M_k(t)=\sum_{j\in\mathcal O_k} m_j e^{\lambda_j t}\big/\sum_{j\in\mathcal O_k} m_j\)、\(n_k=\lfloor R/s_k\rfloor\)、\(\phi^*_i=n_k s_k/R\)（厳密）。Region FIFO は積分を \(T\) に置き換えたもの、物単位 LRU は \(h_i=1-e^{-\lambda_i T}\)（Che 近似）。立ち上がりの隔離（§F）は、この定常解に「観測期間を生き延びる初期 Region の物は \(h_i=1\)」を重ねる。</p>
+</div>
+
+<div class="card as"><b>本付録で新たに埋めた隙間</b>（これまでの説明から増えた点）
+<ol>
+<li>物から見たサイクルの補題を、停止時刻と任意停止定理で証明した。物自身のヒットが Region を延命する自己 touch があっても成り立ち、在籍率（時間）とヒット率（要求）が一致する（補題 C.1）。</li>
+<li>寿命 \(D\) の分布全体を求めた。ラプラス変換と分散を出し、\(\Lambda T\to\infty\) で指数分布に近づくことを示した（補題 E.1、命題 E.2）。この結果が、隔離の生存確率 \(e^{-H/\mathbb{E}D}\) の根拠になる。</li>
+<li>同居の物が独立であることを、Palm–Khintchine の重ね合わせ定理から導いた（命題 E.3）。</li>
+<li>混在の Region について、Palm 分布（その物を含む Region の組成）を厳密に書いた。モデルの「物を先頭に置いて残りを詰める」近似は、Region の先頭が大物に偏る効果と、組成が大きさで偏る効果が打ち消し合うため、数値例で 0.5% の誤差に収まる（命題 E.5）。</li>
+<li>容量の条件を、寿命で重みをつけた充填率 \(\phi^*\) の厳密な恒等式として導いた（命題 E.6）。単一サイズの分類では厳密で、混在の Region では 0.5% の近似になる。</li>
+<li>静的分割について、ヒット数が容量の凹関数であることを \(d\mu/dT=-\mathrm{Var}_w(\lambda)\) で示し、KKT 条件が必要十分であることを示した（命題 B.2）。分数ナップサックが、先読みしない全方策の上限になることも示した（命題 B.4）。</li>
+<li>立ち上がりの充填が終わる時刻は、Che の \(T\) と同じ式で決まる（命題 F.1）。最初に詰まる Region の \(\Lambda\) が時間とともに減ることも、同じ \(-\mathrm{Var}\) の式から出る。</li>
+<li>スケール不変性（命題 G.1）と、不動点が存在すること（Brouwer、命題 E.8）を示した。</li>
+</ol></div>
+
+<h2>A. 系のモデル、仮定、記号</h2>
+<h3>A.1 キャッシュ</h3>
+<p>容量 \(C\) バイトの flash を、大きさ \(R\) の Region \(N_R=C/R\) 個に分ける。物は分類 \(k\in\mathcal K\) ごとの書き込みの流れを持ち、分類ごとに 1 個の「開いている Region」に到着順に追記される。次の物が収まらなければその Region を封じ、その物は新しい Region の先頭に置く（<b>詰め込みの規則</b>）。空きの Region が要るときに封じた Region を 1 個追い出す。追い出しの順は、全分類をまとめた 1 本の順序で決める。</p>
+<ul>
+<li><b>Region FIFO</b>：封じた時刻の最も古い Region を追い出す。</li>
+<li><b>Region LRU</b>：最後の touch の最も古い Region を追い出す。touch とは「封じること」と「中の物へのヒット」の 2 つ。</li>
+</ul>
+<p>ヒットしても物は動かない。追い出すと中の物はすべて消える。ミスした物はすべて受け入れる（DRAM なし・再挿入なし）。</p>
+
+<h3>A.2 負荷（IRM）</h3>
+<p>物 \(i\) への要求は率 \(\lambda_i\) のポアソン過程 \(N_i(t)\) で、物どうし独立とする。時間の単位は要求 1 回で、</p>
+\[ \sum_i \lambda_i = 1 . \tag{A.1}\]
+<p>離散の IRM（各要求が独立に物 \(i\) を確率 \(\lambda_i\) で選ぶ）をポアソン化したもの。物の数が多いとき、窓の中の要求の数の分布は両者で一致する。</p>
+
+<h3>A.3 近似（どこで使うか）</h3>
+<div class="tbl"><table>
+<tr><th>名前</th><th>内容</th><th>使う所</th><th>根拠・確認</th></tr>
+<tr><td>Ap1 特性時間</td><td>追い出し年齢 \(T(t)\) を定数 \(T\) とみなす（流体近似）</td><td>B, D, E</td><td>物 LRU では Che 近似（Fricker–Robert–Roberts 2012 で \(N\to\infty\) で漸近的に正確）。Region では CV が 256 個で 0.1、4096 個で 0.015（実測）</td></tr>
+<tr><td>Ap2 同居の独立性</td><td>物 \(i\) の挿入時の同居の物は、同じ分類の挿入の流れから独立に、重み \(m_j\) で引かれる</td><td>E.3〜E.5</td><td>命題 E.3。実測で温かい物の個数の分散/平均が 0.97</td></tr>
+<tr><td>Ap3 定常・再生</td><td>物 \(i\) の挿入から次の挿入までのサイクルは独立で同じ分布</td><td>C</td><td>立ち上がりは §F で別に扱う</td></tr>
+</table></div>
+
+<h3>A.4 記号</h3>
+<div class="tbl"><table>
+<tr><th>記号</th><th>意味</th></tr>
+<tr><td>\(\mathcal O_k\)、\(\kappa(i)\)</td><td>分類 \(k\) の物の集合、物 \(i\) の分類</td></tr>
+<tr><td>\(n_k=\lfloor R/s_k\rfloor\)、\(\bar n_k\)</td><td>単一サイズの分類の Region の物の数、混在の場合の物の数の平均</td></tr>
+<tr><td>\(h_i\)</td><td>物 \(i\) のヒット率（要求で数える）。補題 C.1 より在籍率（時間の割合）と等しい</td></tr>
+<tr><td>\(\ell_i=\mathbb{E}[L_i]\)</td><td>1 回の挿入から、その Region が追い出されるまでの滞在の平均</td></tr>
+<tr><td>\(m_i\)</td><td>物 \(i\) の挿入率（＝ミス率）</td></tr>
+<tr><td>\(D\)、\(U_k\)</td><td>封じてから追い出されるまでの Region の寿命、挿入から封じるまでの待ち</td></tr>
+<tr><td>\(\Lambda_r=\sum_{j\in r}\lambda_j\)</td><td>Region \(r\) の touch 率</td></tr>
+<tr><td>\(\mathbb{E}^0_i\)</td><td>Palm 期待値：物 \(i\) を含む Region についての平均</td></tr>
+<tr><td>\(\phi_r=B_r/R\)、\(\phi^*\)</td><td>Region の充填率（\(B_r\) は中の物のバイト数）、寿命で重みをつけた充填率</td></tr>
+</table></div>
+
+<h2>B. 物単位 LRU</h2>
+<h3>B.1 Che 近似</h3>
+<p>Ap1 のもとで、物 \(i\) が時刻 \(t\) にキャッシュにいるのは、\((t-T,t]\) に要求があったときに限る。時刻 \(t\) の要求の直前の要求までの時間（後ろ向きの再帰時間）は、ポアソン過程の記憶のなさから \(\mathrm{Exp}(\lambda_i)\) に従うので</p>
+\[ h_i = 1-e^{-\lambda_i T}. \tag{B.1}\]
+<p>キャッシュの中のバイト数の期待値が容量に等しいことから</p>
+\[ F(T) := \sum_i s_i\big(1-e^{-\lambda_i T}\big) = C . \tag{B.2}\]
+<div class="thm"><b>補題 B.1（\(T\) の一意性）</b>　\(F\) は連続で狭義増加で、\(F(0)=0\)、\(F(\infty)=\sum_i s_i\) である。したがって \(C\lt\sum_i s_i\) なら (B.2) の解 \(T\) はただ 1 つで、二分法で求まる。</div>
+<div class="pf">\(F'(T)=\sum_i s_i\lambda_i e^{-\lambda_i T}\gt 0\)。極限は各項の極限の和。<span class="qed">□</span></div>
+<p><b>数値例</b>（4 群の例：小物 4 KiB の熱 8,000 個・冷 72,000 個、大物 64 KiB の熱 800 個・冷 7,200 個。要求の割合は 0.60 / 0.15 / 0.20 / 0.05、\(C=128\) MiB）：\(T=16{,}125\)、OHR 0.628、BHR 0.769。</p>
+
+<h3>B.2 静的分割と、限界ヒット/バイト</h3>
+<p>分類 \(k\) に容量 \(C_k\)（\(\sum_k C_k=C\)）を与え、分類ごとに LRU を回す。\(T_k\) は \(F_k(T_k)=C_k\) で決まり、分類のヒットの率は \(H_k=\sum_{i\in\mathcal O_k}\lambda_i(1-e^{-\lambda_i T_k})\)。</p>
+<div class="thm"><b>命題 B.2（限界の価値と凹性）</b>
+\[ \frac{dH_k}{dC_k}=\mu_k(T_k),\qquad \mu_k(T):=\frac{\sum_{i\in\mathcal O_k}\lambda_i^2 e^{-\lambda_i T}}{\sum_{i\in\mathcal O_k}s_i\lambda_i e^{-\lambda_i T}} . \tag{B.3}\]
+分類の中で \(s_i=s_k\) なら、重み \(w_i\propto\lambda_i e^{-\lambda_i T}\) を使って \(\mu_k=\bar\lambda_w/s_k\) と書け、
+\[ \frac{d\mu_k}{dT}=-\frac{\mathrm{Var}_w(\lambda)}{s_k}\le 0 . \tag{B.4}\]
+したがって \(H_k\) は \(C_k\) の凹関数である。大きさに幅のある分類では \(v_i\propto s_i\lambda_i e^{-\lambda_i T}\) として \(d\mu_k/dT=-\mathrm{Cov}_v(\lambda,\lambda/s)\) となり、\(\lambda\) と \(\lambda/s\) が正に相関するとき凹になる。</div>
+<div class="pf">連鎖律から \(dH_k/dC_k=(dH_k/dT)/(dF_k/dT)\) で、分子は \(\sum\lambda_i^2e^{-\lambda_iT}\)、分母は \(\sum s_i\lambda_i e^{-\lambda_iT}\gt0\)。\(s_i=s_k\) のとき \(\mu_k=s_k^{-1}\sum_i w_i\lambda_i\) で、\(dw_i/dT=w_i(\bar\lambda_w-\lambda_i)\) だから
+\[ \frac{d\mu_k}{dT}=\frac{1}{s_k}\sum_i w_i\lambda_i(\bar\lambda_w-\lambda_i)=-\frac{1}{s_k}\Big(\sum_i w_i\lambda_i^2-\bar\lambda_w^2\Big)=-\frac{\mathrm{Var}_w(\lambda)}{s_k}. \]
+\(dC_k/dT\gt0\) なので \(d^2H_k/dC_k^2=(d\mu_k/dT)/(dC_k/dT)\le0\)。一般の場合は、\(\mu_k=\sum v_i(\lambda_i/s_i)/\sum v_i\) と \(dv_i/dT=-\lambda_i v_i\) から同様に出る。<span class="qed">□</span></div>
+<p>数値確認（小物の分類、\(T=10^3,1.6\times10^4,6\times10^4\)）：差分で求めた \(d\mu/dT\) と \(-\mathrm{Var}_w(\lambda)\) は有効数字 9 桁で一致した（C3）。</p>
+
+<div class="thm"><b>命題 B.3（OHR 最適の分割）</b>　\(\max\sum_k H_k(C_k)\)（ただし \(\sum_k C_k=C\)、\(0\le C_k\le\sum_{i\in\mathcal O_k}s_i\)）の解は、ある \(\mu\) について
+\[ \mu_k(T_k)=\mu\ \ (0\lt C_k),\qquad \mu_k(0)=\frac{\sum\lambda_i^2}{\sum s_i\lambda_i}\le\mu\ \ (C_k=0) \tag{B.5}\]
+を満たす配分で、これは最適の必要十分条件である。</div>
+<div class="pf">目的関数は凹関数（命題 B.2）の和で、制約は線形なので、KKT 条件が必要十分。ラグランジュ乗数が \(\mu\) である。\(\mu_k\) は \(T\) について単調なので、\(\mu\) を外側で二分し、内側で \(T_k=\mu_k^{-1}(\mu)\) を解けばよい（<code>toy_walk.py</code> の step2）。<span class="qed">□</span></div>
+<p><b>BHR 最適</b>：ヒットを \(B_k=\sum s_i\lambda_i h_i\) に置き換えると、限界は \(\mu'_k=\sum s_i\lambda_i^2e^{-\lambda_iT}/\sum s_i\lambda_ie^{-\lambda_iT}\) になる。単一サイズなら \(\bar\lambda_w\) そのもので、境目の \(\lambda\) をそろえることに当たる。共有 LRU が与えるのは全分類で同じ \(T\) であって、同じ \(\bar\lambda_w\) ではない。したがって共有 LRU が BHR 最適になるのは \(\bar\lambda_{w,k}(T)\) が全分類で等しいときだけで、一般には近似的に最適というにとどまる（W1・容量 10% で BHR 0.593 対 0.594）。</p>
+<p><b>数値例</b>：\(T_S=57{,}205\)、\(T_L=7{,}584\)、\(C_S:C_L=48.8:51.2\)、OHR 0.781、BHR 0.709。</p>
+
+<div class="thm"><b>命題 B.4（分数ナップサックによる上限）</b>　IRM のもとで、未来の要求を見ない（先読みしない）任意の受け入れ・追い出しの方策について
+\[ \mathrm{OHR}\le\max_{x}\Big\{\sum_i\lambda_i x_i\ :\ \sum_i s_i x_i\le C,\ 0\le x_i\le1\Big\}, \tag{B.6}\]
+で、右辺は \(\lambda_i/s_i\) の大きい順に詰める貪欲解で達成される。BHR では \(\lambda_i\) を \(s_i\lambda_i\) に置き換え、\(\lambda_i\) の順に詰める。</div>
+<div class="pf">\(x_i\) を物 \(i\) がキャッシュにいる時間の割合（長時間平均）とする。方策が先読みしないので、物 \(i\) の未来の要求は今のキャッシュの状態と独立（LAA）で、PASTA から、物 \(i\) の要求のうちヒットする割合は \(x_i\) になる。各時刻で \(\sum_i s_i\mathbf 1\{i\in\text{cache}\}\le C\) なので、時間平均でも \(\sum s_ix_i\le C\)。線形計画の解が貪欲解になるのは分数ナップサックの標準的な結果（Dantzig）。<span class="qed">□</span></div>
+
+<h2>C. 物から見た Region キャッシュ（中心となる補題）</h2>
+<svg viewBox="0 0 900 190" role="img" aria-label="物から見たサイクル">
+ <line x1="30" y1="90" x2="870" y2="90" stroke="var(--mut)"/>
+ <rect x="60" y="70" width="110" height="40" fill="var(--a)" fill-opacity=".15" stroke="var(--a)"/>
+ <rect x="170" y="70" width="460" height="40" fill="var(--a)" fill-opacity=".35" stroke="var(--a)"/>
+ <rect x="630" y="70" width="170" height="40" fill="none" stroke="var(--mut)" stroke-dasharray="4 3"/>
+ <g font-size="12"><text x="115" y="95" text-anchor="middle">U（開いている）</text><text x="400" y="95" text-anchor="middle">D（封じてから。touch 率 Λ）</text><text x="715" y="95" text-anchor="middle">V ~ Exp(λᵢ)：いない</text></g>
+ <g stroke="var(--g)" stroke-width="2"><line x1="60" y1="55" x2="60" y2="125"/><line x1="800" y1="55" x2="800" y2="125"/></g>
+ <text x="60" y="48" text-anchor="middle" fill="var(--g)">ミス → 挿入</text><text x="800" y="48" text-anchor="middle" fill="var(--g)">ミス → 挿入</text>
+ <g fill="var(--b)"><circle cx="120" cy="90" r="4"/><circle cx="250" cy="90" r="4"/><circle cx="330" cy="90" r="4"/><circle cx="455" cy="90" r="4"/></g>
+ <g fill="var(--mut)"><circle cx="200" cy="90" r="3"/><circle cx="290" cy="90" r="3"/><circle cx="380" cy="90" r="3"/><circle cx="410" cy="90" r="3"/><circle cx="470" cy="90" r="3"/></g>
+ <line x1="470" y1="140" x2="630" y2="140" stroke="var(--r)" stroke-width="2"/><text x="550" y="158" text-anchor="middle" fill="var(--r)">touch のない時間が T に達する → 追い出し</text>
+ <text x="30" y="182" fill="var(--mut)">● 橙：物 i 自身の要求（ヒット、Region も延命）　● 灰：同居の物の要求（touch）。滞在 L = U + D は全要求で決まる停止時刻。</text>
+ <text x="430" y="30" text-anchor="middle" font-weight="700">1 サイクル ＝ 挿入 1 回（ミス 1 回）＋ 滞在中のヒット</text>
+</svg>
+<p>Region キャッシュでは、物 \(i\) は挿入（ミス）から、自分の入った Region が追い出されるまでキャッシュにいる。挿入の時刻を区切りにして、1 サイクルを \(L\)（滞在）と \(V\)（いない時間）に分ける。</p>
+<div class="thm"><b>補題 C.1（滞在 \(\ell\) の FIFO）</b>　Ap3 を仮定し、\(\ell_i=\mathbb{E}[L]\lt\infty\) とする。全物の要求過程が生成するフィルトレーションを \(\mathbb F\) とすると、次が成り立つ。
+<ol>
+<li>\(V\sim\mathrm{Exp}(\lambda_i)\) で、\(L\) と独立。</li>
+<li>1 サイクルのヒット数の期待値は \(\lambda_i\ell_i\)。</li>
+<li>要求で数えたヒット率と、時間で数えた在籍率は等しく、
+\[ h_i=\frac{\lambda_i\ell_i}{1+\lambda_i\ell_i}. \tag{C.1}\]</li>
+<li>挿入率は \(m_i=\dfrac{\lambda_i}{1+\lambda_i\ell_i}=\lambda_i(1-h_i)\) で、\(h_i=m_i\ell_i\)（Little の公式）。</li>
+</ol>
+\(L\) の分布の形も、\(L\) が物 \(i\) 自身の要求に依ること（自己 touch）も結論に影響しない。</div>
+<div class="pf">挿入時刻を \(\sigma\)、Region が追い出される時刻を \(\tau\) とする。\(\tau\) は、過去の touch と Ap1 の規則（touch のない時間が \(T\) に達したら追い出す）だけで決まるので \(\mathbb F\) の停止時刻である。
+(i) ポアソン過程の強マルコフ性から、\(N_i(\tau+\cdot)-N_i(\tau)\) は \(\mathcal F_\tau\) と独立な率 \(\lambda_i\) のポアソン過程。よって次の要求までの時間 \(V\) は \(\mathrm{Exp}(\lambda_i)\) で、\(L=\tau-\sigma\) と独立。
+(ii) \(N_i(t)-\lambda_i t\) は \(\mathbb F\) のマルチンゲールである。有界な停止時刻 \(\tau\wedge u\) に任意停止定理を当て、\(u\to\infty\) で単調収束定理を使うと（\(\mathbb{E}\tau\lt\infty\)）、\(\mathbb{E}[N_i(\tau)-N_i(\sigma)]=\lambda_i\mathbb{E}[\tau-\sigma]=\lambda_i\ell_i\)。\((\sigma,\tau]\) の要求はすべてヒット。
+(iii) 1 サイクルの要求は「ミス 1 回 ＋ ヒット \(N_i(\tau)-N_i(\sigma)\) 回」。再生報酬定理（Ap3）から \(h_i^{\rm req}=\lambda_i\ell_i/(1+\lambda_i\ell_i)\)。時間で数えると、報酬はいる時間 \(L\)、サイクルの長さは \(L+V\) なので、\(h_i^{\rm time}=\ell_i/(\ell_i+1/\lambda_i)\) で同じ値になる。（在籍の状態は過去だけで決まり、\(N_i\) の未来はそれと独立なので、PASTA からも \(h^{\rm req}=h^{\rm time}\) が出る。）
+(iv) サイクルの長さの平均は \(\ell_i+1/\lambda_i\) で、1 サイクルに挿入は 1 回。<span class="qed">□</span></div>
+<p>数値確認（C2：\(\lambda_i=0.01\)、同居の touch 率 0.002、\(T=300\)、10 万サイクル）：要求で数えた \(h\) は 0.96744、時間で数えた \(h\) は 0.96751、(C.1) の値は 0.96739。1 サイクルのヒット数は 29.71 で、\(\lambda_i\ell_i\) は 29.67。</p>
+
+<h2>D. Region FIFO</h2>
+<div class="thm"><b>命題 D.1</b>　Region FIFO で Ap1 を仮定すると、封じた Region はすべて、封じてから同じ時間 \(T_F\) で追い出される。\(T_F\) は、封じた Region の数 \(N_s\) を封じる率 \(\rho\) で割ったもの（Little の公式）。したがって
+\[ \ell_i=U_{\kappa(i)}+T_F,\qquad h_i=\frac{\lambda_i(U_k+T_F)}{1+\lambda_i(U_k+T_F)},\qquad \sum_i\frac{s_ih_i}{\phi_{\kappa(i)}}=C. \tag{D.1}\]</div>
+<div class="thm"><b>系 D.2（分類は効かない）</b>　\(U_k\ll T_F\) で、充填率 \(\phi_k\) が全分類で等しければ、\(\{h_i\}\) は分類の方法 \(\kappa\) に依らない。</div>
+<div class="pf">(D.1) で \(\kappa\) が入るのは \(U_k\) と \(\phi_k\) だけ。その 2 つが共通なら、容量の式 \(\sum_i s_i h_i(T_F)/\phi=C\) は \(\kappa\) を含まず、補題 B.1 と同じ理由で解がただ 1 つ。<span class="qed">□</span></div>
+<p>数値例：分割ありで \(T_F=20{,}322\)、\(U_S=167\)、\(U_L=46\)（\(U/T_F\le0.8\%\)）。混在では \(\phi=0.955\)、分割では \(\phi=1\)。実測の「分類の利得 +1.5pt」は、この詰め残しの差だけで説明でき、\(\phi\) を入れたモデルは実測と 0.1pt で一致した。</p>
+
+<h2>E. Region LRU</h2>
+<h3>E.1 Region の寿命</h3>
+<p>Ap1 のもとで、LRU は「最後の touch からの年齢が \(T\) に達した Region」を追い出す。生きている Region の年齢はすべて \(T\) 未満で、\(T\) に達した Region が最も古いからである。封じた後の中身は変わらないので（A.1）、封じた後の touch は率 \(\Lambda=\sum_{j\in r}\lambda_j\) のポアソン過程になる（独立なポアソン過程の重ね合わせ）。封じた時刻を 0 とすると、寿命 \(D\) は「touch のない時間が初めて \(T\) に達する時刻」である。</p>
+<div class="thm"><b>補題 E.1（寿命の分布）</b>　\(p=e^{-\Lambda T}\) とおくと
+\[ \mathbb{E}\big[e^{-\theta D}\big]=\frac{(\Lambda+\theta)\,e^{-(\Lambda+\theta)T}}{\theta+\Lambda e^{-(\Lambda+\theta)T}}, \tag{E.1}\]
+\[ \mathbb{E}[D]=\frac{e^{\Lambda T}-1}{\Lambda}=\int_0^T e^{\Lambda t}\,dt, \tag{E.2}\]
+\[ \mathrm{Var}[D]=\frac{1-p^2}{p^2\Lambda^2}-\frac{2T}{p\Lambda}. \tag{E.3}\]</div>
+<div class="pf">最初の touch の時刻を \(X\sim\mathrm{Exp}(\Lambda)\) とする。\(X\gt T\) なら \(D=T\)。\(X\le T\) なら、時刻 \(X\) で時計が戻り、ポアソン過程の記憶のなさから \(D=X+D'\)（\(D'\) は \(D\) と同じ分布で \(X\) と独立）。よって
+\[ \mathbb{E}[e^{-\theta D}]=p\,e^{-\theta T}+\mathbb{E}\big[e^{-\theta X};X\le T\big]\,\mathbb{E}[e^{-\theta D}],\qquad
+\mathbb{E}\big[e^{-\theta X};X\le T\big]=\frac{\Lambda}{\Lambda+\theta}\big(1-e^{-(\Lambda+\theta)T}\big). \]
+これを解くと (E.1) になる。平均は同じ分解から \(\mathbb{E}D=\mathbb{E}[\min(X,T)]+(1-p)\,\mathbb{E}D\) で、\(\mathbb{E}\min(X,T)=(1-p)/\Lambda\) より \(\mathbb{E}D=(1-p)/(p\Lambda)\)。2 次の積率は \(\mathbb{E}D^2=T^2p+\mathbb{E}[X^2;X\le T]+2\,\mathbb{E}[X;X\le T]\,\mathbb{E}D+(1-p)\,\mathbb{E}D^2\) に、
+\(\mathbb{E}[X;X\le T]=(1-p)/\Lambda-Tp\) と \(\mathbb{E}[X^2;X\le T]=2(1-p)/\Lambda^2-pT^2-2pT/\Lambda\) を入れて
+\[ \mathbb{E}D^2=\frac{2(1-p)}{p^2\Lambda^2}-\frac{2T}{p\Lambda}. \]
+ここから \(\mathbb{E}D\) の 2 乗を引けば (E.3)。<span class="qed">□</span></div>
+<div class="thm"><b>命題 E.2（指数分布への収束）</b>　\(\Lambda T\to\infty\) のとき \(D/\mathbb{E}D\Rightarrow\mathrm{Exp}(1)\)。したがって \(\Lambda T\gg1\) では
+\[ \Pr(D\gt H)\approx\exp\!\Big(-\frac{H}{\mathbb{E}D}\Big). \tag{E.4}\]</div>
+<div class="pf">\(D=T+\sum_{m=1}^{K-1}Y_m\) と書ける。\(Y_m\) は \(X\mid X\le T\) と同じ分布で独立、\(0\le Y_m\le T\)。\(K-1\) は成功確率 \(p\) の幾何分布。\(p\to0\) で、成功確率が 0 に近づく幾何和を平均で割ったものは \(\mathrm{Exp}(1)\) に収束する（Rényi の定理）。\(T/\mathbb{E}D\to0\) なので、先頭の \(T\) は効かない。<span class="qed">□</span></div>
+<div class="tbl"><table>
+<tr><th>C1（20 万標本）</th><th class="n">\(\Lambda T\)</th><th class="n">平均（実測 / 式）</th><th class="n">分散（実測 / 式）</th><th class="n">\(\Pr(D\gt3\,\mathbb{E}D)\)（実測 / \(e^{-3}\)）</th></tr>
+<tr><td>\(\Lambda=1\)</td><td class="n">1</td><td class="n">1.717 / 1.718</td><td class="n">0.951 / 0.952</td><td class="n">0.012 / 0.050</td></tr>
+<tr><td></td><td class="n">3</td><td class="n">19.14 / 19.09</td><td class="n">284.6 / 281.9</td><td class="n">0.038 / 0.050</td></tr>
+<tr><td></td><td class="n">6</td><td class="n">400.9 / 402.4</td><td class="n">156,571 / 157,913</td><td class="n">0.0487 / 0.0498</td></tr>
+</table></div>
+<p>\(\Lambda T\) が小さいと尾が指数分布より軽い（\(D\ge T\) で、ばらつきが小さい）。(E.4) は \(\Lambda T\gtrsim5\) で使える。隔離（§F）で問題になる Region は \(\Lambda T=9\)〜\(4917\) なので、この範囲に入る。</p>
+
+<h3>E.2 物の滞在を同居の物で平均する</h3>
+<p>物 \(i\) の滞在は \(L=U+D\)。\(D\) は、物 \(i\) を含む Region \(r\) の組成で決まる。組成を与えれば \(D\) の分布は補題 E.1 で決まる（封じた後の touch は過去と独立）。組成について Palm 期待値 \(\mathbb{E}^0_i\) をとり、被積分関数が非負なので Tonelli の定理で積分と期待値を入れ替えると</p>
+\[ \ell_i=U_k+\mathbb{E}^0_i\Big[\int_0^Te^{\Lambda_r t}dt\Big]=U_k+\int_0^Te^{\lambda_i t}\,\Psi_i(t)\,dt,\qquad \Psi_i(t)=\mathbb{E}^0_i\Big[\prod_{j\in r\setminus i}e^{\lambda_j t}\Big]. \tag{E.5}\]
+<p>\(e^{\lambda_i t}\) は確率的でないので期待値の外に出る。物 \(i\) の要求には 2 つの役割があり、二重には数えていない。寿命を延ばす役割は \(\Lambda_r\) に入り、ヒットの数の役割は (C.1) の \(\lambda_i\ell_i\) に入る。</p>
+
+<h3>E.3 同居の物の分布</h3>
+<div class="thm"><b>命題 E.3（同居の物の独立性）</b>　分類 \(k\) の挿入の流れは、物 \(j\in\mathcal O_k\) ごとの挿入時刻の点過程（定常、率 \(m_j\)、互いに独立）の重ね合わせである。\(\max_j m_j/\sum_{j'}m_{j'}\to0\) なら、重ね合わせはポアソン過程に収束し（Palm–Khintchine／Grigelionis の定理）、続けて挿入される物の名前は独立に
+\[ \Pr(J=j)=\frac{m_j}{\sum_{j'\in\mathcal O_k}m_{j'}} \tag{E.6}\]
+に従う。単一サイズの分類では Region に \(n_k\) 個がちょうど入るので
+\[ \Psi_i(t)=M_k(t)^{\,n_k-1},\qquad M_k(t)=\frac{\sum_{j\in\mathcal O_k}m_je^{\lambda_jt}}{\sum_{j\in\mathcal O_k}m_j}. \tag{E.7}\]</div>
+<div class="pf">重ね合わせの極限定理の条件は、個々の点過程が「まばら」であること（各成分の率が全体の率に比べて 0 に近づく）。極限のポアソン過程の点に付く名前の分布は、各成分の率に比例する。独立な名前の積の期待値は期待値の積で、\(\mathbb{E}[e^{\lambda_Jt}]=M_k(t)\)。物 \(i\) 自身が同居の物に混ざる確率 \(O(m_i/\sum m)\) は無視する。<span class="qed">□</span></div>
+<p>数値例で、挿入の流れに占める 1 個の物の割合の最大は \(7.4\times10^{-5}\)（C4）。熱い物は \(\lambda_j\ell_j\) が大きく \(m_j\) が小さいので、条件はむしろ満たしやすい。Ap2 はもう 1 つ、「一緒に追い出された物が、次の Region でまた同居しない」ことも仮定している。一緒に追い出された物は、それぞれ独立な \(\mathrm{Exp}(\lambda_j)\) の時間の後にミスするので、この仮定は物の数が多いほど正しい。実測では、温かい物の個数の分散/平均が 0.97 で、独立（ポアソン）の場合の 1.00 とほぼ同じだった。</p>
+
+<div class="thm"><b>命題 E.4（Jensen：平均場は寿命を短く見積もる）</b>　\(\bar\lambda^{\rm ins}_k=\sum m_j\lambda_j/\sum m_j\) とおくと、\(M_k(t)\ge e^{\bar\lambda^{\rm ins}_kt}\) なので
+\[ \ell_i\ \ge\ \ell_i^{\rm MF}:=U_k+\frac{e^{(\lambda_i+(n_k-1)\bar\lambda^{\rm ins}_k)T}-1}{\lambda_i+(n_k-1)\bar\lambda^{\rm ins}_k}. \tag{E.8}\]
+等号が成り立つのは \(\lambda_J\) が 1 点に集中するときだけ。</div>
+<div class="pf">\(x\mapsto e^{xt}\) は凸関数なので、Jensen の不等式から \(\mathbb{E}e^{\lambda_Jt}\ge e^{t\mathbb{E}\lambda_J}\)。被積分関数は \(M_k\) について増加。<span class="qed">□</span></div>
+<p>数値例（分割あり、\(T=1{,}724\)）：小物の分類で \((n-1)\log M_S(T)=5.94\)、平均場の指数は \(5.71\)。小物の熱い物の封じてからの寿命は 119,370（式）に対して平均場では 101,466（−15%）。</p>
+
+<h3>E.4 混在の Region：Palm 分布</h3>
+<p>サイズの違う物が混ざると、Region の組成 \(c=(a_\sigma)_\sigma\)（サイズ \(\sigma\) の物の数）がばらつく。詰め込みの規則（A.1）から、Region の先頭の物は前の Region から溢れた物なので、挿入の流れからの無作為な 1 個ではない。</p>
+<div class="thm"><b>命題 E.5（混在の Region の組成）</b>　Region の先頭のサイズは、溢れた物のサイズを次の状態とするマルコフ連鎖で、その定常分布を \(\pi\) とする。封じた Region の組成の分布は \(P(c)=\sum_f\pi_f\,P(c\mid\text{先頭}=f)\)。サイズ \(\sigma\) の物 \(i\) から見た組成（Palm 分布）は、大きさで偏らせた
+\[ P^0_\sigma(c)=\frac{a_\sigma(c)\,P(c)}{\sum_{c'}a_\sigma(c')P(c')},\qquad \Psi_i(t)=\sum_cP^0_{\sigma(i)}(c)\prod_{\sigma'}M_{\sigma'}(t)^{\,a_{\sigma'}(c)-\delta_{\sigma'\sigma(i)}} \tag{E.9}\]
+である（\(M_{\sigma'}\) はサイズ \(\sigma'\) の物の挿入の流れの積率母関数）。モデル（<code>synth_model</code>・<code>toy_walk</code>）は代わりに \(P(\cdot\mid\text{先頭}=\sigma(i))\)、つまり「物 \(i\) を先頭に置き、残りを流れから詰める」を使っている。</div>
+<div class="pf">Region の組成が \(c\) である割合は \(P(c)\) で、そのような Region に入るサイズ \(\sigma\) の挿入は \(a_\sigma(c)\) 個ある。印をつけた挿入は、サイズ \(\sigma\) の挿入の中から一様に選んだものなので、その Region の組成は \(a_\sigma\) で重みをつけた分布に従う（Palm の反転公式）。同居の物の名前は命題 E.3 から独立。<span class="qed">□</span></div>
+<p>2 つの偏りは逆向きに働く。(a) Region の先頭は大物に偏る。数値例では、流れの中の大物の割合 17.6% に対して、先頭が大物である割合は 77.4%（大物のほうが溢れやすい）。(b) Palm 分布は物の数の多い Region に偏る。「先頭に置く」近似はどちらも無視しているが、どちらの分布でも残りの約 \(R-s_i\) バイトを独立な流れで詰める点は同じで、違いは境目の 1 個分だけである。数値例（C4、混在の不動点）の結果：</p>
+<div class="tbl"><table>
+<tr><th>物 \(i\) のサイズ</th><th>組成の分布</th><th class="n">同居の小物の数</th><th class="n">同居の大物の数</th><th class="n">\(\mathbb{E}\!\int_0^T\prod_j e^{\lambda_jt}dt\)</th></tr>
+<tr><td>小物</td><td>厳密な Palm (E.9)</td><td class="n">30.06</td><td class="n">5.71</td><td class="n">23,192</td></tr>
+<tr><td></td><td>先頭に置く（モデル）</td><td class="n">30.01</td><td class="n">5.70</td><td class="n">23,070（−0.5%）</td></tr>
+<tr><td></td><td>（参考）先頭も流れから引いた Palm</td><td class="n">32.59</td><td class="n">5.55</td><td class="n">26,916（+16%）</td></tr>
+<tr><td>大物</td><td>厳密な Palm (E.9)</td><td class="n">26.65</td><td class="n">4.98</td><td class="n">16,302</td></tr>
+<tr><td></td><td>先頭に置く（モデル）</td><td class="n">26.61</td><td class="n">4.97</td><td class="n">16,221（−0.5%）</td></tr>
+</table></div>
+<p>(b) の偏りだけを入れると、寿命を 16% 長く見積もる。モデルが実測と合うのは、(a) と (b) が打ち消し合うためで、偶然ではない。</p>
+
+<h3>E.5 容量の条件</h3>
+<div class="thm"><b>命題 E.6（容量の恒等式）</b>　封じた Region が容量 \(C\) を埋めている定常状態で、
+\[ C=\sum_i s_i\,m_i\,\mathbb{E}^0_i\!\Big[\frac{D_r}{\phi_r}\Big]=\sum_i\frac{s_ih_i^{\rm s}}{\phi_i^*},\qquad \phi_i^*:=\frac{\mathbb{E}^0_i[D_r]}{\mathbb{E}^0_i[D_r/\phi_r]}. \tag{E.10}\]
+\(h_i^{\rm s}=m_i\,\mathbb{E}^0_iD_r\) は、封じた Region にいる時間の割合。\(\phi_i^*\) は物 \(i\) から見た、寿命で重みをつけた充填率（調和平均）。単一サイズの分類では \(\phi_r\equiv n_ks_k/R\) なので、\(\phi^*=\phi\) が厳密に成り立つ。</div>
+<div class="pf">Region の封じる率を \(\rho\) とすると、Little の公式から封じた Region の数の平均は \(\rho\,\mathbb{E}D_r\) で、それに \(R\) を掛けたものが \(C\)。各 Region について \(R\,D_r=\sum_{j\in r}s_jD_r/\phi_r\)（\(\sum_{j\in r}s_j=B_r=\phi_rR\)）。両辺の率をとると、Campbell の公式から、物 \(j\) の Region への所属は率 \(m_j\) で起こるので \(\rho\,\mathbb{E}[\sum_{j\in r}g_j(r)]=\sum_j m_j\mathbb{E}^0_j[g_j]\)。\(g_j=s_jD_r/\phi_r\) とおけばよい。後半は Little の公式 \(h^{\rm s}_j=m_j\mathbb{E}^0_jD_r\)。<span class="qed">□</span></div>
+<p>モデルは \(\phi^*_i\) を Region の充填率の平均 \(\phi_k\) で置き換え、滞在に \(U\) を含めた \(h_i\) を使う（開いている Region も \(C\) に数える場合に当たる。違いは \(O(|\mathcal K|R/C)\)）。数値例の混在の Region では、\(\phi=0.9544\)、寿命で重みをつけると \(0.9593\) で、容量の誤差は 0.5%。</p>
+
+<h3>E.6 封じるまでの待ち</h3>
+<div class="thm"><b>補題 E.7</b>　Ap2 のもとで分類の挿入の流れが率 \(\sum_{j\in\mathcal O_k}m_j\) のポアソン過程なら、物 \(i\) の後に同じ Region へ入る物の数の平均は \((\bar n_k-1)/2\)（物の位置は一様）で、
+\[ U_k=\frac{\bar n_k-1}{2\sum_{j\in\mathcal O_k}m_j}. \tag{E.11}\]</div>
+<p>\(m_j\) は \(\ell_j\) を通して \(U_k\) に依るので、\(U_k\) は不動点の中で同時に解く。RegionFlash では書き込みも touch なので、Region の時計は封じた時から始まり、(E.5) の \(D\) の起点と一致する。数値例（分割あり）：\(U_S=348\)、\(U_L=29\) で、寿命 \(10^5\) 級に比べて無視できる（効果は 0.1pt 未満）。</p>
+
+<h3>E.7 不動点と \(T\)</h3>
+<svg viewBox="0 0 900 200" role="img" aria-label="モデルの依存関係">
+ <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+ <g fill="var(--card)" stroke="var(--line)">
+  <rect x="20" y="70" width="130" height="50" rx="8"/><rect x="200" y="70" width="150" height="50" rx="8"/><rect x="400" y="70" width="150" height="50" rx="8"/><rect x="600" y="70" width="130" height="50" rx="8"/><rect x="770" y="70" width="110" height="50" rx="8"/>
+ </g>
+ <g text-anchor="middle" font-size="13"><text x="85" y="92">挿入率 mⱼ</text><text x="85" y="110" fill="var(--mut)" font-size="11">λⱼ/(1+λⱼℓⱼ)</text>
+ <text x="275" y="92">積率母関数 M<tspan baseline-shift="sub" font-size="9">k</tspan>(t)</text><text x="275" y="110" fill="var(--mut)" font-size="11">Σ mⱼ e<tspan baseline-shift="super" font-size="8">λⱼt</tspan> / Σ mⱼ</text>
+ <text x="475" y="92">滞在 ℓᵢ</text><text x="475" y="110" fill="var(--mut)" font-size="11">U + ∫₀ᵀ e<tspan baseline-shift="super" font-size="8">λᵢt</tspan> M<tspan baseline-shift="super" font-size="8">n−1</tspan> dt</text>
+ <text x="665" y="92">ヒット率 hᵢ</text><text x="665" y="110" fill="var(--mut)" font-size="11">λᵢℓᵢ/(1+λᵢℓᵢ)</text>
+ <text x="825" y="92">容量</text><text x="825" y="110" fill="var(--mut)" font-size="11">Σ sh/φ = C ?</text></g>
+ <g stroke="var(--mut)" fill="none" marker-end="url(#ar)"><line x1="150" y1="95" x2="198" y2="95"/><line x1="350" y1="95" x2="398" y2="95"/><line x1="550" y1="95" x2="598" y2="95"/><line x1="730" y1="95" x2="768" y2="95"/>
+ <path d="M475,70 C475,25 85,25 85,68"/><path d="M825,120 C825,185 275,185 275,122"/></g>
+ <text x="280" y="22" text-anchor="middle" fill="var(--b)">内側の反復（T 固定、log ℓ で減衰）</text>
+ <text x="550" y="194" text-anchor="middle" fill="var(--a)">外側：占有 = C になる T を二分法</text>
+</svg>
+<div class="thm"><b>命題 E.8（不動点の存在）</b>　\(T\) を固定し、写像 \(\Phi_T:\ell\mapsto\ell'\) を (C.1)・(E.5)・(E.7)・(E.11) で定める。\(\Phi_T\) は箱 \(\mathcal B=\prod_i[T,\ell_{\max}]\) をそれ自身に写す連続写像である。ここで \(\ell_{\max}=U_{\max}+(e^{\bar n_{\max}\lambda_{\max}T}-1)/(\bar n_{\max}\lambda_{\max})\)。したがって Brouwer の定理から不動点が存在する。</div>
+<div class="pf">\(M_k\ge1\) なので \(\ell'_i\ge T\)。\(M_k(t)\le e^{\lambda_{\max}t}\) なので \(\ell'_i\le\ell_{\max}\)。\(\ell\in\mathcal B\) のとき \(m_j\ge\lambda_j/(1+\lambda_j\ell_{\max})\gt0\) なので \(U_k\) は有界で、各式は \(\ell\) について連続。<span class="qed">□</span></div>
+<p>一意性は証明していない。\(T\) の小さい側と大きい側からの連続法は同じ解に落ちた（本文 §5）。数値計算では \(\log\ell\) で半分ずつ混ぜる（線形の減衰では、熱い物に偏った最初の流れから「全部不死」の解に落ちることがあった）。外側では占有 \(\mathrm{Occ}(T)=\sum_i s_ih_i/\phi\) が \(C\) になる \(T\) を \(\log T\) の二分法で求める（\(\mathrm{Occ}\) が増加することは数値で確認）。</p>
+<p><b>数値例</b>：混在では \(T=1{,}817\)、\(\ell=25{,}694/23{,}180/22{,}986/16{,}414\)（小熱/小冷/大熱/大冷）、OHR 0.577、BHR 0.676。分割ありでは \(T=1{,}724\)、\(\ell=119{,}717/107{,}777/7{,}143/5{,}398\)、OHR 0.697、BHR 0.557（定常。隔離を入れると OHR 0.738、実測 0.737）。</p>
+
+<h3>E.8 サイズ分類の効き方：touch 密度</h3>
+<p>Region の touch 率をバイトで書き直すと、\(\Lambda_r=\sum_{j\in r}s_j\cdot(\lambda_j/s_j)\) で、平均場では</p>
+\[ \Lambda_k\approx\phi_kR\cdot\overline{\Big(\frac{\lambda}{s}\Big)}^{\rm ins,\,byte}_k\ \overset{s_j=s_k}{=}\ n_k\,\bar\lambda^{\rm ins}_k . \tag{E.12}\]
+<p>ここで上付きの ins, byte は、挿入されたバイトで重みをつけた平均を表す。\(\Lambda_k/R\) は、Region 1 バイトあたりのヒットの率（価値密度）である。分類 \(k\) の容量は、命題 E.6 と Little の公式から</p>
+\[ C_k=\frac{\sum_{j\in\mathcal O_k}s_jm_j}{\phi_k}\;\mathbb{E}_k[D]\ \approx\ \frac{\sum_{j\in\mathcal O_k}s_jm_j}{\phi_k}\cdot\frac{e^{\Lambda_kT}-1}{\Lambda_k}. \tag{E.13}\]
+<ul>
+<li><b>正の効果</b>：容量は \(\Lambda_kT\) について指数的に増えるので、価値密度の高い分類（小物）の Region が容量を取る。混ぜると (E.12) の平均が全 Region でならされ、この差が消える。FIFO では \(\mathbb{E}D=T\) で \(\Lambda\) に依らない（系 D.2）。</li>
+<li><b>負の帰還</b>：小物が容量を取るほど小物の熱い物はミスしなくなり（\(m_j\downarrow\)）、\(\bar\lambda^{\rm ins}_k\) が下がる。このつり合いが不動点。</li>
+<li><b>便乗</b>：同じ Region の物は同じ \(D\) を持つので、熱い物の Region に入った冷たい物 \(j\) も \(h_j=\lambda_j\ell/(1+\lambda_j\ell)\) で長く居る。サイズ分類は同じサイズの熱い物と冷たい物を分けないので、冷たい物の容量の合計はほとんど減らない（3 サイズの例で、どの分け方でも 46〜48%）。分け方で変わるのは、どのサイズの冷たい物が便乗するかだけ。</li>
+</ul>
+
+<h2>F. 立ち上がりの隔離（Ap3 を外す）</h2>
+<div class="thm"><b>命題 F.1（充填期の終わり＝ Che の T）</b>　空のキャッシュから始めると、容量が埋まるまで追い出しはなく、各物の最初の要求だけがミスして挿入される。挿入の順は初回の要求時刻 \(\tau_i\sim\mathrm{Exp}(\lambda_i)\)（独立）の順で、充填期の終わり \(t_0\) は流体極限で
+\[ \sum_i s_i\big(1-e^{-\lambda_it_0}\big)=C, \tag{F.1}\]
+つまり物単位 LRU の (B.2) と同じ式の解 \(t_0=T_{\rm Che}\) になる。時刻 \(t\) に詰まる Region の名前の分布は \(\propto\lambda_je^{-\lambda_jt}\) で、その touch 率（平均場）は
+\[ \Lambda^{\rm init}_k(t)=n_k\,\frac{\sum_{j\in\mathcal O_k}\lambda_j^2e^{-\lambda_jt}}{\sum_{j\in\mathcal O_k}\lambda_je^{-\lambda_jt}},\qquad \frac{d\Lambda^{\rm init}_k}{dt}=-n_k\,\mathrm{Var}_w(\lambda)\le0 . \tag{F.2}\]
+最初に封じた Region ほど熱い。</div>
+<div class="pf">追い出しがなければ 2 回目以降の要求はすべてヒット。時刻 \(t\) までに挿入されたバイトは \(\sum s_i\mathbf 1\{\tau_i\le t\}\) で、その期待値が (F.1) の左辺。\(\tau_j\) の密度は \(\lambda_je^{-\lambda_jt}\)。(F.2) の比は (B.3) の \(\bar\lambda_w\) と同じ形なので、命題 B.2 と同じ計算で微分が出る。<span class="qed">□</span></div>
+<p>観測期間を \(H\) とすると、初期 Region \(r\) が終わりまで生き残る確率は、命題 E.2 より \(\exp(-H/\mathbb{E}D_r)\)（\(\Lambda_rT\gg1\)）。<code>synth_model -H</code> はこれを階段関数 \(\mathbf 1\{\mathbb{E}D_r\gt H\}\) で近似し、組成は \(\tau_i\) を標本として引いて作る。生き残る Region の物は \(h=1\)（ミスしない）とし、残りの物と容量 \(C-N_{\rm imm}R\) で定常モデルを解く。不死の集合は \(T\) に依るので、\(T\) と不死の集合を交互に解き直す。</p>
+<p>数値例（分割あり・小物、定常の \(T=1{,}724\) で評価）：\(\Lambda^{\rm init}T\) は 13.3（最初の Region）から 9.35（\(t_0=16{,}125\)）まで下がり、\(\log\mathbb{E}D\) は 18.2 から 14.6 になる。\(\log H=\log(3\times10^7)=17.2\) がこの範囲の中に入るので、初期 Region の一部だけが不死になる。<b>人気が変わる負荷で隔離が消える理由</b>：(F.2) の \(\lambda_j\) が時間とともに下がるので \(\Lambda_r\) が下がり、\(\mathbb{E}D_r\) が指数的に縮むため。</p>
+
+<h2>G. スケール不変性と統計量</h2>
+<div class="thm"><b>命題 G.1（スケール不変性）</b>　\(a\gt0\) について、写像 \((s_i,R,C,\text{chunk})\mapsto(as_i,aR,aC,a\cdot\text{chunk})\) のもとで、B〜F のすべてのモデルの \(T,\ell_i,h_i\)（したがって OHR・BHR）は変わらない。シミュレータも、すべてのバイト量を同じ比で変えれば、詰め込みと追い出しの列は同じになる。</div>
+<div class="pf">時間の単位は要求で、\(\lambda_i\) は変わらない。(B.2)・(D.1)・(E.10) は両辺が \(a\) 倍になる。\(n_k=\lfloor R/s_k\rfloor\)、Region の数 \(C/R\)、組成の分布（サイズの比と \(R\) の比だけで決まる）、\(\phi\)、\(U_k\)（\(n_k\) と \(m\) だけで決まる）は変わらない。<span class="qed">□</span></div>
+<p>したがって、SSD 規模への拡大で変わる量は \(n_k=R/s_k\) だけである（小物 64 KiB、\(R=256\)〜626 MiB で \(n=4{,}096\)〜\(10{,}016\)）。</p>
+<p><b>サイズの対数の分散</b>：要求の重みで、2 つのサイズ \(s_1,s_2\) をそれぞれ \(p,1-p\) の割合で要求するとき</p>
+\[ \mathrm{Var}(\log_2s)=p(1-p)\Big(\log_2\frac{s_2}{s_1}\Big)^2 . \tag{G.1}\]
+<p>W1（3:1）では \(p(1-p)=0.1875\) で、\(\log_2\) の比が 4.8 なら 4.4、9（64 KiB と 32 MiB）なら 15.2。</p>
+
+<h2>H. 検証のまとめ</h2>
+<div class="tbl"><table>
+<tr><th>モデル</th><th>比べた範囲</th><th>誤差（実測 − モデル）</th></tr>
+<tr><td>物単位 LRU (B.1)・静的分割 (B.5)</td><td>W1〜W5、容量 5〜30%、48 点</td><td>すべて 0.3pt 以下</td></tr>
+<tr><td>Region FIFO (D.1)</td><td>24 点</td><td>平均 0.1〜0.2pt、最大 0.9pt（混在の詰め残し）</td></tr>
+<tr><td>寿命の式 (E.2)</td><td>Region ごとに \(\Lambda\) を数え、\(\Lambda T\) の区間別に比べた</td><td>有効な \(T\) が実測の 1.00〜1.02 倍（W3）</td></tr>
+<tr><td>Region LRU（隔離あり）</td><td>24 構成</td><td>OHR 平均 0.2pt、BHR 平均 0.1pt（分類なし）・0.8pt（分類あり）</td></tr>
+<tr><td>4 群の例</td><td>LRU / FIFO 混在 / LRU 混在 / LRU 分割（隔離あり）</td><td>OHR で 62.8/62.7、52.8/52.7、57.7/57.7、73.8/73.7</td></tr>
+<tr><td>3 サイズの例</td><td>混在・2 通りの 2 分割・3 分割</td><td>すべて 0.5pt 以内</td></tr>
+</table></div>
+<div class="card warn"><b>モデルが外れる所（論文にするなら明記すべき条件）</b>
+<ol>
+<li><b>1 Region の物の数 \(n\) が大きい場合</b>：検証は \(n\le901\)。縮小版の SSD 規模（\(n_S=4{,}096\)〜\(10{,}016\)）では、サイズ分類の BMR を 4〜6pt 悪く見積もった（小物の取り分を多く見積もる向き）。(E.4) の階段近似と、隔離の詰め込みの近似が候補で、未解決。</li>
+<li><b>Region の数 \(N_R\) が少ない場合</b>（64 個）：2〜4pt。立ち上がり中の追い出しを無視しているため。</li>
+<li><b>人気が変わる負荷</b>：Ap3 の定常の代わりに、年齢つきの再生方程式（§J）が要る。物単位 LRU の部分は 0.25pt で合うが、Region 部分は途中。</li>
+</ol></div>
+
+<h2>I. 入れなかった補正：追い出し年齢の揺らぎ</h2>
+<p>単位サイズの物 LRU で、追い出し年齢 \(T(t)\) の揺らぎを拡散近似で求める。時刻 \(t\) で「最後の touch」として残っている要求の時刻は、年齢 \(x\) の所で密度 \(a(x)=\sum_i\lambda_ie^{-\lambda_ix}\) のポアソン過程になる。追い出しは率 \(d=a(T^*)\)（定常での挿入率）で一定で、1 回ごとに末尾の時刻を次の点まで進める。間隔の平均は \(1/a\)、分散は \(1/a^2\) なので、\(X=T-T^*\) について</p>
+\[ dX=\frac{a'(T^*)}{a(T^*)}X\,dt+\frac{1}{\sqrt{a(T^*)}}\,dW,\qquad \mathrm{Var}(T)=\frac{1}{2\kappa},\quad \kappa=-a'(T^*)=\sum_i\lambda_i^2e^{-\lambda_iT^*}=\sum_im_i\lambda_i . \tag{I.1}\]
+<p>（Ornstein–Uhlenbeck 過程の定常分散 \(\sigma^2/2\theta\)。）Region LRU にも \(m_i\) を Region モデルの値にして当てると、分類なしでは CV が実測と 5% 以内で合った。しかし Region ごとに寿命を測ると、揺らぎで寿命が縮む効果は見えなかったので、既定のモデルには入れない（本文 §5.1〜5.2）。</p>
+
+<h2>J. 今後：人気が変わる負荷の再生方程式</h2>
+<p>物を年齢 \(a\)（順位 \(r=1+\lfloor a/P\rfloor\)）で表す。物単位 LRU では、生まれる前の \(\lambda=0\) を入れて</p>
+\[ h(a)=1-\exp\!\Big(-\int_{a-T}^{a}\lambda(u)\,du\Big). \tag{J.1}\]
+<p>Region LRU では、補題 C.1 のサイクルが年齢で非定常になり、在籍の確率は再生方程式</p>
+\[ h(a)=\int_0^a\lambda(a')\big(1-h(a')\big)\,G(a\mid a')\,da',\qquad
+G(a\mid a')=\mathbb{E}_\nu\Big[\exp\Big(-\int_{a'}^{a}\eta\big(\lambda(u)+\Lambda_{\rm rest}(u-a')+\nu\,\lambda_{\rm new}(u-a')\big)du\Big)\Big] \tag{J.2}\]
+<p>を満たす。ここで \(\eta(\Lambda)=\Lambda/(e^{\Lambda T}-1)=1/\mathbb{E}D\) は (E.2) の逆数で、死亡率の平均場近似。\(\nu\) は Region の中の熱い新顔の数で、ポアソン分布に従う。(J.2) の \(\eta\) は、命題 E.2 の指数近似を時間変化する \(\Lambda\) に広げたもので、\(\Lambda T\) が小さい所では近似になる。混在の構成で 9〜22pt 外れる問題が残っている（本文 §6.2）。</p>
+
+<h2>参考文献</h2>
+<ul>
+<li>H. Che, Y. Tung, Z. Wang. Hierarchical Web caching systems: modeling, design and experimental results. IEEE JSAC, 2002.</li>
+<li>C. Fricker, P. Robert, J. Roberts. A versatile and accurate approximation for LRU cache performance. ITC 24, 2012.</li>
+<li>V. Martina, M. Garetto, E. Leonardi. A unified approach to the performance analysis of caching systems. INFOCOM 2014.</li>
+<li>A. Rényi. A characterization of Poisson processes. 1956（幾何和の極限）／ J. Grigelionis. On the convergence of sums of random step processes to a Poisson process. 1963.</li>
+<li>S. Asmussen. Applied Probability and Queues（再生報酬定理、任意停止、PASTA）, 2nd ed., 2003.</li>
+<li>Y. Berg et al. The CacheLib caching engine. OSDI 2020 ／ S. McAllister et al. Kangaroo. SOSP 2021.</li>
+</ul>
+</main>
+</body>
+</html>

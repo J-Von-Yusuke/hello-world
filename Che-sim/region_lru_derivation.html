@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Region LRU モデルの導出</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.8 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:900px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:23px;margin:0 0 4px}h2{font-size:19px;margin:40px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}h3{font-size:16px;margin:22px 0 6px}
+.sub{color:var(--mut);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:12px 0}
+.ok{border-left:4px solid var(--g)}.warn{border-left:4px solid var(--b)}.as{border-left:4px solid var(--a)}
+.math{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:2px 16px;margin:8px 0;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+details{margin:6px 0;border:1px solid var(--line);border-radius:8px;padding:6px 12px}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-size:12px}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}]})"></script>
+</head>
+<body>
+<main>
+<h1>Region LRU のヒット率モデル：導出をステップごとに</h1>
+<p class="sub">2026-11-05。docs/synth_size_class.html §2.2 の式の、仮定・各段の根拠・検証・想定問答。実装は <code>tools/synth/synth_model.c</code> の <code>region()</code>。数値例で通した版（スライド向け）は <a href="che_to_region_walkthrough.html">che_to_region_walkthrough.html</a>、仮定・補題・証明の形の付録は <a href="region_model_appendix.html">region_model_appendix.html</a>。</p>
+
+<div class="card ok"><b>全体の筋（1 行ずつ）</b>
+<ol>
+<li>物 1 個から見ると、Region キャッシュは「滞在 \(L_i\) の FIFO」。再生報酬の定理から \(h_i = \lambda_i L_i/(1+\lambda_i L_i)\)。</li>
+<li>Region FIFO なら \(L_i = T\)（全員同じ）。だから分類は効かない。</li>
+<li>Region LRU なら、Region は「何も来ない時間が T を超えたら死ぬ」。touch の率が Λ なら寿命の平均は \((e^{\Lambda T}-1)/\Lambda\)。</li>
+<li>Λ は「自分の λ ＋ 同居の物の λ の和」。同居の物は挿入の流れから独立に引くので、寿命の平均は積率母関数のべき乗で書ける。</li>
+<li>挿入の流れが寿命に依るので不動点を解き、占有が容量 C になる T を求める。</li>
+</ol></div>
+
+<h2>0. 記号と仮定</h2>
+<div class="tbl"><table>
+<tr><th>記号</th><th>意味</th></tr>
+<tr><td>\(\lambda_i\)</td><td>物 i の要求率（要求 1 回を時間の単位にする。\(\sum_i\lambda_i=1\)）</td></tr>
+<tr><td>\(s_i\)、\(s_k\)</td><td>物 i の大きさ、分類 k の大きさ（合成負荷では分類ごとに 1 種類）</td></tr>
+<tr><td>\(R\)、\(C\)</td><td>Region の大きさ、キャッシュの容量（Region の数は \(C/R\)）</td></tr>
+<tr><td>\(n_k=\lfloor R/s_k\rfloor\)</td><td>分類 k の Region に入る物の数</td></tr>
+<tr><td>\(h_i\)</td><td>物 i の在籍率（キャッシュにいる時間の割合）＝ヒット率</td></tr>
+<tr><td>\(L_i\)</td><td>物 i が 1 回挿入されてから、その Region が消えるまでの時間（滞在）の平均</td></tr>
+<tr><td>\(\Lambda\)</td><td>Region の touch の率（中の物の λ の和）</td></tr>
+<tr><td>\(T\)</td><td>追い出し年齢：追い出される Region の「最後の touch からの経過時間」</td></tr>
+<tr><td>\(m_j\)</td><td>物 j の挿入の率（ミスの率）</td></tr>
+</table></div>
+<div class="card as"><b>仮定（どれを外すと何が崩れるか）</b>
+<ul>
+<li><b>A1 独立参照（IRM）</b>：物 i への要求は率 \(\lambda_i\) のポアソン過程で、物どうし独立。→ ステップ 1 の PASTA、ステップ 3 の指数分布、ステップ 4 の独立性に使う。時間局所性のある実トレースでは近似。</li>
+<li><b>A2 全受け入れ・DRAM なし</b>：ミスした物は必ず書き込み中の Region に入る。→ 挿入の率 = ミスの率。</li>
+<li><b>A3 Region 単位の削除・書き直しなし</b>：ヒットしても物は動かず、Region が消えると中の物は全部消える。→ 物から見て FIFO。</li>
+<li><b>A4 Region LRU</b>：Region の時計（最後の touch）は封じた時と、中の物がヒットした時に更新。最も古い Region を消す。</li>
+<li><b>A5 Region 単位の Che 近似</b>：追い出し年齢 T は一定とみなす（「何も来ない時間が T を超えたら死ぬ」）。Region の数が多いほど正確。</li>
+<li><b>A6 同居の物は独立</b>：同じ Region に入る物は、挿入の流れから独立に引かれたとみなす。</li>
+<li><b>A7 定常</b>：長い目で見た平均を扱う（立ち上がりの隔離は §7 で別に足す）。</li>
+</ul></div>
+
+<h2>1. 物から見た在籍率：\(h_i=\lambda_i L_i/(1+\lambda_i L_i)\)</h2>
+<svg viewBox="0 0 820 120" role="img" aria-label="物 1 個の再生サイクル">
+ <line x1="20" y1="60" x2="800" y2="60" stroke="var(--mut)"/>
+ <rect x="40" y="45" width="430" height="30" rx="4" fill="var(--g)" fill-opacity=".25" stroke="var(--g)"/>
+ <rect x="470" y="45" width="220" height="30" rx="4" fill="var(--r)" fill-opacity=".12" stroke="var(--r)"/>
+ <text x="255" y="40" text-anchor="middle">いる（滞在 L）：来た要求はすべてヒット、平均 λL 回</text>
+ <text x="580" y="40" text-anchor="middle">いない：平均 1/λ（記憶なし）</text>
+ <g fill="var(--fg)"><polygon points="40,90 34,102 46,102"/><polygon points="690,90 684,102 696,102"/></g>
+ <text x="40" y="116" text-anchor="middle">ミス→挿入</text><text x="470" y="96" text-anchor="middle" fill="var(--r)">Region が消える</text><text x="690" y="116" text-anchor="middle">次の要求＝ミス→挿入</text>
+ <g fill="var(--g)"><circle cx="140" cy="60" r="4"/><circle cx="260" cy="60" r="4"/><circle cx="380" cy="60" r="4"/></g>
+</svg>
+<h3>1-1 サイクルに分ける</h3>
+<p>物 i は「ミスで挿入 → 滞在 → Region とともに消える → 次の要求でミス → 挿入 …」を繰り返す。1 回の挿入から次の挿入までを 1 サイクルとする。A3 から、サイクルの中で物が消えるのは Region が消えるときだけ。A6 から、挿入ごとに同居の物は新しく引き直されるので、サイクルは互いに独立で同じ分布（再生過程）。</p>
+<h3>1-2 サイクルの長さ</h3>
+<div class="math">\[ \mathbb{E}[\text{サイクル}] = \underbrace{L_i}_{\text{いる}} + \underbrace{1/\lambda_i}_{\text{いない}} \]</div>
+<p>「いない」部分：消えた瞬間から次の要求までの時間。A1 よりポアソン到着は記憶がないので、過去に関係なく平均 \(1/\lambda_i\)。</p>
+<h3>1-3 時間の割合（再生報酬の定理）</h3>
+<p>再生報酬の定理：独立なサイクルが繰り返すとき、長い目で見た「報酬の時間平均」＝「1 サイクルの報酬の平均」÷「1 サイクルの長さの平均」。報酬を「いる時間」にとると、</p>
+<div class="math">\[ h_i = \frac{\mathbb{E}[\text{いる時間}]}{\mathbb{E}[\text{サイクル}]} = \frac{L_i}{L_i+1/\lambda_i} = \frac{\lambda_i L_i}{1+\lambda_i L_i} \]</div>
+<h3>1-4 在籍率＝ヒット率（PASTA）</h3>
+<p>要求で数えても同じ：1 サイクルの要求は、滞在中のヒットと最後のミス 1 回。滞在 \(L\) は「全部の物の要求（合成されたポアソン過程）」で決まる停止時刻なので、Wald の恒等式から滞在中の物 i の要求の数の平均は \(\lambda_i\,\mathbb{E}[L]=\lambda_i L_i\)。よってヒット率 = \(\lambda_i L_i/(\lambda_i L_i+1)\) で、時間の割合と一致する。一般には PASTA（ポアソン到着は時間平均を見る）による。A1 が崩れて要求が束になると、2 つは一致しなくなる。</p>
+<p><b>大事な点</b>：\(L_i\) はばらついてよい（平均だけが要る）。Region の事情はすべて \(L_i\) に押し込まれ、物の式は FIFO の形のまま。</p>
+
+<h2>2. Region FIFO：\(L_i = T\)</h2>
+<p>Region FIFO は封じた順に消すので、どの Region も封じてから同じ時間で消える（Region の数 ÷ Region が生まれる率）。それを T とすると、全員が \(L_i=T\) で、\(h_i=\lambda_i T/(1+\lambda_i T)\)。T は物の分類に依らないので、<b>サイズで分類しても誰の \(h_i\) も変わらない</b>。容量の条件 \(\sum_i s_ih_i=C\) で T が決まる。実測でも、分類の有無の差は ±0.3pt。</p>
+
+<h2>3. Region LRU：touch の率 Λ の Region の寿命</h2>
+<h3>3-1 死ぬ条件（A4・A5）</h3>
+<p>LRU は「最後の touch が最も古い Region」を消す。追い出される Region の、最後の touch からの経過時間（追い出し年齢）を T とし、一定とみなす（A5）。すると Region は「touch の間隔が T を超えた時点」で死ぬ。間隔が T を超えなければ、その前に touch されて時計が戻る。</p>
+<h3>3-2 間隔の分布</h3>
+<p>Region の中の物への要求は独立なポアソン過程（A1）で、その和は率 \(\Lambda=\sum_{\text{中の物}}\lambda_j\) のポアソン過程。間隔 \(X_1,X_2,\dots\) は独立に \(\mathrm{Exp}(\Lambda)\)。物は Region から出ていかない（A3）ので、Λ は寿命の間ずっと一定。</p>
+<h3>3-3 寿命の平均を計算する</h3>
+<p>間隔 1 つが T を超える確率を \(p\) とする。</p>
+<div class="math">\[ p = P(X>T) = e^{-\Lambda T} \]</div>
+<p>最初に T を超えるのが K 番目の間隔なら、それまでに生き延びた間隔は \(K-1\) 個で、寿命は</p>
+<div class="math">\[ D = \sum_{m=1}^{K-1} X_m + T \]</div>
+<p>(a) 生き延びる間隔の数は幾何分布：</p>
+<div class="math">\[ \mathbb{E}[K-1] = \frac{1-p}{p} = e^{\Lambda T}-1 \]</div>
+<p>(b) 生き延びた間隔 1 つの平均（T 以下という条件つき）：</p>
+<div class="math">\[ \mathbb{E}[X\mid X\le T] = \frac{\int_0^T x\,\Lambda e^{-\Lambda x}dx}{1-p} = \frac{1}{\Lambda} - \frac{T\,p}{1-p} \]</div>
+<p>(c) K は「間隔が T を超えたか」で決まる停止時刻なので、Wald の恒等式で (a)×(b) にできる：</p>
+<div class="math">\[ \mathbb{E}[D] = \frac{1-p}{p}\left(\frac{1}{\Lambda}-\frac{Tp}{1-p}\right) + T = \frac{1-p}{p\,\Lambda} - T + T = \frac{e^{\Lambda T}-1}{\Lambda} \]</div>
+<p>(d) 微積分で書き直すと</p>
+<div class="math">\[ \frac{e^{\Lambda T}-1}{\Lambda} = \int_0^T e^{\Lambda t}\,dt \]</div>
+<p><b>なぜ (d) の形にするか</b>：\(e^{\Lambda t}\) について<b>線形</b>なので、次のステップで「同居の物について平均する」操作を積分の中に入れられる。\((e^{\Lambda T}-1)/\Lambda\) のままだと Λ について非線形で、平均を分解できない。</p>
+<p>数値の感覚：\(\Lambda T\) が 1 増えると寿命は約 e 倍。\(\Lambda T=1,5,10\) で寿命 ≈ \(1.7T,\ 30T,\ 2200T\)。</p>
+
+<h2>4. Λ を物の側から書く：\(L_i=\int_0^T e^{\lambda_i t}M_k(t)^{n_k-1}dt\)</h2>
+<h3>4-1 Λ の中身</h3>
+<p>物 i が入った Region には、物 i と同居の物 \(J_1,\dots,J_{n_k-1}\)（どれになるかはランダム）がいる。</p>
+<div class="math">\[ \Lambda = \lambda_i + \sum_{a=1}^{n_k-1}\lambda_{J_a},\qquad e^{\Lambda t} = e^{\lambda_i t}\prod_{a=1}^{n_k-1}e^{\lambda_{J_a}t} \]</div>
+<h3>4-2 同居の物について平均する</h3>
+<p>同居の物が決まっていれば、寿命の平均は 3-3 (d)。物 i の滞在 \(L_i\) は、それを同居の物の組み合わせについて平均したもの（挿入の封じるまでの待ちは §7）：</p>
+<div class="math">\[ L_i = \mathbb{E}_J\!\left[\int_0^T e^{\lambda_i t}\prod_a e^{\lambda_{J_a}t}\,dt\right] = \int_0^T e^{\lambda_i t}\;\mathbb{E}_J\!\left[\prod_a e^{\lambda_{J_a}t}\right]dt \]</div>
+<p>平均と積分の入れ替えは、中身が非負なので Tonelli の定理で正当化できる。\(e^{\lambda_i t}\) は確率的でないので平均の外に出る。</p>
+<h3>4-3 同居の物はどの物か（挿入の流れ）</h3>
+<p>同居の物は、物 i の前後でミスして入ってきた物（A2）。物 j が挿入される率は「要求の率 × ミスする割合」：</p>
+<div class="math">\[ m_j = \lambda_j(1-h_j) = \lambda_j\cdot\frac{1}{1+\lambda_j L_j} = \frac{\lambda_j}{1+\lambda_j L_j} \]</div>
+<p>（ステップ 1 の式から \(1-h_j = 1/(1+\lambda_jL_j)\)。サイクル 1 回に挿入 1 回なので、\(1/\mathbb{E}[\text{サイクル}] = 1/(L_j+1/\lambda_j)\) と書いても同じ。）同居の物 1 個が物 j である確率は、同じ分類 k の挿入の流れの中での割合：</p>
+<div class="math">\[ P(J=j) = \frac{m_j}{\sum_{j'\in k} m_{j'}} \]</div>
+<p>熱い物は \(\lambda_jL_j\) が大きく \(m_j\) が小さいので、めったに同居の物にならない。</p>
+<h3>4-4 独立性と積率母関数</h3>
+<p>A6 から同居の物は独立で同じ分布なので、積の平均は平均の積：</p>
+<div class="math">\[ \mathbb{E}_J\!\left[\prod_{a=1}^{n_k-1}e^{\lambda_{J_a}t}\right] = \Big(\mathbb{E}[e^{\lambda_J t}]\Big)^{n_k-1} = M_k(t)^{n_k-1},\qquad M_k(t)=\frac{\sum_{j\in k}m_j e^{\lambda_j t}}{\sum_{j\in k}m_j} \]</div>
+<p>\(M_k(t)\) は「挿入された物の λ」の積率母関数。よって</p>
+<div class="math">\[ \boxed{\,L_i = \int_0^T e^{\lambda_i t}\,M_k(t)^{\,n_k-1}\,dt\,} \]</div>
+<h3>4-5 平均場との違い（イェンセン）</h3>
+<p>λ を先に平均すると \(e^{(n_k-1)\bar\lambda t}\)。指数は下に凸なので \(\mathbb{E}[e^{\lambda t}]\ge e^{\mathbb{E}[\lambda]t}\) で、まれな熱い同居物の効果は前者にだけ入る。実測との比較では、その差は 1〜数 pt。</p>
+<h3>4-6 混在の Region</h3>
+<p>サイズの違う物が混ざると、各サイズが何個入るかもランダムになる。モデルでは「挿入の流れから物を引き、R を超えるまで詰める」組成を数百回引いて、4-4 の積をその平均で置き換える。</p>
+
+<h2>5. 容量の条件と不動点</h2>
+<div class="math">\[ \sum_i \frac{s_i\,h_i}{\phi_{k(i)}} = C,\qquad h_i = \frac{\lambda_iL_i}{1+\lambda_iL_i} \]</div>
+<p>\(\phi_k\) は Region の充填率（\(n_ks_k/R\)）。詰め残しも容量を食う。占有は時間平均なので、在籍率（時間の割合）× 大きさの和になる。</p>
+<p><b>不動点</b>：\(L_i\) は \(M_k\) を通して \(m_j\) に依り、\(m_j\) は \(L_j\) に依る。T を固定して \(L\) を反復（滞在 T の FIFO の解から始め、\(\log L\) で半分ずつ混ぜる）、収束後に占有を計算し、占有 = C となる T を二分法で求める。占有は T について増加する。</p>
+
+<h2>6. サイズ分類が効く理由</h2>
+<p>平均場で見ると、分類 k の Region の touch 率は</p>
+<div class="math">\[ \Lambda_k \approx n_k\,\mathbb{E}_{\text{ins}}[\lambda] = \frac{R}{s_k}\,\mathbb{E}_{\text{ins}}[\lambda] = R\cdot\mathbb{E}_{\text{ins}}\!\left[\frac{\lambda}{s}\right] \]</div>
+<p>（\(\mathbb{E}_{\text{ins}}\) は挿入された物 J についての平均。）\(\Lambda/R\) は Region 1 バイトあたりのヒットの率＝価値密度。分類 k の容量は「Region が生まれる率 × 寿命」：</p>
+<div class="math">\[ C_k \propto \frac{(\text{分類 k に挿入されるバイトの率})}{R}\times\frac{e^{\Lambda_kT}-1}{\Lambda_k} \]</div>
+<p>寿命は \(\Lambda_kT\) について指数的なので、価値密度の高い（小物の）Region が容量を取る。取りすぎると小物がミスしなくなり \(\mathbb{E}_{\text{ins}}[\lambda]\) が下がる（負の帰還）ので、つり合ったところで止まる。混ぜると全 Region の Λ がならされて差が出ない。FIFO は寿命が全員 T なので差が出ない。</p>
+
+<h2>7. 実測に合わせるための補正</h2>
+<ul>
+<li><b>封じるまでの待ち \(U_k\)</b>：書き込み中の Region は消えず、時計は封じた時から始まる。\(L_i\leftarrow U_k+L_i\)、\(U_k\) は「後から入る物の数の平均 \((n_k-1)/2\)」÷「分類の挿入率」。挿入率が U に依るので同じ反復の中で解く。効果は 0.1pt 未満。</li>
+<li><b>立ち上がりの隔離</b>（A7 を外す）：空のキャッシュを埋める間は全部ミスなので、最初の Region に熱い物が詰まり、\(\Lambda T\) が非常に大きくなる。初回の要求の順に初期 Region を作り、寿命 \((e^{\Lambda_jT}-1)/\Lambda_j\) が観測期間 H を超えるものを不死（中の物は \(h=1\)）とし、残りで定常モデルを解く。これで Region LRU（サイズ分類）の BHR の誤差は平均 3.5 → 0.8pt。人気が変わる負荷では隔離は消える。</li>
+</ul>
+
+<h2>8. 検証（各ステップを別々に確かめた）</h2>
+<div class="tbl"><table>
+<tr><th>ステップ</th><th>確かめ方</th><th>結果</th></tr>
+<tr><td>1（FIFO の在籍率）・2（Region FIFO）</td><td>RegionFlash の Region FIFO と比較</td><td>24 点、平均 0.1〜0.2pt</td></tr>
+<tr><td>3-2（Λ = 中の物の λ の和）</td><td>追い出した Region の物 ID から Λ を計算し、ヒット数 ÷（Λ × 寿命）</td><td>1.00〜1.02</td></tr>
+<tr><td>3-3（寿命 \((e^{\Lambda T}-1)/\Lambda\)）</td><td>同じログで、ΛT の区間ごとに 寿命×Λ と \(e^{\Lambda T}-1\) を比較（実測の平均追い出し年齢を T に）</td><td>W3 で有効な T が実測の 1.00〜1.02 倍</td></tr>
+<tr><td>4-3〜4-4（同居の物の独立性）</td><td>封じた全 Region の、温かい物の個数の分散／平均</td><td>0.97（独立なら 1.00）</td></tr>
+<tr><td>5（全体）</td><td>Region LRU の OHR・BHR を 24 構成で比較（隔離あり）</td><td>OHR 平均 0.2pt、BHR 平均 0.1pt（分類なし）・0.8pt（分類あり）</td></tr>
+<tr><td>A5（T 一定）</td><td>追い出し年齢の CV</td><td>Region 256 個で 0.1〜0.13、4096 個で 0.015</td></tr>
+</table></div>
+
+<h2>9. 想定問答</h2>
+<details><summary>Q1. Che 近似は物の数が多いときの近似では？Region は 256 個しかない。</summary>
+<p>A5 の「T 一定」は、Region の数が多いほど正確。追い出し年齢の揺らぎは測っていて、CV は Region 256 個で約 0.1、4096 個で 0.015。揺らぎの大きさは \(\mathrm{sd}(T)=1/\sqrt{2\sum_i m_i\lambda_i}\)（追い出しを待ち行列として扱った OU 近似）で実測と合う。ただし、Region ごとの寿命を直接測ると、揺らぎで寿命が縮む効果は見えなかった（§8 の 3-3 の行）。残っていた誤差の原因は揺らぎではなく、立ち上がりの隔離だった。Region 64 個では 2〜4pt の誤差が残るので、適用範囲として明示する。</p></details>
+<details><summary>Q2. 「間隔が T を超えたら死ぬ」は LRU と同じか？</summary>
+<p>LRU は最後の touch が最も古い Region を消す。追い出し年齢が常に T なら、生きている Region はすべて「最後の touch から T 未満」で、間隔が T を超えた Region は、その時点で最も古くなって消される。逆に間隔が T 未満なら、追い出される前に touch されて順番が後ろに回る。追い出し年齢が一定という近似（A5）のもとで、両者は同じ。</p></details>
+<details><summary>Q3. 物 i 自身の要求は Λ に入っている。二重に数えていないか？</summary>
+<p>していない。物 i の要求は (1) Region を生かす touch として Λ に入り、(2) ヒットとして \(\lambda_i L_i\) に数えられる。同じ要求の 2 つの効果で、片方は寿命、片方はヒットの数。式では、\(e^{\lambda_i t}\) を平均の外に分けて、自分の寄与をそのまま残している。</p></details>
+<details><summary>Q4. 寿命は確率的なのに、平均 \(L_i\) だけで在籍率を出してよいのか？</summary>
+<p>よい。再生報酬の定理は、サイクルが独立で同じ分布なら、時間平均を「報酬の平均 ÷ サイクルの長さの平均」で与える。分布の形は要らない。ヒットの数も、滞在が全要求のポアソン過程の停止時刻なので Wald の恒等式で \(\lambda_i\,\mathbb{E}[L]\)。</p></details>
+<details><summary>Q5. 同居の物が独立というのは本当か？一緒に追い出された物は一緒に戻ってくるのでは？</summary>
+<p>仮定 A6 で、確かめた。封じた全 Region（追い出し済みと終了時に残ったもの）で、温かい物の個数の分散／平均は 0.97 で、独立（ポアソン）の 1.00 と同じだった。一緒に追い出された物どうしが次の Region でも同居する割合は偶然より高いが、ハッシュで書き込み流を 8 本に分けて同乗を壊しても、ヒット率は 0.7628 → 0.761 でほぼ変わらなかった。</p></details>
+<details><summary>Q6. 挿入の流れの重み \(m_j\) に \(L_j\) が入るのは循環論法では？</summary>
+<p>循環ではなく、自己無撞着（不動点）の条件。物単位 LRU の Che 近似でも、T を容量の条件で決めるのは同じ構造。反復は、滞在 T の FIFO の解から始めて \(\log L\) で減衰をかけると収束する（線形に減衰させると、熱い物に偏った最初の流れから「全部不死」の解に落ちることがあったため）。</p></details>
+<details><summary>Q7. 要求がポアソンでない（時間局所性がある）とどうなるか？</summary>
+<p>A1 が崩れる。(1) 在籍率とヒット率が一致しなくなる（束で来た要求は、最初の 1 回がミスしても残りはヒットしやすい）、(2) Region の touch が束になり、間隔が指数分布でなくなる。モデルは IRM の合成負荷で検証したもので、実トレースへの適用は近似。人気が変わる（老化する）負荷については、年齢で表した別のモデル（<code>synth_age.c</code>）を作っており、物単位 LRU は 0.25pt 以内で合うが、Region LRU は一部の構成で未完成。</p></details>
+<details><summary>Q8. 書き込み中の Region、封じる前のヒットはどう扱うか？</summary>
+<p>RegionFlash では、書き込み中の Region の物もヒットし、書き込みも touch になる。書き込み中の Region は追い出されないので、物は「封じるまでの待ち \(U_k\)」だけ余分にいる。§7 の補正で入れているが、寿命（10⁵ 要求級）に比べ \(U_k\)（数百〜数千要求）は小さく、効果は 0.1pt 未満。</p></details>
+<details><summary>Q9. FIFO で分類が効かないのは、本当に厳密か？</summary>
+<p>モデルの上では厳密（寿命が全員同じ T）。実測では、混在の Region の詰め残し（最大 4%）の分だけ容量の使い方が変わり、±0.3pt 程度の差が出る。</p></details>
+<details><summary>Q10. 立ち上がりの隔離は人工的な現象ではないか？</summary>
+<p>人気が永遠に変わらない合成負荷に特有。空から始めると最初の Region に熱い物がまとめて入り、\(\Lambda T\) が 9〜4917 になって事実上不死になる（実測で、最初の 100 万要求に封じた 69 個の Region が 2,000 万要求後まで残り、順位 1〜99 の物は全部その中にいた）。人気が老化する負荷では、一巡時間がトレース長の 4 倍でも初期 Region は 1 個も残らなかった。評価では、温め方を明記するか、老化つきの負荷を使う。</p></details>
+<details><summary>Q11. 平均場（λ の平均を指数に入れる）で十分ではないか？</summary>
+<p>多くの構成で差は 1〜数 pt だが、熱い物がまれに混ざる状況では大きく違う。老化する負荷で、Region あたりの熱い新顔が平均 0.25 個（ほとんど 0 個、たまに 1〜2 個）のとき、平均場は全 Region に 0.25 個ずつ均して全部を長生きにし、OHR を 18pt 外した。新顔の数をポアソンで平均すると 3pt に縮んだ。</p></details>
+<details><summary>Q12. 結局、サイズ分類の効果をこのモデルで一言で言うと？</summary>
+<p>Region の touch 率は「R × 中の物の価値密度 λ/s」で、寿命はそれについて指数的。分類すると価値密度の高い小物の Region だけが長生きし、LRU が容量を小物に寄せる。これが OHR が上がり、BMR が下がる（大物の取り分が減る）理由。BMR は大物の容量の下限と、高い閾値の再挿入で取り戻せる。</p></details>
+</main>
+</body>
+</html>
