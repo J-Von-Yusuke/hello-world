@@ -5,7 +5,8 @@
 
 条件ごとに、提案（RU＋分類の自動、ru_auto）と CacheLib（R=256MiB、分類なし）の差を並べる:
   既定        work/paper の ru_auto と r256_base（n3 は work/paper/ext の r256_n3）
-  chunk=0     _c0：物を 1 Region の中に連続で置く（片の損失が起きない）
+  chunk=0     _c0：物を 1 Region の中に連続で置く（片の損失が起きない）。R より大きい物は入らないので R の違う構成の比較には使わない
+  chunk=0m    _c0m：_c0 に、受け入れの上限を全構成で 256 MiB にそろえたもの（R の違う構成を chunk=0 で比べるのはこちら）
   上限なし    _f1：再挿入の上限なし（max_frac=1）
   種 2 / 種 3 _s2 / _s3：乱数の種
 出力: fig_robust.svg（提案 − CacheLib n=1）、fig_robust_n3.svg（提案 − CacheLib n=3。n=3 のある条件だけ）、
@@ -19,7 +20,8 @@ from figures import Fig, Ax, span, to_png
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 T = lambda ja, en: en if EN else ja
 P = f"{WORK}/paper"; D = f"{P}/robust"; os.makedirs(D, exist_ok=True)
-COND = [("", T("既定", "default"), "#1f4e8c"), ("_c0", T("chunk=0", "chunk=0"), "#3f9a64"), ("_f1", T("再挿入の上限なし", "no rewrite cap"), "#c9683a"),
+COND = [("", T("既定", "default"), "#1f4e8c"), ("_c0", T("chunk=0", "chunk=0"), "#9fd3b0"),
+        ("_c0m", T("chunk=0・受入上限 256MiB", "chunk=0, admit ≤ 256MiB"), "#3f9a64"), ("_f1", T("再挿入の上限なし", "no rewrite cap"), "#c9683a"),
         ("_s2", T("乱数の種 2", "seed 2"), "#8a5fb5"), ("_s3", T("乱数の種 3", "seed 3"), "#b8a02a")]
 
 runs = {}   # runs[trace][config] = tune_one の要約（work/paper → ext → robust の順に重ねる）

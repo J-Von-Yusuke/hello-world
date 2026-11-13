@@ -37,7 +37,8 @@ def n_reqs(n):  # paper で使った変種の info.json の要求数（drop / de
     s = f"{D}/{n}.json"
     var = json.load(open(s)).get("variant") if os.path.exists(s) else None
     p = f"{WORK}/out/{n}/{var}/info.json"
-    return (json.load(open(p))["n"], var) if var and os.path.exists(p) else (None, var)
+    k = int(json.load(open(s)).get("amp_key", 1) or 1) if os.path.exists(s) else 1   # amp_key 倍の要求として回している
+    return (json.load(open(p))["n"] * k, var) if var and os.path.exists(p) else (None, var)
 
 
 def n_auto(d):
@@ -86,7 +87,7 @@ for n in traces:
         print(line + f"{n_auto(d):7s} {ff}")
     if "--robust" in sys.argv:   # 条件ごとに 提案（ru_auto）と 基準（r256_base）・CacheLib n=3 の差
         print(f"  頑健性: {'条件':22s} {'ΔBMR(提案−基準)':>15s} {'書込比(提案/基準)':>17s} {'ΔBMR(提案−n3)':>14s} {'書込比(提案/n3)':>15s}")
-        for suf, lab in (("", "既定"), ("_c0", "chunk=0（CacheLib の置き方）"), ("_f1", "再挿入の上限なし"), ("_s2", "乱数の種 2"), ("_s3", "乱数の種 3")):
+        for suf, lab in (("", "既定"), ("_c0", "chunk=0（R 違いは不公平）"), ("_c0m", "chunk=0・受入上限 256MiB"), ("_f1", "再挿入の上限なし"), ("_s2", "乱数の種 2"), ("_s3", "乱数の種 3")):
             P_, B_, N_ = load(n, "ru_auto" + suf), load(n, "r256_base" + suf), load(n, "r256_n3" + suf)
             if not (P_ and B_): continue
             pt, bt = P_["total"], B_["total"]

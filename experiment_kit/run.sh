@@ -9,7 +9,7 @@
 #   ./run.sh tune-synth         同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷での確認）
 #   ./run.sh tune-figs          tune の図だけ作り直す → work/tune/figs/
 #   ./run.sh paper [name..]     論文用の比較（Region 256 MiB / RU × 方式 3 通り。PAPER_JOBS）→ work/paper/（図 1 枚・表 1 つ）
-#   ./run.sh paper-figs         paper の図と表だけ作り直す
+#   ./run.sh paper-figs         paper の図と表を全部作り直す（paper、あれば ext と robust も）
 #   ./run.sh paper-ext [name..] CacheLib の n=0・n=3 を追加で回す（PAPER_EXT_JOBS）→ work/paper/ext/（図と表も）。既にある結果は回さない
 #   ./run.sh paper-figs --ext   paper-ext の図と表だけ作り直す
 #   ./run.sh paper-robust [..]  頑健性の確認（chunk=0・再挿入の上限なし・乱数の種。PAPER_ROBUST_JOBS）→ work/paper/robust/（表と図）
@@ -73,12 +73,19 @@ setup() {
 
 # ---------------------------------------------------------------- traces.tsv
 # 1 行 = name path format params category source ssd note を \x1f 区切りで出す（空欄を保つ）
-rows() { awk -F'\t' 'BEGIN{OFS="\037"} /^#/||NF==0||$1=="name"{next} {$1=$1; print}' "${TRACES_TSV:-$KIT/traces.tsv}"; }
-each_trace() {  # each_trace <fn> [names..]   fn には name path format params category source ssd を渡す
-  local fn=$1; shift; local want=" $* " name path fmt params cat src ssd note
-  while IFS=$'\x1f' read -r name path fmt params cat src ssd note; do
+# 列は見出しの名前で読む（無い列は空。列の順番は自由。見出しの行が無ければ従来の 8 列の並び）。
+# 出す順: name path format params category source ssd note amp_key amp_size marks
+TSV_COLS="name path format params category source ssd note amp_key amp_size marks"
+rows() { awk -F'\t' -v want="$TSV_COLS" 'BEGIN{OFS="\037"; n = split(want, W, " ")}
+  /^#/ || NF == 0 {next}
+  $1 == "name" {for (i = 1; i <= NF; i++) H[$i] = i; next}
+  {if (!("name" in H)) {H["name"]=1; H["path"]=2; H["format"]=3; H["params"]=4; H["category"]=5; H["source"]=6; H["ssd"]=7; H["note"]=8}
+   line = ""; for (j = 1; j <= n; j++) {v = (W[j] in H) ? $(H[W[j]]) : ""; line = line (j > 1 ? OFS : "") v}; print line}' "${TRACES_TSV:-$KIT/traces.tsv}"; }
+each_trace() {  # each_trace <fn> [names..]   fn には name path format params category source ssd を渡す。増幅と書き込み量の印は TR_AMP_KEY / TR_AMP_SIZE / TR_MARKS で
+  local fn=$1; shift; local want=" $* " name path fmt params cat src ssd note amp_key amp_size marks
+  while IFS=$'\x1f' read -r name path fmt params cat src ssd note amp_key amp_size marks; do
     [ $# -gt 0 ] && [[ "$want" != *" $name "* ]] && continue
-    "$fn" "$name" "$path" "${fmt:-oracleGeneral}" "$params" "$cat" "$src" "$ssd"
+    TR_AMP_KEY=${amp_key:-1} TR_AMP_SIZE=${amp_size:-1} TR_MARKS=${marks:-} "$fn" "$name" "$path" "${fmt:-oracleGeneral}" "$params" "$cat" "$src" "$ssd"
   done < <(rows)
 }
 check_one() { [ -r "$2" ] && echo "OK   $1  $2  [$5 / $6]" || { echo "NONE $1  $2  (読めない)"; BAD=1; }; }
@@ -207,6 +214,8 @@ tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <
   local O=$ROOT/$1 tr=$2 SSD=$3 DRAM=$4 R=$5 CH=$6 TP=$7 WU=$8 J s id spec E
   mkdir -p "$O"; J=$O/jobs.txt; : > "$J"
   E="dram-size=$DRAM,chunk=$CH,dram-algo=lru,inclusion=cachelib,seal-on-repartition=inactive,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU}"
+  [ "${TR_AMP_KEY:-1}" != 1 ] && E="$E,amp-key=$TR_AMP_KEY"     # traces.tsv の amp_key（CacheLib の ampFactor：要求ごとに K 個の別キー）
+  [ "${TR_AMP_SIZE:-1}" != 1 ] && E="$E,amp-size=$TR_AMP_SIZE"  # traces.tsv の amp_size（CacheLib の ampSizeFactor：サイズを F 倍）
   for s in "${JOBS[@]}"; do
     id=${s%%|*}; spec=${s#*|}
     if [[ "$spec" == *ssd-mode=object* ]]; then spec="dram-size=$DRAM,dram-algo=lru,inclusion=cachelib,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU},$spec"
@@ -238,14 +247,18 @@ tune_one() {  # name path fmt params category source ssd: validity と同じ SSD
   # フットプリントは埋め値（size = SAT_VALUE）を除いて数えた、その変種の info.json（validity と共用）
   mkdir -p "$O/$var"
   [ -s "$O/$var/info.json" ] || env $SENV "$B/og_info" "$tr" > "$O/$var/info.json" || die "$name: og_info 失敗"
-  local fp SSD DRAM R CH; fp=$(jq1 "$O/$var/info.json" footprint); SSD=$(ssd_bytes "$ssd" "$fp"); DRAM=$((SSD / DRAM_DIV))
+  local fp SSD DRAM R CH; fp=$(jq1 "$O/$var/info.json" footprint)
+  fp=$(awk -v f="$fp" -v k="${TR_AMP_KEY:-1}" -v a="${TR_AMP_SIZE:-1}" 'BEGIN{printf "%.0f", f * k * a}')   # 増幅したトレースのフットプリント
+  SSD=$(ssd_bytes "$ssd" "$fp"); DRAM=$((SSD / DRAM_DIV))
   R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}; [ $R -lt 1048576 ] && R=1048576
   CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
-  log "tune $name/$var: footprint=$fp SSD=$SSD DRAM=$DRAM R=$R chunk=$CH"
+  log "tune $name/$var: footprint=$fp SSD=$SSD DRAM=$DRAM R=$R chunk=$CH amp_key=${TR_AMP_KEY:-1} amp_size=${TR_AMP_SIZE:-1} marks=${TR_MARKS:-}"
   local pe; pe=($(auto_p "$(jq1 "$O/$var/info.json" uniq)" "$fp" "$SSD" "$DRAM"))   # validity と同じメモリの見積り（meta は P≤4）
   TUNE_P=${TUNE_P:-${pe[0]}} tune_run "$name" "$tr" "$SSD" "$DRAM" "$R" "$CH" "$TP" ""
-  python3 - "${RUN_ROOT:-$WORK/tune}/$name.json" "$5" "$6" "$var" <<'EOF'
-import json, sys; d = json.load(open(sys.argv[1])); d.update(category=sys.argv[2], source=sys.argv[3], variant=sys.argv[4]); json.dump(d, open(sys.argv[1], "w"))
+  python3 - "${RUN_ROOT:-$WORK/tune}/$name.json" "$5" "$6" "$var" "${TR_AMP_KEY:-1}" "${TR_AMP_SIZE:-1}" "${TR_MARKS:-}" <<'EOF'
+import json, sys; d = json.load(open(sys.argv[1]))
+d.update(category=sys.argv[2], source=sys.argv[3], variant=sys.argv[4], amp_key=float(sys.argv[5]), amp_size=float(sys.argv[6]), marks=sys.argv[7])
+json.dump(d, open(sys.argv[1], "w"))
 EOF
 }
 tune_synth() {  # 合成の 95:5 と 3:1（1/64 縮小の SSD）。答え（固定の下限の最良）が分かっている負荷で、自動推定が届くかを見る
@@ -267,11 +280,17 @@ EOF
   done
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
-paper_figs() {  # --robust なら頑健性の図（work/paper/robust/）、それ以外は paper_figs.py（--ext を渡せば ext）
-  if [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
+paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。--ext / --robust ならその部分だけ
+  local robust_all=0
+  if [ $# -eq 0 ]; then
+    python3 "$KIT/py/paper_figs.py" "$WORK" || return
+    ls "$WORK"/paper/ext/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_figs.py" "$WORK" --ext
+    ls "$WORK"/paper/robust/*.json >/dev/null 2>&1 && robust_all=1
+  fi
+  if [ $robust_all = 1 ] || [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
     python3 "$KIT/py/paper_robust_figs.py" "$WORK"
-    local c; for c in c0 f1 s2 s3; do python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
-  else python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
+    local c; for c in c0 c0m f1 s2 s3; do python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
+  elif [ $# -gt 0 ]; then python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
 }
 
 aggregate() { TUNE_W=$TUNE_W python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }

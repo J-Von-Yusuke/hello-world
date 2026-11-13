@@ -287,6 +287,7 @@ python3 py/paper_check.py work --ext   # ext の構成も並べて確かめる
 | 条件 | 指定 | 確かめること |
 |---|---|---|
 | `_c0` | `chunk=0`（物を 1 Region の中に連続で置く） | 片を 1 つ失うと物全体のミスになる RegionFlash の扱いが、基準を不利にしていないか |
+| `_c0m` | `chunk=0` ＋ 受け入れの上限を全構成で 256 MiB（`admit=sizemax`） | 同上を、R の違う構成どうしで公平に比べる。**`_c0` だけだと Region より大きい物は入らないので、R=RU の構成だけ 256〜626.5 MiB の物を受け入れ、BMR が下がって書き込みが増える**（分類の効果ではない）。R の違う比較は `_c0m` で見る |
 | `_f1` | 再挿入の上限なし（`max_frac=1`、既定は追い出す Region あたり R×0.5） | 候補の多い n=1 の基準が上限で損をしていないか |
 | `_s2`・`_s3` | 乱数の種 2・3 | 差がゆれより大きいか |
 
@@ -296,17 +297,26 @@ python3 py/paper_check.py work --ext   # ext の構成も並べて確かめる
 python3 py/paper_check.py work --robust     # 確認の表だけ出し直す
 ```
 
-条件ごとの一式（`work/paper/robust/c0/`・`f1/`・`s2/`・`s3/`）：`paper-figs` と同じ図と表（3 面まとめ・CacheLib 比・1 面ずつ・時間変化・`table_main`。CacheLib n=3 がある条件は交換関係の図も）を、その条件で回した構成だけで作る（`r256_base_c0` → `r256_base` のように読み替え）。`PAPER_ROBUST_JOBS` に `<構成名>_<条件>` の名前で足せば、その構成も加わる。
+条件ごとの一式（`work/paper/robust/c0/`・`c0m/`・`f1/`・`s2/`・`s3/`）：`paper-figs` と同じ図と表（3 面まとめ・CacheLib 比・1 面ずつ・時間変化・`table_main`。CacheLib n=3 がある条件は交換関係の図も）を、その条件で回した構成だけで作る（`r256_base_c0` → `r256_base` のように読み替え）。`PAPER_ROBUST_JOBS` に `<構成名>_<条件>` の名前で足せば、その構成も加わる。
 
 条件をまたいだ図（`work/paper/robust/` 直下）：`fig_robust.svg` = 提案（RU＋分類の自動）− CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3（n=3 のある条件だけ）。どちらも左 = ΔBMR [pt]（0 = CacheLib、下が良い）、右 = 書き込みの比（CacheLib = 1、1 未満が良い）。横軸 = トレース（2 本以上なら平均も）、色 = 条件（既定・chunk=0・上限なし・種 2・種 3）。数値は `table_robust.csv` / `.md`。
 
 どの条件でも「提案の ΔBMR ≤ 0（または CacheLib n=3 より小さい）」と「書き込みの比 < 1」の向きが既定と同じなら、結論は作りや乱数に頼っていない。
 
+**書き込み量の印での結果（部分トレースで足りるか）**：`paper-figs` は各構成の `P.interval.csv` の累積の行から、CacheLib（`r256_base`）の累積 SSD 書き込みが W に達した時点（= 先頭の部分トレース）の結果を取り出し、全量と比べる。W は `traces.tsv` の `marks` 列（例 `1.5T,5T`）、空なら `WRITE_MARKS_TB`。
+
+| 出力 | 中身 |
+|---|---|
+| `fig_marks_<trace>.svg` | 横 = CacheLib が SSD に書いた量（部分トレースの長さ、対数）、縦 = ΔBMR（CacheLib 比）と書き込みの比。赤い縦線 = 指定した W。線が右端（全量）の値に落ち着き、W の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える |
+| `table_marks.md` / `.csv` | トレース × W（と全量）ごとに、先頭の割合（要求数）と各構成の「ΔBMR / 書き込みの比」。全量と差の向きが違うものに ✗ |
+
+**増幅（CacheLib cachebench の ampFactor / ampSizeFactor）**：`traces.tsv` の `amp_key`（要求ごとに K 個の別キー。物の数・要求数・フットプリントが K 倍）と `amp_size`（物のサイズを F 倍）。RegionFlash の `amp-key=K` / `amp-size=F` として tune / paper に渡す（`RegionFlash_get` の入口で、サイズ変更の判定より前に適用。P.json の `config.amp_key` / `amp_size` に残る）。要求数・区間の長さ・温め期間は増幅した後の要求で数える。validity には効かない。
+
 **結果の確かめ方**：`python3 py/paper_check.py work [トレース名..]`。構成ごとに、Region・chunk・分類の閾値が意図どおりか、全要求を回したか（`info.json` の要求数と一致）、書き込み = 受け入れ＋再挿入＋詰め物 が成り立つか、基準からの書き込みの差の内訳（受け入れ・再挿入・詰め物、TB）、受け入れの差が BMR の差 × 要求バイトと合うか、n=auto が選んだ閾値と下限 ff を一覧にする。
 
 ```bash
 ./run.sh paper               # traces.tsv の全部（名前を並べればそれだけ）。SSD・DRAM・chunk は validity と同じ。変種は埋め値を除いた主の変種
-./run.sh paper-figs          # 図と表だけ作り直す（PAPER_LANG=en で英語）
+./run.sh paper-figs          # 図と表を全部作り直す：paper、結果があれば ext と robust（条件をまたいだ図＋条件ごとの一式）も。PAPER_LANG=en で英語
 ```
 
 出力（`work/paper/`）は**図 1 枚（1 面ずつの版もある）と表 1 つ**（査読で見る量を抑える）。図は値そのものを並べ、基準（濃い灰）も含む。

@@ -10,6 +10,12 @@
 #    ssd       シミュレートする SSD の容量（キャッシュの大きさ）。例: 240G（固定）/ 30%（容量 = フットプリントの 30%）。空 = config.sh の SSD_DEFAULT
 #              ※「先頭 1.5 TB 書いた時点」の 1.5 TB はこれとは別。config.sh の WRITE_MARKS_TB で決める。Meta CDN は nha と揃えて 240G
 #    note      メモ（集計には使わない）
+#  ここから下の列は省略できる（見出しの行に列名を書けば、その列を読む。列の順番は自由）。tune / paper で使う:
+#    marks     paper で「CacheLib が SSD に書いた量がこれに達した時点」の結果も出す書き込み量。カンマ区切り。例: 1.5T,5T,500G（単位なしは TB）。
+#              空 = config.sh の WRITE_MARKS_TB。部分トレースで結論が言えるかを見る（table_marks / fig_marks）
+#    amp_key   キーの増幅（CacheLib cachebench の ampFactor）。要求ごとに K 個の別キーとして処理する。物の数・要求数・フットプリントが K 倍。空 = 1
+#    amp_size  サイズの倍率（CacheLib cachebench の ampSizeFactor）。物のサイズを F 倍にする（小数可）。空 = 1
+#              ssd を % で書いたときは、増幅したフットプリント（元 × amp_key × amp_size）に対する割合になる
 #  集計は category と source ごとに行う（列を足せば、その列でもまとめられる: ./run.sh aggregate --by category,source,<列名>）
 name	path	format	params	category	source	ssd	note
 #meta_nha	/data/meta_rnha.oracleGeneral.zst	oracleGeneral		CDN	Meta	240G	size=2^32-1 を含む（自動で drop と delete の 2 変種を走らせる）

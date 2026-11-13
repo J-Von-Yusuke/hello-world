@@ -518,10 +518,10 @@ index 9c32668..fdeb31f 100644
  #ifdef __cplusplus
 diff --git a/libCacheSim/cache/eviction/flash/RegionFlash.c b/libCacheSim/cache/eviction/flash/RegionFlash.c
 new file mode 100644
-index 0000000..c5030bb
+index 0000000..d2311f9
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/RegionFlash.c
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,475 @@
 +//
 +//  RegionFlash.c — DRAM (object unit) + SSD two-tier flash cache, ported from
 +//  cachesim (docs/re-DESIGN.md §1, §6).
@@ -641,7 +641,31 @@ index 0000000..c5030bb
 +// ***********************************************************************
 +// ****                       cache interface                         ****
 +// ***********************************************************************
++static bool rf_get_one(cache_t *cache, const request_t *req);
++
++/* amp-key=K / amp-size=F (CacheLib cachebench's ampFactor / ampSizeFactor): a request is served as K
++ * requests, the i-th for key id (i = 0) or a distinct key derived from (id, i), each of size
++ * round(size * F) (at least 1). Every counter (requests, bytes, the interval length, warm-up) counts the
++ * amplified requests. The result is the first key's. */
 +static bool RegionFlash_get(cache_t *cache, const request_t *req) {
++  rf_params_t *p = (rf_params_t *)cache->eviction_params;
++  if (p->amp_key <= 1 && p->amp_size == 1.0) return rf_get_one(cache, req);
++  request_t r = *req;
++  if (p->amp_size != 1.0 && r.obj_size > 0) {
++    double s = (double)r.obj_size * p->amp_size;
++    r.obj_size = s < 1 ? 1 : (int64_t)(s + 0.5);
++  }
++  bool hit = rf_get_one(cache, &r);
++  for (uint32_t i = 1; i < p->amp_key; i++) {
++    uint64_t x = (uint64_t)req->obj_id ^ (0x9E3779B97F4A7C15ull * i);
++    x ^= x >> 31, x *= 0xBF58476D1CE4E5B9ull, x ^= x >> 29;
++    r.obj_id = (obj_id_t)x;
++    rf_get_one(cache, &r);
++  }
++  return hit;
++}
++
++static bool rf_get_one(cache_t *cache, const request_t *req) {
 +  rf_params_t *p = (rf_params_t *)cache->eviction_params;
 +  /* the CLI seeds libCacheSim's per-thread random numbers with the time
 +   * (bin/cachesim/sim.c), after the caches are made: reseed from `seed` so
@@ -861,6 +885,7 @@ index 0000000..c5030bb
 +  p->re_p = 1.0;
 +  p->re_frac = 0.5;
 +  p->re_target = 0.5, p->re_eps = 0.02;
++  p->amp_key = 1, p->amp_size = 1.0;
 +  p->R = 16 * MiB;
 +  p->inclusion = INC_CACHELIB;
 +  snprintf(p->spec[0], 256, "all");
@@ -2149,10 +2174,10 @@ index 0000000..b0dfdd1
 +#endif /* REGIONFLASH_STATS_H */
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_params.c b/libCacheSim/cache/eviction/flash/core/rf_params.c
 new file mode 100644
-index 0000000..486fd60
+index 0000000..203a77a
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_params.c
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,112 @@
 +//
 +//  rf_params.c — parsing RegionFlash's -e parameters (see RegionFlash.c).
 +//
@@ -2246,6 +2271,8 @@ index 0000000..486fd60
 +    else if (strcasecmp(key, "st-lambda") == 0) snprintf(p->lambda_s, 32, "%s", value);
 +    else if (strcasecmp(key, "seed") == 0) p->seed = strtoull(value, NULL, 10);
 +    else if (strcasecmp(key, "warmup-req") == 0) p->warmup = atoll(value);
++    else if (strcasecmp(key, "amp-key") == 0) p->amp_key = (uint32_t)atoi(value);
++    else if (strcasecmp(key, "amp-size") == 0) p->amp_size = strtod(value, NULL);
 +    else if (strcasecmp(key, "ru-size") == 0) p->fdp.ru_size = rf_size(value);
 +    else if (strcasecmp(key, "ruh") == 0) p->fdp.n_ruh = (uint32_t)atoi(value);
 +    else if (strcasecmp(key, "fdp-iso") == 0) p->fdp.pi = rf_enum(value, ISO, 2, key);
@@ -2265,7 +2292,7 @@ index 0000000..486fd60
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_report.c b/libCacheSim/cache/eviction/flash/core/rf_report.c
 new file mode 100644
-index 0000000..41787e3
+index 0000000..4d667de
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_report.c
 @@ -0,0 +1,382 @@
@@ -2559,13 +2586,13 @@ index 0000000..41787e3
 +          "\"k\": %u, \"dram_size\": %llu, \"dram_policy\": \"%s\", "
 +          "\"inclusion\": \"%s\", \"region_evict\": \"%s\", \"beta\": %g, "
 +          "\"chunk\": %llu, \"seal_on_repartition\": \"%s\", \"hint\": \"%s\", \"warmup_req\": %lld, "
-+          "\"interval_req\": %llu, \"reinsert\": \"%s\", \"taus\": [",
++          "\"interval_req\": %llu, \"reinsert\": \"%s\", \"amp_key\": %u, \"amp_size\": %g, \"taus\": [",
 +          (unsigned long long)p->ssd_cap, SSD_NAME[p->ssd_mode],
 +          p->ssd_mode == SSD_OBJECT ? p->tier[T_SSD].algo : "", (unsigned long long)p->R,
 +          p->N, p->kmax, (unsigned long long)p->dram_cap, dram,
 +          INC_NAME[p->inclusion], rf_rev_name(p, rev, sizeof(rev)), p->beta,
 +          (unsigned long long)p->chunk, SEAL_NAME[p->seal_rep], p->pv[1].name, (long long)p->warmup,
-+          (unsigned long long)p->interval, re);
++          (unsigned long long)p->interval, re, p->amp_key, p->amp_size);
 +  for (uint32_t i = 0; i < p->ntau; i++)
 +    fprintf(f, "%s%lld", i ? ", " : "", (long long)p->taus[i]);
 +  fputs("], \"fdp\": ", f);
@@ -6351,10 +6378,10 @@ index 0000000..8cd7a6a
 +    on_evict, epoch, bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/regionflash_internal.h b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 new file mode 100644
-index 0000000..af0ae70
+index 0000000..1229724
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/regionflash_internal.h
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,281 @@
 +//
 +//  regionflash_internal.h — RegionFlash's state and the functions its modules
 +//  share. Not for use outside cache/eviction/flash/.
@@ -6469,6 +6496,10 @@ index 0000000..af0ae70
 +  uint64_t R, chunk, dram_cap, ssd_cap, ssd_max_obj;
 +  uint32_t N, kmax, khint, ntau;  // kmax = khint (+1: the hot class of re ii)
 +  int64_t warmup;
++  /* trace amplification (CacheLib cachebench's ampFactor / ampSizeFactor): every request is
++   * served as amp_key requests for distinct keys, each object's size times amp_size */
++  uint32_t amp_key;
++  double amp_size;
 +  int inclusion, ssd_mode, seal_rep;
 +  bool fdp_on;
 +  /* region-evict: a built-in policy (rops, region_policy.h), or

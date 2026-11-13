@@ -113,6 +113,9 @@ PAPER_EXT_JOBS=(
 #   _c0 : chunk=0（CacheLib と同じ置き方：物を 1 Region の中に連続で置き、入らなければ Region を閉じる。Region より大きい物は入れない）
 #         既定の chunk は大きい物を片に分けて Region をまたいで置き、片を 1 つ失うと物ごと消える（CacheLib には無い損）
 #   _f1 : 再挿入の上限なし（max_frac=1。既定は追い出す Region あたり R×0.5 まで。n=1 の基準ほど強く当たる）
+#   _c0m: chunk=0 ＋ 受け入れの上限を全構成で 256 MiB にそろえる（admit=sizemax）。chunk=0 では Region より大きい物は入らないので、
+#         R=256MiB と R=RU（626.5MiB）で受け入れられる物の大きさが変わり、RU 側だけ 256〜626.5MiB の物を入れて BMR が下がり書き込みが増える。
+#         R の違う構成を chunk=0 で比べるときは _c0m を使う（_c0 は同じ R どうしの比較だけに使う）
 #   _s2, _s3 : 乱数の種を変える（差がゆれより大きいか）
 B256="region-size=$PAPER_R256,hint=none,region-evict=lru"
 PROP="hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1"
@@ -121,4 +124,6 @@ PAPER_ROBUST_JOBS=(
   "r256_base_f1|$B256,reinsert=hits:n=1/max_frac=1" "r256_n3_f1|$B256,reinsert=hits:n=3/max_frac=1" "ru_auto_f1|$PROP,reinsert=hits:n=auto/target=0.5/max_frac=1"
   "r256_base_s2|$B256,reinsert=hits:n=1,seed=2"   "ru_auto_s2|$PROP,reinsert=hits:n=auto/target=0.5,seed=2"
   "r256_base_s3|$B256,reinsert=hits:n=1,seed=3"   "ru_auto_s3|$PROP,reinsert=hits:n=auto/target=0.5,seed=3"
+  "r256_base_c0m|$B256,reinsert=hits:n=1,chunk=0,admit=sizemax:max=$PAPER_R256"  "r256_n3_c0m|$B256,reinsert=hits:n=3,chunk=0,admit=sizemax:max=$PAPER_R256"
+  "ru_auto_c0m|$PROP,reinsert=hits:n=auto/target=0.5,chunk=0,admit=sizemax:max=$PAPER_R256"
 )

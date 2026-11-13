@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """paper_figs.py — 論文用の比較（./run.sh paper の結果 work/paper/<name>.json）から、図 1 枚と表 1 つを作る。
 
-  python3 paper_figs.py <WORK> [--ext | --cond c0|f1|s2|s3]  PAPER_LANG=en で英語の文字。--ext = paper-ext の結果を足して work/paper/ext/ に出す。
+  python3 paper_figs.py <WORK> [--ext | --cond c0|c0m|f1|s2|s3]  PAPER_LANG=en で英語の文字。--ext = paper-ext の結果を足して work/paper/ext/ に出す。
                                        --cond = paper-robust のその条件の構成だけで同じ一式を work/paper/robust/<条件>/ に出す
 
 比べる構成（config.sh の PAPER_JOBS）:
@@ -297,7 +297,76 @@ if (EXT or COND) and any("r256_n3" in runs[n]["runs"] or "r256_n0" in runs[n]["r
     open(f"{D}/fig_tradeoff.svg", "w", encoding="utf-8").write(tradeoff(names)); tr.append("fig_tradeoff")
     for n in names:
         open(f"{D}/fig_tradeoff_{n}.svg", "w", encoding="utf-8").write(tradeoff([n])); tr.append(f"fig_tradeoff_{n}")
-png = to_png(D, list(FIGS) + tl + tr)
+
+# ---------------------------------------------------------------- 書き込み量の印での結果（部分トレースで足りるか）
+#   基準（CacheLib）の累積 SSD 書き込みが W に達した区間を「先頭 W の部分トレース」とし、その区間の各構成の累積値を全量と比べる。
+#   W は traces.tsv の marks 列（例 1.5T,5T,500G。単位なしは TB）、無ければ環境変数 WRITE_MARKS_TB（config.sh、既定 1.5）。
+def parse_w(x):
+    x = x.strip().upper()
+    if not x: return None
+    m = {"P": 1e15, "T": 1e12, "G": 1e9}
+    return float(x[:-1]) * m[x[-1]] if x[-1] in m else float(x) * 1e12
+
+
+def cum_rows(n, c):  # P.interval.csv の累積の行（区間の順）
+    p = f"{rundir.get((n, c), f'{D}/{n}/{c}')}/P.interval.csv"
+    if not os.path.exists(p): return None
+    return [{k: int(r[k]) for k in K} for r in csv.DictReader(open(p)) if r["kind"] == "cumulative"]
+
+
+def at(row):  # 累積の行 → (BMR %, OHR %, 書き込み TB)
+    return (100 * row["miss_bytes"] / row["req_bytes"] if row["req_bytes"] else None,
+            100 * (row["dram_hits"] + row["ssd_hits"]) / row["reqs"] if row["reqs"] else None, row["flash_region_write_bytes"] / 1e12)
+
+
+mk, mrows = [], []
+for n in names:
+    base = cum_rows(n, BASE)
+    if not base or base[-1]["flash_region_write_bytes"] <= 0: continue
+    C = {c: cum_rows(n, c) for c in others}; C = {c: v for c, v in C.items() if v and len(v) == len(base)}
+    if not C: continue
+    full_w = base[-1]["flash_region_write_bytes"]
+    marks = [w for w in (parse_w(x) for x in (runs[n].get("marks") or os.environ.get("WRITE_MARKS_TB", "1.5")).split(",")) if w and w < full_w]
+    idx_of = lambda w: next(i for i, r in enumerate(base) if r["flash_region_write_bytes"] >= w)
+    fullv = {c: (at(C[c][-1])[0] - at(base[-1])[0], at(C[c][-1])[2] / at(base[-1])[2]) for c in C}
+    for lab, i in [(f"{w / 1e12:g}TB", idx_of(w)) for w in marks] + [(T("全量", "full"), len(base) - 1)]:
+        b0 = at(base[i])
+        for c in C:
+            v = at(C[c][i]); db = v[0] - b0[0]; wr = v[2] / b0[2] if b0[2] else None
+            mrows.append(dict(trace=n, mark=lab, reqs=base[i]["reqs"], frac_reqs=base[i]["reqs"] / base[-1]["reqs"], config=c, label=nm(c),
+                              bmr_pct=v[0], ohr_pct=v[1], write_TB=v[2], d_bmr_pt=db, write_ratio=wr, d_ohr_pt=v[1] - b0[1],
+                              sign_bmr_ok=int((db < 0) == (fullv[c][0] < 0)), sign_write_ok=int((wr < 1) == (fullv[c][1] < 1)) if wr else ""))
+    # 曲線：基準の書き込み量を対数で約 60 点に刻む
+    w0 = max(base[0]["flash_region_write_bytes"], full_w * 1e-3, 1)
+    grid = sorted({idx_of(min(full_w, w0 * (full_w / w0) ** (k / 59))) for k in range(60)})
+    xs = [base[i]["flash_region_write_bytes"] / 1e12 for i in grid]
+    f = Fig(); f.add_legend([(nm(c), COL.get(c, PAL[j % len(PAL)]), "line") for j, c in enumerate(others) if c in C] + [(T("指定した書き込み量", "write marks"), "#c0504a", "dash")])
+    top = f.legend_h() + 50
+    for k, (title, ylab, fn, ref) in enumerate([
+            (T("ΔBMR（CacheLib 比、下が良い）", "ΔBMR vs. CacheLib (lower is better)"), "ΔBMR [pt]", lambda c, i: at(C[c][i])[0] - at(base[i])[0], 0.0),
+            (T("SSD 書き込み（CacheLib = 1）", "SSD writes (CacheLib = 1)"), T("書き込みの比", "Write ratio"), lambda c, i: at(C[c][i])[2] / at(base[i])[2] if at(base[i])[2] else None, 1.0)]):
+        ys = {c: [fn(c, i) for i in grid] for c in C}
+        vals = [y for v in ys.values() for y in v if y is not None] + [ref]
+        x0 = 130 + k * 785
+        a = Ax(f, (x0, top, x0 + 640, 770), xr=(min(xs), max(xs)), xlog=min(xs) > 0 and max(xs) / min(xs) > 10, yr=span(vals) if ref == 0 else (0, max(vals) * 1.1),
+               xlabel=T("CacheLib が SSD に書いた量 [TB]（= 先頭の部分トレースの長さ）", "Bytes CacheLib wrote to SSD [TB] (= prefix length)"), ylabel=ylab, title=title)
+        a.hline(ref, col="#4d4d4d")
+        for j, c in enumerate(others):
+            if c in C: a.line(xs, ys[c], COL.get(c, PAL[j % len(PAL)]), w=3)
+        for w in marks: a.vline(w / 1e12, label=f"{w / 1e12:g}TB")
+    slug = f"fig_marks_{n}"; open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(f.svg()); mk.append(slug)
+if mrows:
+    with open(f"{D}/table_marks.csv", "w", newline="", encoding="utf-8") as fo:
+        w_ = csv.DictWriter(fo, list(mrows[0])); w_.writeheader(); w_.writerows(mrows)
+    md = [f"| {T('トレース', 'Trace')} | {T('印', 'Mark')} | {T('先頭の割合', 'Prefix')} | " + " | ".join(nm(c) for c in others) + " |", "|---|---|---|" + "---|" * len(others)]
+    for (n, lab) in dict.fromkeys((r["trace"], r["mark"]) for r in mrows):
+        rs = {r["config"]: r for r in mrows if r["trace"] == n and r["mark"] == lab}; r0 = next(iter(rs.values()))
+        md.append(f"| {n} | {lab} | {100 * r0['frac_reqs']:.1f}% | " + " | ".join(
+            "–" if c not in rs else f"{rs[c]['d_bmr_pt']:+.3f} / {rs[c]['write_ratio']:.3f}" + ("" if rs[c]["sign_bmr_ok"] and rs[c]["sign_write_ok"] else " ✗") for c in others) + " |")
+    open(f"{D}/table_marks.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
+        "各セル = ΔBMR [pt]（構成 − CacheLib）/ 書き込みの比（構成 ÷ CacheLib）。印 = CacheLib の累積 SSD 書き込みがその量に達した時点（先頭の割合 = そこまでの要求の割合）。✗ = 全量と差の向きが違う。\n",
+        "Each cell: ΔBMR [pt] (config − CacheLib) / write ratio (config ÷ CacheLib), at the point where CacheLib has written that much to the SSD. ✗ = sign differs from the full trace.\n"))
+png = to_png(D, list(FIGS) + tl + tr + mk)
 
 # ---------------------------------------------------------------- 説明のページ
 def mean_of(fn, c):
@@ -321,6 +390,9 @@ img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}
 """ + ("<h2>補足：時間変化</h2><p class='m'>fig_ops_* = 横軸が処理した要求数（BMR・OHR は区間ごと、SSD 書き込みは累積）。"
        "fig_wr_* = 横軸がその構成の累積 SSD 書き込み量（BMR・OHR はそこまでの累積。同じ量を書いた時点での比較）。破線 = 基準。</p>"
        + "".join(f'<h3>{s}</h3><img src="{s}.svg" alt="{s}">' for s in tl) if tl else "") + f"""
+""" + ("<h2>書き込み量の印での結果（部分トレースで足りるか）</h2><p class='m'>fig_marks_&lt;trace&gt;：横 = CacheLib が SSD に書いた量（先頭の部分トレースの長さ）、縦 = ΔBMR と書き込みの比。"
+       "線が右端（全量）の値に早く落ち着き、赤い縦線（指定した書き込み量）の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。数値は table_marks.md / .csv（✗ = 全量と向きが違う）。</p>"
+       + "".join(f'<img src="{s_}.svg" alt="{s_}">' for s_ in mk) + (f"<pre>{open(f'{D}/table_marks.md', encoding='utf-8').read()}</pre>" if mrows else "") if mk else "") + f"""
 <h2>表：table_main.md / .tex / .csv</h2><pre>{open(f"{D}/table_main.md", encoding="utf-8").read()}</pre></main></body></html>"""
 open(f"{D}/index.html", "w", encoding="utf-8").write(html)
 print(f"paper: {len(names)} 本 → {D}/fig_main.svg・fig_rel.svg（と 1 面ずつ 6 枚）, 時間変化 {len(tl)} 枚（fig_ops_* / fig_wr_*）{f'、交換関係 {len(tr)} 枚（fig_tradeoff*）' if tr else ''}{'（.png も）' if png else ''}, table_main.(md|tex|csv), index.html")
