@@ -206,7 +206,7 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <div>
 <div class="math">\[ h_i=\frac{\lambda_iT}{1+\lambda_iT},\qquad \sum_i\frac{s_ih_i}{\phi}=C \]</div>
 <ul>
-<li>T は封じた Region の数 ÷ 封じる率（Little の公式）。分類は U（封じるまでの待ち）と充填率 φ にしか入らず、どちらも小さい <span class="tag t-pf">証明</span>。</li>
+<li>T は Region の総数 ÷ 新しい Region を書き終えるペース（Little の公式）。分類は U（封じるまでの待ち）と充填率 φ にしか入らず、どちらも小さい <span class="tag t-pf">証明</span>。</li>
 <li>例題：分類の利得は +1.5pt。混在の詰め残し（4.5%）の分だけで、φ を入れたモデルは 0.1pt で一致 <span class="tag t-em">実測</span>。</li>
 </ul>
 </div>
@@ -352,7 +352,7 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <tr><td>Region LRU の寿命式・不動点</td><td>成り立つ</td><td>分類ごとに M_k を持つだけで同じ（分類間の結合は T と容量）</td><td><span class="tag t-ap">近似</span></td></tr>
 <tr><td>分類を増やすと OHR↑ BHR↓</td><td>2 サイズで確認</td><td>3 サイズで確認（モデル・実測とも 0.5pt 以内）</td><td><span class="tag t-em">実測</span></td></tr>
 <tr><td>冷たい物の便乗は分け方で減らない</td><td>混在 48% / 分類 53%</td><td>46〜48%（どの分け方でも）</td><td><span class="tag t-em">実測</span></td></tr>
-<tr><td>自然な配分が KKT 点</td><td>否（62% 対 49%）</td><td>否の見込み（同じ機構）。3 分類の最適配分は未計算</td><td><span class="tag t-no">未保証</span></td></tr>
+<tr><td>自然な配分が KKT 点</td><td>否（62% 対 49%）</td><td>否。3 サイズの例で OHR 最適は S/M/L = 36/32/33%、自然な配分は 40/31/30%（近いが OHR は 9pt 低い）。BHR 重視（w=0.1）の最適は L に 52%（付録 §K.2、モデル）</td><td><span class="tag t-no">未保証</span></td></tr>
 </table></div>
 <details><summary>補足：なぜ「分類を増やすほど」ではなく「何で分けるか」が本質か</summary>
 <p>便乗は「同じ挿入の流れに熱と冷が混ざる」ことが原因なので、サイズ軸を何分割しても消えない。消せる軸は人気（頻度）だけ。サイズ分類の価値は OHR 側（価値密度 λ/s が小物ほど高い傾向）にあり、BHR 側ではコスト。このトレードオフを、再挿入と容量の下限で調整するのが次章。</p>
@@ -525,7 +525,7 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <tr><td>同居の独立、M_k^(n−1)</td><td>Palm–Khintchine</td><td><span class="tag t-ap">近似</span><span class="tag t-em">実測</span></td><td>分散/平均 0.97。n 大（4,096〜）で分類ありの BMR を 4〜6pt 悪く見積もる</td></tr>
 <tr><td>不動点の存在 / 一意</td><td>Brouwer / —</td><td><span class="tag t-pf">存在</span><span class="tag t-no">一意は未証明</span></td><td>—</td></tr>
 <tr><td>分類は Region FIFO では効かず LRU で効く</td><td>寿命 = T / 指数</td><td><span class="tag t-pf">証明</span><span class="tag t-em">実測</span></td><td>—</td></tr>
-<tr><td>自然な配分は KKT 点でない</td><td>末尾年齢の平準化 ≠ 限界値</td><td><span class="tag t-em">実測</span></td><td>3 分類の最適は未計算</td></tr>
+<tr><td>自然な配分は KKT 点でない</td><td>末尾年齢の平準化 ≠ 限界値</td><td><span class="tag t-em">実測</span></td><td>3 分類の最適は付録 §K.2 で計算（モデルのみ）。Zipf の傾きが大きいと行き過ぎが強まる（§N）</td></tr>
 <tr><td>再挿入 n：h ≥ n の形</td><td>p(h) 単調（単調尤度比）</td><td><span class="tag t-pf">証明</span></td><td>p* は方針値。容量を奪う効果・T 帰還は未保証</td></tr>
 <tr><td>ff の山登りは最適の ±δ へ</td><td>J 凹 + 窓 ≫ 遅れ</td><td><span class="tag t-pf">2 分類</span><span class="tag t-no">K≥3 未保証</span></td><td>ff が下限（平らな領域あり）、時間変化への追従</td></tr>
 </table></div>

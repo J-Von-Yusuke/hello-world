@@ -35,7 +35,7 @@ ol li,ul li{margin:3px 0}
 <body>
 <main>
 <h1>付録：Region 単位キャッシュのヒット率モデル — 導出の詳細</h1>
-<p class="sub">2026-11-06。本文 <a href="synth_size_class.html">synth_size_class.html</a> §2 の式を、仮定・補題・命題・証明の形で書き下した論文付録の草稿。初学者向けの段階的な説明は <a href="region_lru_derivation.html">region_lru_derivation.html</a>、数値例で通した版は <a href="che_to_region_walkthrough.html">che_to_region_walkthrough.html</a>。補題の数値確認は <code>tools/synth/appendix_check.py</code>（結果 <code>results/appendix_check.json</code>）、数値例の値は <code>tools/synth/toy_walk.py</code>（<code>results/toy_walk.json</code>）。</p>
+<p class="sub">2026-11-06（11-16 に §A.5、§K〜§N を追記）。学部レベルの前提から読むための入門は <a href="model_primer_undergrad.html">model_primer_undergrad.html</a>。本文 <a href="synth_size_class.html">synth_size_class.html</a> §2 の式を、仮定・補題・命題・証明の形で書き下した論文付録の草稿。初学者向けの段階的な説明は <a href="region_lru_derivation.html">region_lru_derivation.html</a>、数値例で通した版は <a href="che_to_region_walkthrough.html">che_to_region_walkthrough.html</a>。補題の数値確認は <code>tools/synth/appendix_check.py</code>（結果 <code>results/appendix_check.json</code>）、数値例の値は <code>tools/synth/toy_walk.py</code>（<code>results/toy_walk.json</code>）。</p>
 
 <div class="card ok"><b>主結果（定常モデルの全体）</b>
 <p>物 \(i\) の要求率を \(\lambda_i\)、大きさを \(s_i\)、分類（書き込みの流れ）を \(k=\kappa(i)\) とする。Region LRU の定常ヒット率は、次の連立方程式の解として与えられる。</p>
@@ -63,6 +63,17 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <li>立ち上がりの充填が終わる時刻は、Che の \(T\) と同じ式で決まる（命題 F.1）。最初に詰まる Region の \(\Lambda\) が時間とともに減ることも、同じ \(-\mathrm{Var}\) の式から出る。</li>
 <li>スケール不変性（命題 G.1）と、不動点が存在すること（Brouwer、命題 E.8）を示した。</li>
 </ol></div>
+
+<div class="card as"><b>2026-11-16 の追記（§A.5、§K〜§N）</b>
+<ol start="9">
+<li>物ごとの和と、グループ形（\(N_g\) つき）の式の対応を書いた（§A.5）。walkthrough はグループ形、本付録は物ごとの形。</li>
+<li>目的を \(J=\mathrm{BHR}+w\cdot\mathrm{OHR}\) に、分類の数を任意の \(K\) に広げた。凹性と KKT はそのまま成り立つ（命題 K.1）。3 サイズの例で \(K=3\) の最適な配分を解き、Region LRU の自然な配分と並べた（§K.2）。</li>
+<li>容量の下限の山登りが、単峰な \(J\) の上で最適の格子点の \(\pm\delta\) に入ることを示し、それが仮定している条件（遅れ、雑音、下限と固定分割の違い、\(K\ge3\)）を並べた（命題 K.3）。</li>
+<li>再挿入：1 回の滞在のヒット数が幾何分布であること（補題 L.1）、滞在をつないだときの式（命題 L.2、モンテカルロで確認）、書き直しの損得、\(p(h+1)-p(h)=\mathrm{Var}_h(a)/\mathbb{E}_h[a]\ge0\) による閾値の規則の最適性（命題 L.3）。</li>
+<li>末尾のヒット密度が限界値になるのは物単位の LRU だけである理由（命題 M.1）。</li>
+<li>Zipf の傾き \(\alpha\) と分類の利得の関係：べき乗則、利得の上限、大物の損失の弾力性と、モデルの掃引（§N）。\(\alpha\gtrsim1.2\) で定常の不動点が跳ぶ（モデルが外れる範囲）ことも記した。</li>
+</ol>
+<p>数値確認は <code>tools/synth/appendix_check2.py</code>（<code>results/appendix_check2.json</code>）、<code>reinsert_check.py</code>、<code>alpha_sweep.py</code>（<code>results/alpha_sweep.json</code>）。</p></div>
 
 <h2>A. 系のモデル、仮定、記号</h2>
 <h3>A.1 キャッシュ</h3>
@@ -99,6 +110,11 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <tr><td>\(\mathbb{E}^0_i\)</td><td>Palm 期待値：物 \(i\) を含む Region についての平均</td></tr>
 <tr><td>\(\phi_r=B_r/R\)、\(\phi^*\)</td><td>Region の充填率（\(B_r\) は中の物のバイト数）、寿命で重みをつけた充填率</td></tr>
 </table></div>
+
+<h3>A.5 物ごとの和と、グループ形の式（11-16 追記）</h3>
+<p>本付録の和 \(\sum_i\) は物 1 個ずつについてとる。walkthrough の例題のように、同じ \(\lambda_g\)・\(s_g\) の物が \(N_g\) 個あるグループに分かれているときは、同じ項が \(N_g\) 回出るので</p>
+\[ \sum_{i}f(\lambda_i,s_i)=\sum_gN_g\,f(\lambda_g,s_g),\qquad\text{例：}\ \sum_is_i\big(1-e^{-\lambda_iT}\big)=\sum_gN_gs_g\big(1-e^{-\lambda_gT}\big). \tag{A.2}\]
+<p>\(N_gs_g\) はグループのユニーク量（全部を 1 個ずつ置いたバイト数）で、\(N_gs_gh_g\) がそのグループの占有。挿入の流れの重みも同じで、物ごとの \(m_j\)（物 1 個の挿入率）は、グループ形では \(N_jm_j\)（グループ全体の挿入率）になる：\(M_k(t)=\sum_jN_jm_je^{\lambda_jt}/\sum_jN_jm_j\)。OHR に \(N_g\) は現れない（要求の割合 \(p_g=N_g\lambda_g\) に入っている）。<code>synth_model</code> は Zipf の順位を \(\lambda\) の比 1.01 以内で束ねたビンをグループとして、この形で計算している。</p>
 
 <h2>B. 物単位 LRU</h2>
 <h3>B.1 Che 近似</h3>
@@ -305,12 +321,20 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <tr><td>Region LRU（隔離あり）</td><td>24 構成</td><td>OHR 平均 0.2pt、BHR 平均 0.1pt（分類なし）・0.8pt（分類あり）</td></tr>
 <tr><td>4 群の例</td><td>LRU / FIFO 混在 / LRU 混在 / LRU 分割（隔離あり）</td><td>OHR で 62.8/62.7、52.8/52.7、57.7/57.7、73.8/73.7</td></tr>
 <tr><td>3 サイズの例</td><td>混在・2 通りの 2 分割・3 分割</td><td>すべて 0.5pt 以内</td></tr>
+<tr><td>\(K=3\) の KKT 解 (K.3)</td><td>3 サイズの例、目的 3 通り。2% 刻みの格子の総当たりと比較（式どうし）</td><td>目的の値で \(10^{-4}\) 以内</td></tr>
+<tr><td>\(J(f\!f)\) の凹性（系 K.2）</td><td>4 群の例、\(w=0\)〜3、\(f\!f=0.01\)〜0.99 の 2 階差分（式）</td><td>すべて負</td></tr>
+<tr><td>再挿入 (L.1)・(L.2)</td><td>モンテカルロ 10 万サイクル、4 条件</td><td>\(q\)・\(\ell\)・\(h\)・再挿入/ミスとも 1% 以内</td></tr>
+<tr><td>\(p(h)\) の単調性 (L.4)</td><td>3 点の混合、モンテカルロ 40 万滞在</td><td>\(h\le4\) で 0.004 以内（\(h=5\) は標本 3,262 で 0.017）</td></tr>
+<tr><td>最適な取り分 (N.3)</td><td>W1 の形、\(\alpha=1.0\)〜1.6、<code>synth_model</code> の数値解と比較（式どうし）</td><td>2pt 以内</td></tr>
 </table></div>
+<p class="sub">11-16 に足した 5 行のうち、シミュレータ（RegionFlash）との比較は 1 つもない。式どうし、または式とモンテカルロの照合である。</p>
 <div class="card warn"><b>モデルが外れる所（論文にするなら明記すべき条件）</b>
 <ol>
 <li><b>1 Region の物の数 \(n\) が大きい場合</b>：検証は \(n\le901\)。縮小版の SSD 規模（\(n_S=4{,}096\)〜\(10{,}016\)）では、サイズ分類の BMR を 4〜6pt 悪く見積もった（小物の取り分を多く見積もる向き）。(E.4) の階段近似と、隔離の詰め込みの近似が候補で、未解決。</li>
 <li><b>Region の数 \(N_R\) が少ない場合</b>（64 個）：2〜4pt。立ち上がり中の追い出しを無視しているため。</li>
 <li><b>人気が変わる負荷</b>：Ap3 の定常の代わりに、年齢つきの再生方程式（§J）が要る。物単位 LRU の部分は 0.25pt で合うが、Region 部分は途中。</li>
+<li><b>Zipf の傾きが大きい負荷</b>（\(\alpha\ge1.2\)、11-16 追記）：定常の不動点が跳び、容量の条件を満たす連続な解がない点がある（§N.4）。隔離つきのモデルは解けるが、運用中に固定される Region を含まない。\(\alpha\gt1\) の負荷はシミュレータで検証していない（これまでの検証は \(\alpha=0\)〜1.1）。</li>
+<li><b>再挿入・容量の下限つきの全体</b>（11-16 追記）：§K・§L は物 1 個または物単位の静的分割の式。Region LRU の不動点に再挿入と下限を組み込んだモデルはない。</li>
 </ol></div>
 
 <h2>I. 入れなかった補正：追い出し年齢の揺らぎ</h2>
@@ -326,6 +350,169 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 G(a\mid a')=\mathbb{E}_\nu\Big[\exp\Big(-\int_{a'}^{a}\eta\big(\lambda(u)+\Lambda_{\rm rest}(u-a')+\nu\,\lambda_{\rm new}(u-a')\big)du\Big)\Big] \tag{J.2}\]
 <p>を満たす。ここで \(\eta(\Lambda)=\Lambda/(e^{\Lambda T}-1)=1/\mathbb{E}D\) は (E.2) の逆数で、死亡率の平均場近似。\(\nu\) は Region の中の熱い新顔の数で、ポアソン分布に従う。(J.2) の \(\eta\) は、命題 E.2 の指数近似を時間変化する \(\Lambda\) に広げたもので、\(\Lambda T\) が小さい所では近似になる。混在の構成で 9〜22pt 外れる問題が残っている（本文 §6.2）。</p>
 
+<h2>K. 多分割の静的分割と、目的 \(J=\mathrm{BHR}+w\cdot\mathrm{OHR}\)（11-16 追記）</h2>
+<p>§B は OHR だけ・証明は 2 分類の例で確かめていた。ここでは目的を一般にし、分類の数 \(K\) を任意にする。自動調整（容量の下限 \(f\!f\) の山登り、<code>evict/region_basic.c</code>）が頼る性質はこの節の命題 K.1〜K.3。</p>
+<h3>K.1 目的と限界値</h3>
+<p>分類 \(k=1,\dots,K\) に容量 \(C_k\) を与え、分類ごとに物単位の LRU を回す（§B.2）。\(\Lambda_B=\sum_i\lambda_is_i\) を要求バイトの率として</p>
+\[ J(C_1,\dots,C_K)=\sum_{k=1}^{K}\Big[\frac{B_k(C_k)}{\Lambda_B}+w\,H_k(C_k)\Big],\qquad B_k=\sum_{i\in\mathcal O_k}\lambda_is_i\big(1-e^{-\lambda_iT_k}\big),\quad \sum_kC_k=C . \tag{K.1}\]
+<p>\(w=0\) なら BHR、\(w\to\infty\) なら OHR。限界値は (B.3) と同じ計算で</p>
+\[ \frac{\partial J}{\partial C_k}=\nu_k(T_k):=\frac{\sum_{i\in\mathcal O_k}\lambda_i^2e^{-\lambda_iT_k}\,\big(s_i/\Lambda_B+w\big)}{\sum_{i\in\mathcal O_k}s_i\lambda_ie^{-\lambda_iT_k}}\ \overset{s_i=s_k}{=}\ \Big(\frac{1}{\Lambda_B}+\frac{w}{s_k}\Big)\bar\lambda_{w,k}(T_k). \tag{K.2}\]
+<p>単一サイズの分類では、BHR の項は境目の \(\lambda\)、OHR の項は境目の \(\lambda/s\) を数える。</p>
+<div class="thm"><b>命題 K.1（\(K\) 分類での凹性と KKT）</b>　各分類が単一サイズなら、\(J\) は \((C_1,\dots,C_K)\) の凹関数で、分類の中に \(\lambda\) の違う物が 2 つ以上あれば狭義に凹である。したがって
+\[ \nu_k(T_k)=\nu\ \ (0\lt C_k\lt\textstyle\sum_{i\in\mathcal O_k}s_i),\qquad \nu_k(0)\le\nu\ \ (C_k=0),\qquad \nu_k(\infty)\ge\nu\ \ (C_k=\textstyle\sum s_i) \tag{K.3}\]
+を満たす配分が、ただ 1 つの大域最適である。\(K\) の大きさは証明に入らない。</div>
+<div class="pf">\(J=\sum_kJ_k(C_k)\) は分類ごとの関数の和。\(J_k'=\nu_k=(1/\Lambda_B+w/s_k)\bar\lambda_{w,k}\) で、命題 B.2 より \(d\bar\lambda_w/dT=-\mathrm{Var}_w(\lambda)\le0\)、\(dC_k/dT\gt0\) なので \(J_k''\le0\)。1 変数の凹関数の和は多変数の凹関数（ヘッセ行列が対角で非正）。制約は線形で、実行可能領域は凸。凹関数の最大化では KKT 条件が必要十分。狭義に凹なら最大点は 1 つ。<span class="qed">□</span></div>
+<div class="thm"><b>系 K.2（2 分類では 1 変数で山が 1 つ）</b>　\(K=2\) で \(C_L=f\!f\cdot C\)、\(C_S=(1-f\!f)C\) とおくと、\(J(f\!f)\) は \([0,1]\) の上で凹（狭義に凹なら単峰）である。</div>
+<div class="pf">凹関数を直線 \(\{(1-f\!f)C,\ f\!f\,C\}\) に制限したものは凹。<span class="qed">□</span></div>
+<p><b>数値確認（K2、4 群の例、<code>appendix_check2.py</code>）</b>：\(f\!f=0.01\)〜\(0.99\) の 2 階差分の最大はどの \(w\) でも負（\(-4\times10^{-5}\)〜\(-1\times10^{-4}\)）。最適の \(f\!f\) は \(w\) とともに下がる：</p>
+<div class="tbl"><table>
+<tr><th>\(w\)</th><th class="n">0（BHR）</th><th class="n">0.03</th><th class="n">0.1</th><th class="n">0.3</th><th class="n">1</th><th class="n">3</th><th class="n">\(\infty\)（OHR）</th></tr>
+<tr><td>最適な大物の取り分 \(f\!f^*\)</td><td class="n">0.707</td><td class="n">0.696</td><td class="n">0.677</td><td class="n">0.644</td><td class="n">0.596</td><td class="n">0.558</td><td class="n">0.512</td></tr>
+<tr><td>OHR / BHR</td><td class="n">68.8 / 77.2</td><td class="n">69.9 / 77.2</td><td class="n">71.7 / 77.1</td><td class="n">74.3 / 76.6</td><td class="n">76.7 / 75.3</td><td class="n">77.8 / 73.6</td><td class="n">78.1 / 70.9</td></tr>
+</table></div>
+<p>共有の LRU（大物 75.6%、OHR 62.8 / BHR 76.9）は BHR 最適（70.7%、77.2）に近いが一致はしない（§B.2 の注のとおり）。</p>
+
+<h3>K.2 3 分類の例：最適な配分と、Region LRU の自然な配分</h3>
+<p>3 サイズの例（walkthrough 第 8 章の 6 群、容量 40,960 単位）で (K.3) を解いた（K1。2% 刻みの格子の総当たりの最良と、目的の値で \(10^{-4}\) 以内に一致）。</p>
+<div class="tbl"><table>
+<tr><th>配分</th><th class="n">S の容量</th><th class="n">M</th><th class="n">L</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>共有の LRU（\(T\) 共通）</td><td class="n">15.8%</td><td class="n">27.4%</td><td class="n">56.8%</td><td class="n">61.3</td><td class="n">74.4</td></tr>
+<tr><td>静的分割・BHR 最適（\(w=0\)）</td><td class="n">15.1%</td><td class="n">30.1%</td><td class="n">54.8%</td><td class="n">61.3</td><td class="n">74.6</td></tr>
+<tr><td>静的分割・\(w=0.1\)</td><td class="n">19.4%</td><td class="n">28.6%</td><td class="n">51.9%</td><td class="n">65.8</td><td class="n">74.4</td></tr>
+<tr><td>静的分割・OHR 最適</td><td class="n">35.6%</td><td class="n">31.7%</td><td class="n">32.8%</td><td class="n">74.6</td><td class="n">65.5</td></tr>
+<tr><td>Region LRU・S｜M｜L の自然な配分（モデル、§E）</td><td class="n">40.0%</td><td class="n">30.5%</td><td class="n">29.6%</td><td class="n">65.6</td><td class="n">56.9</td></tr>
+</table></div>
+<ul>
+<li>共有の LRU での限界値（OHR、容量 1 単位あたり）は S : M : L = \(3.19\times10^{-5}\) : \(1.06\times10^{-5}\) : \(1.70\times10^{-6}\)（18.7 : 6.2 : 1）。共有は「\(T\) をそろえる」だけで、限界値はそろえない。</li>
+<li>Region LRU の自然な配分は、OHR 最適の配分に近い（S を 4pt 多く、L を 3pt 少なく取る）。<b>それでも OHR は 9pt、BHR は 8.6pt 低い</b>。配分が同程度でも、Region 単位の追い出しと便乗（§E.8）の損失が残るため。配分を直すだけでは物単位の最適には届かない。</li>
+<li>BHR を重く見る目的（\(w=0.1\)）の最適は L に 52%。自然な配分の 30% とは大きく離れる。容量の下限が要る理由。</li>
+</ul>
+
+<h3>K.3 山登り（perturb and observe）の収束</h3>
+<p>実装：窓ごとに \(J\) を測り、前の窓より上がれば同じ向き、下がれば逆向きに \(f\!f\) を \(\delta\) 動かす。</p>
+<div class="thm"><b>命題 K.3</b>　\(J\) が \(f\!f\) の単峰な関数で、窓ごとの測定が正確（雑音なし・遅れなし）なら、格子 \(\{f\!f_0+m\delta\}\) の上で \(J\) が最大の点を \(x^*\) として、山登りは高々 \(|f\!f_0-x^*|/\delta+2\) 回の窓で \(x^*\) に着き、以後は \(x^*-\delta,\ x^*,\ x^*+\delta\) の 3 点を行き来する。\(x^*\) は真の最適から \(\delta\) 以内なので、山登りは真の最適の \(2\delta\) 以内にとどまる。</div>
+<div class="pf">単峰なので、格子の上で \(x^*\) に向かう 1 歩は \(J\) を上げ、離れる 1 歩は下げる。最初の向きが逆なら 1 回で反転する。以後 \(x^*\) に着くまで向きは変わらない。\(x^*\) の次の 1 歩は \(J\) を下げるので反転し、\(x^*\) に戻る 1 歩は上げるので向きを保って反対側に 1 歩出て、また反転する。<span class="qed">□</span></div>
+<p><b>この命題が仮定していて、実装では近似でしかない点</b>：</p>
+<ol>
+<li><b>遅れ</b>：\(f\!f\) を下げた得（小物のヒット）は小物の \(T_S\) の時間で見え、損（追い出した大物の次の要求がミスになる）は大物の再要求までの時間で見える。窓が損の遅れより短いと \(\Delta J\) が「下げるほど良い」側に偏る。実測：窓 \(N\) 回の追い出しでは \(f\!f\) が 0.1 まで下がり（固定の最良より −5〜−7pt）、\(4N\) で −0.08pt。条件は \(W\gg\max(\text{小物の反応時間},\ \text{大物の再要求までの時間})\)。</li>
+<li><b>雑音</b>：頂上の近くでは 1 歩の差が \(\tfrac12|J''|\delta^2\) と小さく、窓の測定誤差に埋もれる。そこでは向きが偶然で決まり、\(\pm\delta\) より広くさまよう。\(\delta\) を小さくすると頂上に近づけるが、1 歩の差がさらに小さくなる。</li>
+<li><b>下限であって固定の分割ではない</b>：実装の \(f\!f\) は「大物の Region が \(f\!f\cdot N\) 個以下なら、大物の末尾を追い出さない」という下限。Region LRU の自然な取り分より下では下限は効かず、\(J(f\!f)\) はそこで平らになる（コードから読み取ったことで、実験では確かめていない）。命題 K.1 の凹性が当てはまるのは、下限が効いて配分が \(f\!f\) で決まる範囲。</li>
+<li><b>Region LRU は物単位の静的分割ではない</b>：凹性の証明は物単位の LRU に対するもの。Region LRU の \(J\) が下限について単峰であることは、固定の下限の格子で見た実測（合成 95:5・3:1）で確かめただけ。</li>
+<li><b>\(K\ge3\)</b>：下限は 1 分類（<code>fc</code>）にしか掛からない。山登りが探すのは \(K-1\) 次元の最適のうち 1 本の切り口で、残りの分類どうしの配分は自然な配分のまま。\(K-1\) 個の下限を順に動かす座標上昇に広げれば命題 K.1 から大域最適に向かうが、実装も測定もしていない。</li>
+</ol>
+<p><b>出発点</b>：窓 1 つ分の「大物が受け入れたバイトの割合」。もとは「大物の取り分が大物の要求バイトの割合を下回ると BMR が悪化しやすい」（\(C_L/C\ge B_L/B\)）という経験的な条件で、導出したものではない（合成 95:5 で必要だった下限 0.9〜0.95 と、大物の要求バイトの割合 96% がおおむね合う）。4 群の例で手計算すると、大物の要求バイトの割合は 0.84、共有の LRU の状態で受け入れるバイトの割合は 0.70 で、後者は BHR 最適の \(f\!f^*=0.707\) に近い。</p>
+
+<h2>L. 再挿入の閾値（11-16 追記）</h2>
+<p>「その滞在で \(n\) 回以上ヒットした物を、追い出しのときに新しい Region へ書き直す」（<code>reinsert=hits:n=…</code>）。<code>auto_tuning_theory</code> §1 が「付録の再挿入モデル」として引いている式を、ここで導く。</p>
+<h3>L.1 1 回の滞在のヒット数</h3>
+<div class="thm"><b>補題 L.1</b>　Ap1 のもとで、要求率 \(\lambda\) の物が touch 率 \(\Lambda\)（自分を含む）の Region に封じられてから追い出されるまでのヒット数 \(N\) は幾何分布に従う：
+\[ P(N\ge n)=a^n,\qquad a=\frac{(1-p)\,\pi}{(1-p)\,\pi+p},\qquad p=e^{-\Lambda T},\ \ \pi=\frac{\lambda}{\Lambda}. \tag{L.1}\]
+\(a\) は「Region が追い出される前に、この物の次の要求が来る確率」。平均は \(\mathbb{E}[N]=a/(1-a)=\lambda\,(e^{\Lambda T}-1)/\Lambda=\lambda\,\mathbb{E}[D]\) で、補題 C.1 (ii)・(E.2) と一致する。</div>
+<div class="pf">touch の直後（または封じた直後）から見る。次の touch までの間隔は \(\mathrm{Exp}(\Lambda)\) で、(i) 確率 \(p\) で \(T\) を超え、Region は追い出される。(ii) 確率 \(1-p\) で \(T\) 以内に touch が来て、それがこの物の要求である確率は \(\pi\)（重ね合わせの印付け。間隔の長さと独立）、(iii) 他の物の要求である確率は \(1-\pi\) で、そのときは同じ状態からやり直す（無記憶）。(i) より先に (ii) が起きる確率は \((1-p)\pi/((1-p)\pi+p)=a\)。(ii) の後も同じ状態に戻るので、ヒットの回数は成功確率 \(1-a\) の幾何分布。平均は \(a/(1-a)=(1-p)\pi/p=\lambda(e^{\Lambda T}-1)/\Lambda\)。<span class="qed">□</span></div>
+<h3>L.2 滞在をつなぐ（再挿入があるときの物から見た式）</h3>
+<div class="thm"><b>命題 L.2</b>　書き直しのたびに、物は同じ分布の Region に入り直すとする（滞在は独立で同じ分布）。\(q=P(N\ge n)=a^n\) とおくと、1 回のミスから次のミスまでに
+\[ \ell^{\rm re}=\frac{\mathbb{E}[D]}{1-q},\qquad h=\frac{\lambda\ell^{\rm re}}{1+\lambda\ell^{\rm re}},\qquad \frac{\text{再挿入}}{\text{ミス}}=\frac{q}{1-q},\qquad \frac{\text{書き込み}}{\text{ミス}}=\frac{1}{1-q}. \tag{L.2}\]</div>
+<div class="pf">滞在の数 \(K\) は「初めて \(N\lt n\) になる滞在」で、成功確率 \(1-q\) の幾何分布、\(\mathbb{E}K=1/(1-q)\)。\(K\) は各滞在の \((D_m,N_m)\) の列についての停止時刻なので、Wald の恒等式から滞在の合計の平均は \(\mathbb{E}K\cdot\mathbb{E}D\)（\(N\ge n\) の滞在が長いという偏りは、Wald の恒等式が吸収する）。あとは補題 C.1 と同じ。書き込みは滞在 1 回につき 1 回。<span class="qed">□</span></div>
+<div class="tbl"><table>
+<tr><th>モンテカルロ（10 万サイクル、<code>reinsert_check.py</code>）／式</th><th class="n">\(q\)</th><th class="n">\(\ell^{\rm re}\)</th><th class="n">\(h\)</th><th class="n">再挿入/ミス</th></tr>
+<tr><td>\(\lambda=0.002\)、同居 0.004、\(T=300\)、\(n=1\)</td><td class="n">0.6285 / 0.6273</td><td class="n">2,269 / 2,258</td><td class="n">0.8195 / 0.8187</td><td class="n">1.692 / 1.683</td></tr>
+<tr><td>同、\(n=3\)</td><td class="n">0.2484 / 0.2469</td><td class="n">1,123 / 1,117</td><td class="n">0.6922 / 0.6909</td><td class="n">0.330 / 0.328</td></tr>
+<tr><td>\(\lambda=0.0005\)、同居 0.01、\(T=300\)、\(n=2\)</td><td class="n">0.2670 / 0.2657</td><td class="n">2,913 / 2,897</td><td class="n">0.5929 / 0.5916</td><td class="n">0.364 / 0.362</td></tr>
+<tr><td>同、\(n=3\)</td><td class="n">0.1365 / 0.1369</td><td class="n">2,455 / 2,465</td><td class="n">0.5508 / 0.5520</td><td class="n">0.158 / 0.159</td></tr>
+</table></div>
+<p><b>この命題の限界</b>：(L.2) は物 1 個の式で、同居の touch 率と \(T\) を与えたもの。実際には、書き直された物どうしが同じ Region に集まるので次の滞在の \(\Lambda\) は高くなり、再挿入が容量を埋めるので \(T\) が短くなる。この帰還を入れた全体のモデル（§E の不動点に (L.2) を組み込む）は作っていない。</p>
+<h3>L.3 書き直しの損得</h3>
+<p>大きさ \(s\) の物について、「次の 1 滞在」の範囲で比べる。次の滞在で 1 回以上ヒットする確率は補題 L.1 から \(P(N\ge1)=a\)。これを \(p_{\rm hit}\) と書く。</p>
+<ul>
+<li>書き直す：いま \(s\) を書く。確率 \(p_{\rm hit}\) で、次の要求はヒット。</li>
+<li>書き直さない：次の要求（同じ時間の範囲で確率 \(p_{\rm hit}\)）はミスになり、そのとき \(s\) を書く。</li>
+</ul>
+\[ \Delta(\text{ミス})=-p_{\rm hit},\qquad \Delta(\text{書き込み})=s-p_{\rm hit}\,s=(1-p_{\rm hit})\,s . \tag{L.3}\]
+<p>防げるミス 1 回あたりの追加の書き込みは \((1-p_{\rm hit})s/p_{\rm hit}\) で、\(p_{\rm hit}\) について減少。許す交換比率を決めると \(p_{\rm hit}\) の下限 \(p^*\) が決まる（既定 \(p^*=0.5\)。<b>導出した値ではなく、方針として決める値</b>）。この比較には、書き直した物が次の滞在の間ほかの物の場所を取る効果は入っていない。</p>
+<h3>L.4 ヒット数 \(h\) による選別：閾値の形が最適</h3>
+<div class="thm"><b>命題 L.3（\(p(h)\) の単調性）</b>　滞在を始める物の \(a\)（(L.1)）が分布 \(\pi(da)\) に従うとする。今回の滞在のヒット数がちょうど \(h\) だった物が、次の滞在で 1 回以上ヒットする確率を \(p(h)=\mathbb{E}[a\mid N=h]\) とすると
+\[ p(h+1)-p(h)=\frac{\mathrm{Var}_h(a)}{\mathbb{E}_h[a]}\ \ge0, \tag{L.4}\]
+ここで \(\mathbb{E}_h\) は重み \(\pi(da)(1-a)a^h\) による平均。等号は \(a\) が 1 点に集中するときだけ。</div>
+<div class="pf">ベイズの定理から事後の重みは \(\pi(da)\,P(N=h\mid a)=\pi(da)(1-a)a^h\)。\(p(h)=\mathbb{E}_h[a]\)。\(h+1\) の重みは \(h\) の重みに \(a\) を掛けたものなので \(p(h+1)=\mathbb{E}_h[a\cdot a]/\mathbb{E}_h[a]\)。差は \((\mathbb{E}_h[a^2]-\mathbb{E}_h[a]^2)/\mathbb{E}_h[a]\)。<span class="qed">□</span></div>
+<div class="thm"><b>系 L.4</b>　\(\{h:p(h)\ge p^*\}=\{h\ge n^*\}\)、\(n^*=\min\{h:p(h)\ge p^*\}\)。つまり (L.3) の基準のもとで、「\(h\ge n\) なら書き直す」という閾値の規則が、\(h\) だけを使う規則の中で最適。\(a\) が 1 点（分類の中の \(\lambda\) が全部同じ）なら \(p(h)\) は一定で、\(h\) は選別に使えない。</div>
+<p><b>数値確認（L1）</b>：\(\lambda\in\{2\times10^{-4},10^{-3},5\times10^{-3}\}\)（割合 0.6 / 0.3 / 0.1）、同居 \(4\times10^{-3}\)、\(T=300\)（\(a=0.107,0.410,0.885\)）。</p>
+<div class="tbl"><table>
+<tr><th>\(h\)</th><th class="n">0</th><th class="n">1</th><th class="n">2</th><th class="n">3</th><th class="n">4</th><th class="n">5</th></tr>
+<tr><td>\(p(h)\) 式</td><td class="n">0.194</td><td class="n">0.321</td><td class="n">0.464</td><td class="n">0.582</td><td class="n">0.684</td><td class="n">0.767</td></tr>
+<tr><td>モンテカルロ（40 万滞在）</td><td class="n">0.194</td><td class="n">0.322</td><td class="n">0.468</td><td class="n">0.582</td><td class="n">0.684</td><td class="n">0.784</td></tr>
+</table></div>
+<p>実測（合成 95:5）の \(\hat p(h)\) も \(h\) とともに増える：大物 0.34 / 0.49 / 0.55（\(n=3\)）、小物 0.34 / 0.66 / 0.81（\(n=2\)）。\(\pi\) と \(T\) が分類ごとに違うので、\(n\) は分類ごとに持つ（分類がいくつあっても同じ）。</p>
+<h3>L.5 推定の規則の根拠</h3>
+<ul>
+<li>\(\hat p(h)=(\text{当たり}+1)/(\text{試行}+2)\)：一様な事前分布のもとでの事後平均（ラプラスの継起則）。試行が少ない \(h\) を 0.5 に寄せ、0/0 を避ける。</li>
+<li>閾値より下の \(h\) も確率 \(\varepsilon\)（既定 0.02）で書き直す：書き直さない \(h\) は試行が増えないので \(\hat p\) が更新されない。負荷が変わって閾値を下げるべきときに、その証拠が集まらない（選択の偏り）。\(\varepsilon\) の探索で、どの \(h\) も試行が増え続ける。</li>
+<li>保証されないこと：\(p(h)\) は現在の \(T_c\) のもとで測る。再挿入を増やすと \(T_c\) が縮み \(p\) が下がる。\(n\) を決め直し続けるとこの帰還のつり合いに落ち着くが、その点が \(J\) の最適である保証はない。</li>
+</ul>
+
+<h2>M. 限界値を「末尾のヒット密度」で測れるのは物単位の LRU だけ（11-16 追記）</h2>
+<div class="thm"><b>命題 M.1（物単位 LRU：末尾のヒット密度＝限界値）</b>　Che 近似のもとで、分類 \(k\) の LRU の「最後の要求からの年齢が \([T,T+dT)\) の物」に来る要求の率を、その物のバイト数で割ったものは \(\mu_k(T)\)（(B.3)）に等しい。</div>
+<div class="pf">物 \(i\) の年齢が \([T,T+dT)\) にある確率は \(\lambda_ie^{-\lambda_iT}dT\)。そこへ来る要求の率は \(\sum_i\lambda_i\cdot\lambda_ie^{-\lambda_iT}dT\)、そこにあるバイト数は \(\sum_is_i\lambda_ie^{-\lambda_iT}dT\)。比が (B.3)。<span class="qed">□</span></div>
+<p>これは Mattson らのスタック性（容量 \(C\) の LRU のヒットは、スタック距離 \(\le C\) の要求）を Che 近似で書いたもの。物単位の LRU では、容量を少し足して救われるのは「その 1 回の要求」だけなので、末尾への要求を数えれば限界値になる（どちらの場合も、要求の後その物は先頭にいる）。</p>
+<p><b>Region LRU では成り立たない理由</b>：</p>
+<ul>
+<li>末尾の Region への touch 1 回が救うのは、その要求 1 回ではなく <b>Region の中の全員の、その後の滞在</b>。救われた Region は平均してもう \(\mathbb{E}[D]\) 生き、その間に \(\Lambda\,\mathbb{E}[D]=e^{\Lambda T}-1\) 回のヒットを受ける（補題 L.1 の和）。touch の数はこの重みを持たない。</li>
+<li>1 Region に物が多い分類（小物、\(n=4{,}096\)）は \(\Lambda\) が大きく、ほぼ全部の Region が数百要求ごとに touch される。年齢の分布は 0 の近くに固まり、「末尾」が冷えていない。実測で、追い出した小物の Region の「最後の touch からの年齢」の下位 10% は、固定の下限 0.9 で 2,322 要求、末尾のヒット密度による方式（<code>region-evict=mv</code>）で 3 要求。</li>
+<li>結果として mv は自分の目的 \(J\) でも固定の下限より 2.6pt 低かった（0.7783 対 0.8048、95:5、\(w=0.1\)）。山登り（§K.3）は限界値を推定せず \(J\) を直接測るので、この問題を受けない。</li>
+</ul>
+
+<h2>N. Zipf の傾き \(\alpha\) と、サイズ分類の利得（11-16 追記）</h2>
+<p>実トレース（CDN）で「傾きが小さい（0.70）と分類で改善し、1.0〜1.6 では OHR も BMR も悪化する」という観察があった。ここでは、モデルがこの向きをどこまで説明するかを、式と掃引で調べる。負荷は W1 の形（小物 36 KiB 20 万個・要求 75%、大物 1 MiB 2 万個・要求 25%）で、両クラスの \(\alpha\) を同じ値にして振った（<code>alpha_sweep.py</code>）。</p>
+<h3>N.1 べき乗則（漸近）</h3>
+<p>分類 \(k\) の人気を \(\lambda_r=A_kr^{-\alpha}\)（\(A_k\) は順位 1 の物の要求率）とし、和を積分で置き換える。\(\beta=1/\alpha\)、\(x=\lambda T\) とおくと、物の数の密度は \(\propto x^{-1-\beta}\) で、\(\alpha\gt1\) かつ \(\lambda_{\min}T\ll1\ll\lambda_{\max}T\) のとき</p>
+\[ \frac{C_k}{s_k}\simeq\Gamma(1-\beta)\,(A_kT_k)^{\beta},\qquad \text{ミス率}_k\simeq\beta\,\Gamma(1-\beta)\,A_k^{\beta}\,T_k^{\beta-1}=\frac{1}{\alpha}\cdot\frac{C_k/s_k}{T_k}\ \propto\ \Big(\frac{C_k}{s_k}\Big)^{-(\alpha-1)}, \tag{N.1}\]
+\[ \mu_k=\frac{dH_k}{dC_k}\simeq\frac{1-\beta}{s_kT_k}=\frac{(\alpha-1)\,\text{ミス率}_k}{C_k}. \tag{N.2}\]
+<p>（\(\int_0^\infty(1-e^{-x})x^{-1-\beta}dx=\Gamma(1-\beta)/\beta\)、\(\int_0^\infty x^{-\beta}e^{-x}dx=\Gamma(1-\beta)\)、\(\int_0^\infty x^{1-\beta}e^{-x}dx=\Gamma(2-\beta)\)。）\(\alpha\gt1\) では、容量を 2 倍にしてもミスは \(2^{-(\alpha-1)}\) 倍になるだけで、しかもミスそのものがすでに小さい。\(\alpha\lt1\) では逆に、ヒットが \(C^{1-\alpha}\) に比例して伸び続ける（よく知られた形）。<b>注意</b>：これは物の数が無限の極限の式。有限の数では裾の切れ目（\(\lambda_{\min}T\) の所）の補正が大きく、\(\alpha=1.4\) の大物クラスで積分の 33% が切れ目の外にある。掃引で測った指数（容量 5% → 10% のミスの変化）は \(\alpha=1.2,1.4,1.6\) で \(-0.42,-0.56,-0.71\) と、式の \(-0.2,-0.4,-0.6\) より急だった。以下、量は掃引の値で述べ、式は向きの説明にだけ使う。</p>
+<h3>N.2 OHR 最適な配分は \(\alpha\) とともに大物へ戻る</h3>
+<div class="thm"><b>命題 N.1</b>　(N.2) の範囲（\(\alpha\gt1\)）で、OHR 最適の静的分割と共有の LRU の配分は
+\[ C_k^{\rm opt}\ \propto\ A_k^{1/\alpha}\,s_k^{\,1-1/\alpha},\qquad C_k^{\rm shared}\ \propto\ A_k^{1/\alpha}\,s_k . \tag{N.3}\]
+最適は共有に対して各分類の容量を \(s_k^{-1/\alpha}\) 倍する（正規化の前）。\(\alpha\) が大きいほど補正は弱く、\(\alpha\to\infty\) で共有の LRU が OHR についても最適になる。指数 \(1-1/\alpha\) は \(\alpha=1\) で符号を変える：\(\alpha\gt1\) では大きい物の分類ほど（バイトで）多くの容量を持つのが最適で、サイズの比が大きいほどその差が開く。</div>
+<div class="pf">(N.2) から、限界値をそろえる条件は \(s_kT_k=\)一定。(N.1) に入れると \(C_k\propto s_kA_k^{\beta}T_k^{\beta}\propto A_k^{\beta}s_k^{1-\beta}\)。共有は \(T_k=T\) なので \(C_k\propto s_kA_k^{\beta}\)。<span class="qed">□</span></div>
+<div class="tbl"><table>
+<tr><th>\(\alpha\)</th><th class="n">0.5</th><th class="n">0.7</th><th class="n">0.9</th><th class="n">1.0</th><th class="n">1.2</th><th class="n">1.4</th><th class="n">1.6</th></tr>
+<tr><td>小物の最適な取り分：(N.3)</td><td class="n mut">（範囲外）</td><td class="n mut">95%</td><td class="n mut">83%</td><td class="n">75%</td><td class="n">59%</td><td class="n">46%</td><td class="n">36%</td></tr>
+<tr><td>同：<code>synth_model</code> の <code>part</code>（容量 5% / 10%）</td><td class="n">100 / 100%</td><td class="n">95 / 94%</td><td class="n">80 / 81%</td><td class="n">73 / 74%</td><td class="n">58 / 59%</td><td class="n">46 / 46%</td><td class="n">36 / 36%</td></tr>
+<tr><td>Region LRU・分類の自然な取り分（定常、5% / 10%）</td><td class="n">35 / 59%</td><td class="n">46 / 61%</td><td class="n">51 / 61%</td><td class="n">52 / 60%</td><td class="n">43 / 72%</td><td class="n">70 / —*</td><td class="n">91 / 90%</td></tr>
+</table></div>
+<p>(N.3) は \(\alpha\ge1\) で数値解と 2pt 以内で合う（\(A_S/A_L\approx3\)、\(s_L/s_S=28.4\)）。\(\alpha\lt1\) は式の範囲外だが向きは合う。<b>要点</b>：最適な小物の取り分は \(\alpha\) とともに 100% から 36% まで下がるのに、Region LRU の自然な取り分は下がらない（1 Region の物の数 \(n_k=R/s_k\) で決まり、限界値では決まらない。§E.8）。\(\alpha\lesssim1.2\) では自然な配分は最適より小物が<b>少ない</b>側、\(\alpha\gtrsim1.4\) では<b>多すぎる</b>側にある。* は次の N.4 の理由で値が定まらなかった点。</p>
+<h3>N.3 掃引の結果</h3>
+<div class="tbl"><table>
+<tr><th>容量 10%</th><th class="n">\(\alpha=0.5\)</th><th class="n">0.7</th><th class="n">0.9</th><th class="n">1.0</th><th class="n">1.2</th><th class="n">1.4</th><th class="n">1.6</th></tr>
+<tr><td>物単位 LRU のミス率（＝どの方式でも取り返せる上限）</td><td class="n">88.1%</td><td class="n">73.6%</td><td class="n">47.0%</td><td class="n">32.3%</td><td class="n">11.1%</td><td class="n">2.8%</td><td class="n">0.6%</td></tr>
+<tr><td>静的分割（OHR 最適）− 物単位 LRU：OHR</td><td class="n">+26.7</td><td class="n">+23.5</td><td class="n">+15.8</td><td class="n">+11.1</td><td class="n">+4.0</td><td class="n">+1.0</td><td class="n">+0.2</td></tr>
+<tr><td>Region LRU 分類 − 混在：OHR / BHR（定常）</td><td class="n">+15.7 / −5.9</td><td class="n">+16.9 / −7.7</td><td class="n">+13.1 / −7.4</td><td class="n">+9.9 / −6.1</td><td class="n">+3.6 / −6.1</td><td class="n">+0.5 / −2.2*</td><td class="n">−0.4 / −2.7</td></tr>
+<tr><td>同（立ち上がりの隔離あり、\(H=2\times10^7\)）</td><td class="n">+15.7 / −5.9</td><td class="n">+16.4 / −6.3</td><td class="n">+12.3 / −5.1</td><td class="n">+9.0 / −4.1</td><td class="n">+3.4 / −1.6</td><td class="n">+0.9 / −0.5</td><td class="n">+0.2 / −0.1</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>容量 5%</th><th class="n">\(\alpha=0.5\)</th><th class="n">0.7</th><th class="n">0.9</th><th class="n">1.0</th><th class="n">1.2</th><th class="n">1.4</th><th class="n">1.6</th></tr>
+<tr><td>Region LRU 分類 − 混在：OHR / BHR（定常）</td><td class="n">+5.7 / −1.1</td><td class="n">+10.0 / −2.6</td><td class="n">+10.5 / −3.7</td><td class="n">+8.8 / −3.5</td><td class="n">+3.8 / −1.4</td><td class="n">+0.9 / −3.1</td><td class="n">−0.8 / −4.2</td></tr>
+<tr><td>同（隔離あり）</td><td class="n">+5.7 / −1.1</td><td class="n">+9.9 / −2.1</td><td class="n">+10.1 / −2.0</td><td class="n">+8.4 / −1.7</td><td class="n">+3.9 / −0.8</td><td class="n">+1.2 / −0.3</td><td class="n">+0.3 / −0.1</td></tr>
+</table></div>
+<ul>
+<li><b>OHR の利得は \(\alpha\) とともに縮み、定常のモデルでは \(\alpha=1.6\) で負になる</b>（−0.4〜−0.8pt）。BHR はどの \(\alpha\) でも下がる。</li>
+<li>理由は 2 つが重なる。(a) <b>取り返せる分がない</b>：ミス率が 2.8%（\(\alpha=1.4\)）、0.6%（1.6）しか残っておらず、最適な静的分割でも +1.0、+0.2pt。(b) <b>配分が行き過ぎる</b>：N.2 のとおり、最適な小物の取り分は 36〜46% なのに、自然な配分は 70〜91%。小物の Region は少数の温かい物の touch で生き続け、残りの大半は要求のほとんど来ない裾の物（便乗）なので、得るヒットが少ない。その容量は、まだ価値のある大物の中位の物から取られる。</li>
+<li>\(\alpha\le1\) では逆に、自然な配分が最適より控えめで、向きは正しい。取り返せるミスも多いので OHR が +9〜17pt 上がる。</li>
+<li>観察との差：モデル（この負荷）では符号が変わるのは \(\alpha\approx1.4\)〜1.6 で、\(\alpha=1.0\)〜1.2 ではまだ +3〜10pt の利得がある。観察では 1.0 から悪化している。(N.3) の指数 \(1-1/\alpha\) が \(\alpha=1\) で符号を変えることと、サイズの比が大きいほど最適な小物の取り分が速く下がること（比 1,000・\(A_S/A_L=3\) なら \(\alpha=1.2,1.4,1.6\) で 44%、23%、13%）は、境目が 1 に近づく向きに働くが、掃引では確かめていない。</li>
+</ul>
+<h3>N.4 定常の不動点が跳ぶ（モデルが外れる範囲）</h3>
+<p>\(\alpha\ge1.2\) の定常のモデルは、容量の条件を満たす解を持たない点がある。\(\alpha=1.4\)・容量 10%・分類ありで \(T\) を与えて解くと、小物の占有は \(T=10{,}500\) で \(0.35C\)、\(T=10{,}571\) で \(1.11C\)、\(T=10{,}650\) で \(2.21C\)（小物の全部が在籍）と跳び、その間に \(C\) をまたぐ連続な解がない（表の * の点。出力の占有の合計が \(0.71C\) や \(0.30C\) になっていることで分かる）。</p>
+<ul>
+<li>原因：順位 1 の物の \(\lambda_1T\) が数千になり、その物を含む Region の寿命 \(e^{\Lambda T}/\Lambda\) は観測できない長さになる。定常の平均 \(\ell_i=\int e^{\lambda_it}M^{n-1}dt\) は、こうした「起きれば永久に続く」まれな事象に支配され、不動点が「普通の解」と「全部が不死の解」の 2 つに分かれる（命題 E.8 は存在だけを言い、一意性は言っていない）。</li>
+<li>物理的な意味：\(\alpha\) が大きい負荷の Region LRU には、熱い物に固定されて動かない Region と、回転する Region が同居するはずで、定常の平均 1 つでは表せない。隔離つきのモデル（§F）は立ち上がりで固定される分だけを扱うので安定に解けるが、運用中に新しく固定される Region は入っていない。</li>
+<li>したがって \(\alpha\ge1.2\) の定常の数値（特に自然な取り分）は目安にとどまる。N.3 の結論のうち、(a) の上限は物単位の式だけで決まるので確か、(b) の行き過ぎの大きさは不確か。</li>
+</ul>
+<h3>N.5 実トレースで確かめる手順</h3>
+<ol>
+<li><b>上限</b>：各トレースで、同じ容量の物単位 LRU のミス率を出す。これが分類で取り返せる OHR の上限。傾きの大きいトレースで数 % しかなければ、(a) だけで「利得が出ない」ことは説明できる。</li>
+<li><b>静的分割の利得の予測</b>：トレースから物ごとの（大きさ、要求回数）を取り、\(\lambda_i\) = 回数 ÷ 全要求数 として (B.1)・(K.3) を解く。分類の閾値は実験と同じにする。予測した「最適分割 − 共有」の OHR の差が、傾きの小さいトレースで大きく、大きいトレースで小さければ、モデルの筋と合う。合わなければ、原因は IRM の外（人気の時間変化、サイズと人気の相関の時間変化）にある。</li>
+<li><b>配分の行き過ぎ</b>：分類ありの実行で、分類ごとの Region の数（容量の取り分）を時系列で出し、2 の最適な取り分と比べる。</li>
+<li><b>固定された Region</b>：<code>RF_EVLOG</code> で、Region の寿命の分布と「一度も追い出されなかった Region」の割合・中身（裾の物の割合）を出す。N.4 の予想（熱い物に固定された Region が裾の物を抱える）の直接の確認になる。</li>
+</ol>
+
 <h2>参考文献</h2>
 <ul>
 <li>H. Che, Y. Tung, Z. Wang. Hierarchical Web caching systems: modeling, design and experimental results. IEEE JSAC, 2002.</li>
@@ -333,6 +520,8 @@ G(a\mid a')=\mathbb{E}_\nu\Big[\exp\Big(-\int_{a'}^{a}\eta\big(\lambda(u)+\Lambd
 <li>V. Martina, M. Garetto, E. Leonardi. A unified approach to the performance analysis of caching systems. INFOCOM 2014.</li>
 <li>A. Rényi. A characterization of Poisson processes. 1956（幾何和の極限）／ J. Grigelionis. On the convergence of sums of random step processes to a Poisson process. 1963.</li>
 <li>S. Asmussen. Applied Probability and Queues（再生報酬定理、任意停止、PASTA）, 2nd ed., 2003.</li>
+<li>R. L. Mattson, J. Gecsei, D. R. Slutz, I. L. Traiger. Evaluation techniques for storage hierarchies. IBM Systems Journal, 1970（スタック性、§M）.</li>
+<li>S. Boyd, L. Vandenberghe. Convex Optimization, 2004（凹関数の最大化と KKT、§K）.</li>
 <li>Y. Berg et al. The CacheLib caching engine. OSDI 2020 ／ S. McAllister et al. Kangaroo. SOSP 2021.</li>
 </ul>
 </main>

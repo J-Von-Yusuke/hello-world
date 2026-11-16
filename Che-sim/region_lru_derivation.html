@@ -88,7 +88,7 @@ svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-size:12px}
 <p><b>大事な点</b>：\(L_i\) はばらついてよい（平均だけが要る）。Region の事情はすべて \(L_i\) に押し込まれ、物の式は FIFO の形のまま。</p>
 
 <h2>2. Region FIFO：\(L_i = T\)</h2>
-<p>Region FIFO は封じた順に消すので、どの Region も封じてから同じ時間で消える（Region の数 ÷ Region が生まれる率）。それを T とすると、全員が \(L_i=T\) で、\(h_i=\lambda_i T/(1+\lambda_i T)\)。T は物の分類に依らないので、<b>サイズで分類しても誰の \(h_i\) も変わらない</b>。容量の条件 \(\sum_i s_ih_i=C\) で T が決まる。実測でも、分類の有無の差は ±0.3pt。</p>
+<p>Region FIFO は封じた順に消すので、どの Region も封じてから同じ時間で消える（Region の数 ÷ 新しい Region を書き終えるペース）。それを T とすると、全員が \(L_i=T\) で、\(h_i=\lambda_i T/(1+\lambda_i T)\)。T は物の分類に依らないので、<b>サイズで分類しても誰の \(h_i\) も変わらない</b>。容量の条件 \(\sum_i s_ih_i=C\) で T が決まる。実測でも、分類の有無の差は ±0.3pt。</p>
 
 <h2>3. Region LRU：touch の率 Λ の Region の寿命</h2>
 <h3>3-1 死ぬ条件（A4・A5）</h3>
@@ -143,7 +143,7 @@ svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-size:12px}
 <h2>6. サイズ分類が効く理由</h2>
 <p>平均場で見ると、分類 k の Region の touch 率は</p>
 <div class="math">\[ \Lambda_k \approx n_k\,\mathbb{E}_{\text{ins}}[\lambda] = \frac{R}{s_k}\,\mathbb{E}_{\text{ins}}[\lambda] = R\cdot\mathbb{E}_{\text{ins}}\!\left[\frac{\lambda}{s}\right] \]</div>
-<p>（\(\mathbb{E}_{\text{ins}}\) は挿入された物 J についての平均。）\(\Lambda/R\) は Region 1 バイトあたりのヒットの率＝価値密度。分類 k の容量は「Region が生まれる率 × 寿命」：</p>
+<p>（\(\mathbb{E}_{\text{ins}}\) は挿入された物 J についての平均。）\(\Lambda/R\) は Region 1 バイトあたりのヒットの率＝価値密度。分類 k の容量は「新しい Region を書き終えるペース × 1 個が残る時間（寿命）」：</p>
 <div class="math">\[ C_k \propto \frac{(\text{分類 k に挿入されるバイトの率})}{R}\times\frac{e^{\Lambda_kT}-1}{\Lambda_k} \]</div>
 <p>寿命は \(\Lambda_kT\) について指数的なので、価値密度の高い（小物の）Region が容量を取る。取りすぎると小物がミスしなくなり \(\mathbb{E}_{\text{ins}}[\lambda]\) が下がる（負の帰還）ので、つり合ったところで止まる。混ぜると全 Region の Λ がならされて差が出ない。FIFO は寿命が全員 T なので差が出ない。</p>
 
