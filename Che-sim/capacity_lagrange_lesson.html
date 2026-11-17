@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>容量配分の最適化</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}
+body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.85 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:880px;margin:0 auto;padding:24px 16px 72px}
+h1{font-size:24px;margin:0 0 4px;line-height:1.4}h2{font-size:19px;margin:44px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}h3{font-size:16px;margin:24px 0 6px}
+.sub{color:var(--mut);margin:0 0 18px}.mut{color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:12px 0;overflow-x:auto}
+.ok{border-left:4px solid var(--g)}.warn{border-left:4px solid var(--b)}.as{border-left:4px solid var(--a)}
+.thm{border:1px solid var(--line);border-left:4px solid var(--p);border-radius:8px;padding:6px 16px;margin:14px 0;overflow-x:auto}
+.thm>b:first-child{color:var(--p)}
+.ex{border:1px solid var(--line);border-left:4px solid var(--b);border-radius:8px;padding:6px 16px;margin:14px 0}
+.ex>b:first-child{color:var(--b)}
+.katex-display{overflow-x:auto;overflow-y:hidden;padding:2px 0}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+svg{max-width:100%;height:auto;display:block;margin:8px auto}svg text{fill:var(--fg);font-size:12px}
+details{margin:8px 0;border-top:1px dashed var(--line);padding-top:4px}summary{cursor:pointer;color:var(--a)}
+ol li,ul li{margin:3px 0}
+.toc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 18px;margin:16px 0}
+.toc ol{columns:2;column-gap:28px}@media (max-width:640px){.toc ol{columns:1}}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"></script>
+</head>
+<body><main>
+<h1>最適化の例題：2 つの LRU に容量を配る</h1>
+<p class="sub">ラグランジュの未定乗数法・KKT 条件・凹性による十分性を、1 つのキャッシュの問題で通して学ぶ教材。
+前提は微分と「重み付き平均・分散」だけ。後半で、SSD の Region 単位の追い出しに広げ、目的を BMR（バイトミス率）にしたときに何が変わるかを見る。
+証明の詳細は <a href="region_model_appendix.html">付録</a> の §B・§K・§O。</p>
+
+<div class="toc"><b>目次</b>
+<ol>
+<li>問題：小さいコンテンツと大きいコンテンツ</li>
+<li>モデル：Che 近似</li>
+<li>人気の合計を 1 にするのは約束</li>
+<li>何を最大にするか：OHR と BHR</li>
+<li>変数を取り替える</li>
+<li>ラグランジュの未定乗数法</li>
+<li>乗数の意味：境目の人気をそろえる</li>
+<li>凹性：停留点が最適だと言える理由</li>
+<li>端点の解と KKT 条件（手で解ける例）</li>
+<li>数値で解く：二分法の二重ループ</li>
+<li>数値例：OHR 最適と BHR 最適は逆向き</li>
+<li>Region 単位の追い出しへ</li>
+<li>演習問題</li>
+<li>この例題の限界</li>
+</ol></div>
+
+<h2>1. 問題：小さいコンテンツと大きいコンテンツ</h2>
+<p>キャッシュの容量 \(C\) バイトを、小さいコンテンツ用の LRU（S）と大きいコンテンツ用の LRU（L）の 2 つに分ける。それぞれの LRU は自分の分類のコンテンツだけを入れ、自分の容量の中で LRU として追い出す。</p>
+<div class="card as"><b>決めるもの</b>：\(C_S\) と \(C_L\)（\(C_S+C_L=C\)、どちらも 0 以上）。<br>
+<b>知りたいこと</b>：ヒット率を最大にする配り方と、その配り方が持つ性質。</div>
+<svg viewBox="0 0 640 120" role="img" aria-label="容量 C を S と L に分ける図">
+<rect x="20" y="30" width="600" height="44" rx="6" fill="none" stroke="var(--line)"/>
+<rect x="20" y="30" width="220" height="44" rx="6" fill="var(--a)" opacity=".25"/>
+<rect x="240" y="30" width="380" height="44" rx="6" fill="var(--b)" opacity=".25"/>
+<text x="130" y="57" text-anchor="middle">S の LRU：容量 C_S</text>
+<text x="430" y="57" text-anchor="middle">L の LRU：容量 C_L</text>
+<line x1="240" y1="22" x2="240" y2="82" stroke="var(--fg)" stroke-dasharray="4 3"/>
+<text x="240" y="100" text-anchor="middle">← この仕切りをどこに置くか →</text>
+<text x="320" y="18" text-anchor="middle" class="mut">合計 C バイト</text>
+</svg>
+
+<h2>2. モデル：Che 近似</h2>
+<p>リクエストは互いに独立に来て、コンテンツ \(i\) の人気 \(\lambda_i\) は時間で変わらないとする（IRM）。LRU の中で一度も使われずに \(T\) だけ時間が経つと追い出される、と近似するのが Che 近似で、\(T\) を<b>特性時間</b>という。</p>
+\[ h_i=1-e^{-\lambda_i T}\quad(\text{コンテンツ } i \text{ のヒット率}),\qquad \sum_{i} s_i\,h_i = C\quad(\text{占有の合計が容量}) . \]
+<p>\(s_i\) はコンテンツの大きさ。2 つ目の式から容量 \(C\) に対する \(T\) が 1 つ決まる。容量を増やすと \(T\) が伸びる（左辺は \(T\) の増加関数）。分類 \(k\) の LRU については、和を分類の中だけで取り、\(C\) を \(C_k\)、\(T\) を \(T_k\) にする。</p>
+
+<h2>3. 人気の合計を 1 にするのは約束</h2>
+<p>\(\lambda_i\) を「1 回のリクエストがコンテンツ \(i\) に当たる見込み」と決めると、全部のコンテンツで足せば 1 になる：</p>
+\[ \sum_g N_g\,\lambda_g = 1 \qquad(N_g：グループ g のコンテンツの数、\lambda_g：その 1 つの人気) . \]
+<p>これは<b>時間をリクエスト 1 回で数える</b>という単位の約束で、制約ではない。</p>
+<div class="thm"><b>確かめ</b>　人気をすべて \(c\) 倍しても（例えば 1 秒あたりの回数にしても）、ヒット率は変わらない。</div>
+<p>式に出てくるのは \(\lambda_i T\) の積だけなので、\(\lambda\to c\lambda\)、\(T\to T/c\) とすれば両方の式がそのまま成り立つ。\(T\) の単位が「リクエスト何回分」から「何秒」に変わるだけ。モデルの本当の前提は IRM と Che 近似のほう。</p>
+
+<h2>4. 何を最大にするか：OHR と BHR</h2>
+<p>分類 \(k\) について、1 リクエストあたりのヒット数と、ヒットしたバイト数を</p>
+\[ H_k=\sum_{i\in k}\lambda_i h_i,\qquad B_k=\sum_{i\in k}\lambda_i s_i h_i \]
+<p>とおく。OHR（リクエスト単位のヒット率）は \(H_S+H_L\)、BHR（バイト単位のヒット率）は \((B_S+B_L)/\Lambda_B\)（\(\Lambda_B=\sum_i\lambda_is_i\)：1 リクエストあたりの要求バイト）。<b>BMR を最小にすることと、BHR を最大にすることは同じ</b>（BMR = 1 − BHR）。両方をまとめて扱うために</p>
+\[ J = \frac{B_S+B_L}{\Lambda_B} + w\,(H_S+H_L) \]
+<p>を目的にする。\(w=0\) なら BHR、\(w\) が大きいほど OHR 寄り。</p>
+
+<h2>5. 変数を取り替える</h2>
+<p>\(C_k\) を決めると \(T_k\) が決まり、\(T_k\) からヒットが決まる。\(C_k\) から \(T_k\) を求める式は陰にしか書けない。そこで<b>逆に \(T_S,T_L\) を変数にする</b>。占有 \(C_k(T_k)=\sum_{i\in k}s_i(1-e^{-\lambda_iT_k})\) も目的も \(T_k\) の陽な式になり、問題は次の形になる。</p>
+\[ \max_{T_S,\,T_L\ \ge 0}\ J(T_S,T_L)\quad\text{s.t.}\quad C_S(T_S)+C_L(T_L)=C . \]
+
+<h2>6. ラグランジュの未定乗数法</h2>
+<p>ラグランジュの未定乗数法を使うのはここ。乗数 \(\nu\) を入れて</p>
+\[ \mathcal L(T_S,T_L,\nu)=J(T_S,T_L)-\nu\,\big(C_S(T_S)+C_L(T_L)-C\big) \]
+<p>の停留点を求める。\(T_k\) で微分して 0 とおくと</p>
+\[ \frac{\partial J}{\partial T_k}=\nu\,\frac{dC_k}{dT_k}\quad\Longleftrightarrow\quad
+\nu=\frac{\partial J/\partial T_k}{dC_k/dT_k}=\frac{\partial J}{\partial C_k}\qquad(k=S,L). \]
+<p>計算すると（\(\frac{d}{dT}(1-e^{-\lambda T})=\lambda e^{-\lambda T}\)）</p>
+\[ \nu_k(T_k)=\frac{\sum_{i\in k}\lambda_i^2e^{-\lambda_iT_k}\,(s_i/\Lambda_B+w)}{\sum_{i\in k}s_i\lambda_ie^{-\lambda_iT_k}} . \]
+<div class="card ok"><b>答えの形</b>：最適な配分では、<b>2 つの LRU で「容量を 1 バイト足したときに増える目的」が等しい</b>：\(\nu_S(T_S)=\nu_L(T_L)=\nu\)。等しくなければ、増え方の小さいほうから大きいほうへ 1 バイト移せば目的が上がるので、最適ではない。</div>
+
+<h2>7. 乗数の意味：境目の人気をそろえる</h2>
+<p>分類の中のコンテンツが同じ大きさ \(s_k\) なら、重み \(u_i\propto\lambda_ie^{-\lambda_iT}\) で平均した人気を \(\bar\lambda_k(T)\) として</p>
+\[ \nu_k=\Big(\frac{1}{\Lambda_B}+\frac{w}{s_k}\Big)\bar\lambda_k(T_k). \]
+<p>重み \(\lambda_ie^{-\lambda_iT}\) は「最後のリクエストから \(T\) 経った所」、つまり<b>LRU の末尾で追い出されかけているコンテンツ</b>の分布。\(\bar\lambda_k\) は「境目にいるコンテンツの平均の人気」と読める。</p>
+<div class="tbl"><table>
+<tr><th>目的</th><th>そろえる量</th><th>読み方</th></tr>
+<tr><td>BHR（\(w=0\)）</td><td class="n">\(\bar\lambda_k\)</td><td>境目の人気。<b>大きさは関係ない</b></td></tr>
+<tr><td>OHR（\(w\to\infty\)）</td><td class="n">\(\bar\lambda_k/s_k\)</td><td>境目の「1 バイトあたりの人気」。小さいほど有利</td></tr>
+</table></div>
+<p>同じ人気なら、OHR では小さいコンテンツを優先するが、BHR では大きさで差をつけない。<b>だから OHR 最適と BHR 最適は、容量を逆向きに動かす</b>。共有の 1 本の LRU は \(T\) をそろえるだけで、どちらの量もそろえない。</p>
+<svg viewBox="0 0 640 250" role="img" aria-label="限界値の曲線と乗数の水平線">
+<line x1="60" y1="20" x2="60" y2="210" stroke="var(--mut)"/><line x1="60" y1="210" x2="610" y2="210" stroke="var(--mut)"/>
+<text x="20" y="30">限界</text><text x="560" y="232">容量</text>
+<path d="M60 40 C150 110 260 160 600 190" fill="none" stroke="var(--a)" stroke-width="2.5"/>
+<path d="M60 70 C200 100 330 130 600 170" fill="none" stroke="var(--b)" stroke-width="2.5"/>
+<line x1="60" y1="130" x2="610" y2="130" stroke="var(--g)" stroke-dasharray="6 4" stroke-width="2"/>
+<text x="470" y="122" fill="var(--g)">ν（乗数）</text>
+<circle cx="185" cy="130" r="5" fill="var(--a)"/><circle cx="326" cy="130" r="5" fill="var(--b)"/>
+<line x1="185" y1="130" x2="185" y2="210" stroke="var(--a)" stroke-dasharray="3 3"/>
+<line x1="326" y1="130" x2="326" y2="210" stroke="var(--b)" stroke-dasharray="3 3"/>
+<text x="185" y="226" text-anchor="middle" fill="var(--a)">C_S</text><text x="326" y="226" text-anchor="middle" fill="var(--b)">C_L</text>
+<text x="110" y="62" fill="var(--a)">S の限界 ν_S</text><text x="420" y="160" fill="var(--b)">L の限界 ν_L</text>
+</svg>
+<p class="mut">水平線 \(\nu\) を上下させ、2 本の曲線と交わる所の容量の和がちょうど \(C\) になる高さを探す。曲線が右下がり（次節）なので、高さは 1 つに決まる。</p>
+
+<h2>8. 凹性：停留点が最適だと言える理由</h2>
+<p>ラグランジュ法が出すのは停留点で、それだけでは最大とは限らない。ここでは目的が<b>凹</b>なので、停留点が最適になる。</p>
+<div class="thm"><b>命題</b>（単一サイズの分類）　\(\dfrac{d\bar\lambda_k}{dT}=-\mathrm{Var}_u(\lambda)\le 0\)。したがって \(J_k\) は \(C_k\) の凹関数で、KKT 条件は最適の必要十分条件である。</div>
+<p><b>証明の筋</b>：重み \(u_i\propto\lambda_ie^{-\lambda_iT}\) を \(T\) で微分すると \(du_i/dT=u_i(\bar\lambda-\lambda_i)\)。これより \(d\bar\lambda/dT=\sum_iu_i\lambda_i(\bar\lambda-\lambda_i)=\bar\lambda^2-\overline{\lambda^2}=-\mathrm{Var}_u(\lambda)\)。\(T\) が伸びるほど、境目には人気の低いコンテンツが来る。容量は \(T\) の増加関数なので、\(d^2J_k/dC_k^2=(d\nu_k/dT)/(dC_k/dT)\le0\)。凹関数の和を線形制約の上で最大にする問題では、KKT 条件が必要十分。</p>
+<p class="mut">大きさに幅のある分類では、\(\lambda\) と \(\lambda/s\) の共分散の符号の条件が付く（付録 命題 B.2）。</p>
+
+<h2>9. 端点の解と KKT 条件（手で解ける例）</h2>
+<p>凹性の式は、分類の中の人気が<b>全員同じ</b>だと分散 0 になり、目的は容量について<b>線形</b>になる。このとき停留点は（一般には）なく、答えは端点に来る。等式だけのラグランジュ法では足りず、\(C_k\ge0\) などの不等式を入れた <b>KKT 条件</b>が要る。</p>
+<div class="ex"><b>例題</b>　S：大きさ 1 のコンテンツ 100 個、人気はどれも 0.004（合計 0.4）。L：大きさ 10 のコンテンツ 20 個、人気はどれも 0.03（合計 0.6）。合計は 1。容量 \(C=50\)。</div>
+<p>人気が一様なら、分類の中のヒット率は全員同じで、占有 = 個数 × 大きさ × ヒット率 だから \(h_k=C_k/(N_ks_k)\)。よって</p>
+\[ H_k=N_k\lambda_k h_k=\frac{\lambda_k}{s_k}C_k,\qquad B_k=\lambda_k C_k . \]
+<div class="tbl"><table>
+<tr><th>目的</th><th class="n">1 バイトの価値：S</th><th class="n">L</th><th>KKT の答え</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>OHR</td><td class="n">\(\lambda/s=0.004\)</td><td class="n">0.003</td><td>全部 S（\(C_S=50\)）</td><td class="n">0.200</td><td class="n">0.031</td></tr>
+<tr><td>BHR</td><td class="n">\(\lambda=0.004\)</td><td class="n">0.03</td><td>全部 L（\(C_L=50\)）</td><td class="n">0.150</td><td class="n">0.234</td></tr>
+<tr><td>共有の 1 本の LRU</td><td colspan="2" class="n">\(T\approx8.8\) で \(C_S\approx3.5\)、\(C_L\approx46.5\)</td><td>どちらの最適でもない</td><td class="n">0.153</td><td class="n">0.220</td></tr>
+</table></div>
+<p>KKT 条件はこう読む。「使う分類の限界は \(\nu\) に等しく、使わない分類の限界は \(\nu\) 以下」。OHR では \(\nu=0.004\)（S）で、L の 0.003 は \(\nu\) 以下なので L は 0。これは<b>分数ナップサック</b>（価値 / 重さ の大きい順に詰める）と同じ答え。</p>
+<p class="mut">BHR は \(\Lambda_B=0.4\times1+0.6\times10=6.4\) で割った値。共有の LRU の \(T\) は \(100(1-e^{-0.004T})+200(1-e^{-0.03T})=50\) を解いた。</p>
+
+<h2>10. 数値で解く：二分法の二重ループ</h2>
+<p>人気に差があるとき（Zipf など）は、限界 \(\nu_k(T)\) は \(T\) について減少で、内点の解ができる。次の手順で解ける（<code>tools/synth/synth_model.c</code> の <code>part</code>）。</p>
+<ol>
+<li>外側：乗数 \(\nu\) を二分法で動かす。</li>
+<li>内側：各分類で \(\nu_k(T_k)=\nu\) を \(T_k\) について二分法で解く（\(\nu_k\) は単調）。</li>
+<li>\(\sum_kC_k(T_k)\) が \(C\) より大きければ \(\nu\) を上げ、小さければ下げる。</li>
+</ol>
+<p>分類が何個でも同じ手順で解ける。外側の変数は 1 つ（\(\nu\)）だけで済む。これが乗数を入れる実用上の利点。</p>
+
+<h2>11. 数値例：OHR 最適と BHR 最適は逆向き</h2>
+<p>合成の負荷 W1：小 36 KiB × 20 万個（リクエストの 75%）、大 1 MiB × 2 万個（25%）、どちらも Zipf 0.9。容量はコンテンツ全体の大きさの 10%。</p>
+<div class="tbl"><table>
+<tr><th>配り方</th><th class="n">小の容量</th><th class="n">大の容量</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>共有の 1 本の LRU（\(T\) が共通）</td><td class="n">10.8%</td><td class="n">89.2%</td><td class="n">53.0</td><td class="n">59.3</td></tr>
+<tr><td>静的分割・OHR 最適</td><td class="n">80.9%</td><td class="n">19.1%</td><td class="n">68.8</td><td class="n">43.1</td></tr>
+<tr><td>静的分割・BHR 最適</td><td class="n">6.7%</td><td class="n">93.3%</td><td class="n">49.3</td><td class="n">59.4</td></tr>
+<tr><td class="mut">参考：IRM の上限（分数ナップサック、OHR）</td><td></td><td></td><td class="n">76.8</td><td class="n">57.6</td></tr>
+</table></div>
+<ul>
+<li>OHR 最適は小に 81% を配り、BHR 最適は小に 7% しか配らない。<b>同じ問題で、目的を変えると答えがほぼ反対の端に動く</b>。</li>
+<li>共有の LRU は BHR 最適に近い（BHR 59.3 対 59.4）。境目の人気 \(\bar\lambda_k\) が 2 つの分類でたまたま近いため。一般には一致しない（付録 §B.2）。</li>
+</ul>
+
+<h2>12. Region 単位の追い出しへ</h2>
+<p>SSD のキャッシュは、コンテンツを Region（数百 MiB の箱）にまとめて書き、箱ごとに消す。各分類に自分の Region LRU を持たせても、同じ問題（容量をどう配るか）が立つ。何が変わるかを並べる。</p>
+<div class="tbl"><table>
+<tr><th></th><th>物単位の LRU（§1〜11）</th><th>Region LRU</th></tr>
+<tr><td>コンテンツのヒット率</td><td>\(1-e^{-\lambda T}\)</td><td>\(\lambda\ell/(1+\lambda\ell)\)（\(\ell\)：入った箱が生き残る時間。同居のコンテンツのヒットでも延びる＝便乗）</td></tr>
+<tr><td>凹性</td><td>証明できる（§8）</td><td>保証されない（不動点が跳ぶ負荷がある）</td></tr>
+<tr><td>解き方</td><td>乗数の二分法（§10）</td><td>容量の格子 + 動的計画法（凹性が要らない）</td></tr>
+<tr><td>限界値の測り方</td><td>LRU の末尾のヒットを数える</td><td>末尾が冷えていないので使えない → 目的を直接測る山登り</td></tr>
+</table></div>
+<p><b>目的を BMR にすると</b>、単一サイズの分類では \(B_k=s_kH_k\) なので、限界値に大きさ \(s_k\) が掛かる。W1 では、大のヒット 1 回は小のヒット 1 回の 28 倍の価値になり、最適な配分は大きく大の側に動く。</p>
+<div class="tbl"><table>
+<tr><th>W1・容量 10%（Region LRU）</th><th class="n">小の容量</th><th class="n">OHR（実測）</th><th class="n">BHR（実測）</th></tr>
+<tr><td>混在（分類なし）</td><td class="n">13%</td><td class="n">51.8</td><td class="n">56.6</td></tr>
+<tr><td>サイズ分類・自然な配分</td><td class="n">61%</td><td class="n">64.0</td><td class="n">51.8</td></tr>
+<tr><td>サイズ分類・OHR 最適</td><td class="n">80%</td><td class="n">67.0</td><td class="n">41.6</td></tr>
+<tr><td><b>サイズ分類・BMR 最適</b></td><td class="n">5%</td><td class="n">43.9</td><td class="n"><b>57.0</b></td></tr>
+<tr><td>山登り（目的 BMR、RegionFlash）</td><td class="n">—</td><td class="n">48.5</td><td class="n">57.0</td></tr>
+</table></div>
+<ul>
+<li>1 本の Region LRU を共有した「自然な配分」は、小さい箱ほど頻繁に使われて長生きするので小の側に寄る（OHR 寄り）。BMR で見ると、これが分類の損（−4.8pt）の原因だった。</li>
+<li>BMR 最適に配り直すと、分類は混在より BMR で +0.4pt 良くなる。モデルの予測（静的分割で 56.9%）と実測（57.0%）は 0.1pt 以内で一致した。</li>
+<li>山登りは、目的を直接測るので凹性も限界値の推定も要らず、同じ BHR に届いた。BHR の山が平らな所で止まるため、OHR は決め打ちの配分より 4.6pt 高い。</li>
+</ul>
+<p class="mut">詳細は付録 §O。この表は 1 つの負荷・1 つの容量だけの確認。</p>
+
+<h2>13. 演習問題</h2>
+<div class="ex"><b>問 1</b>　§9 の例題で、目的を \(J=\mathrm{BHR}+w\cdot\mathrm{OHR}\) にする。答えが「全部 S」から「全部 L」に切り替わる \(w\) はいくつか。</div>
+<details><summary>答え</summary><p>1 バイトの価値は S が \(0.004/6.4+0.004w\)、L が \(0.03/6.4+0.003w\)。等しくなるのは \(0.001w=0.026/6.4\)、つまり \(w\approx4.06\)。\(w\) がこれより小さければ全部 L、大きければ全部 S。目的が線形なので、答えは途中を通らず端から端へ跳ぶ。</p></details>
+<div class="ex"><b>問 2</b>　\(\sum N_g\lambda_g=1\) をやめて、人気を「1 秒あたりの回数」（合計 500）にした。最適な \(C_S\) と、そのときの \(T_S\) はどう変わるか。</div>
+<details><summary>答え</summary><p>\(C_S\) は変わらない。\(T_S\) は 1/500 倍になる（単位が「リクエスト何回分」から「秒」に変わる）。乗数 \(\nu\) は 500 倍になる（1 バイトで 1 秒あたりに増えるヒット）。</p></details>
+<div class="ex"><b>問 3</b>　分類の中の人気に差があるとき、なぜ §9 のような「端から端へ跳ぶ」ことが起きにくいか。凹性の式を使って説明せよ。</div>
+<details><summary>答え</summary><p>\(d\bar\lambda/dT=-\mathrm{Var}(\lambda)\lt0\) なので、容量を足すほど 1 バイトの価値が下がる。片方に寄せていくと、その分類の限界が下がって、もう一方の限界と途中で等しくなる。内側に交点ができるので、答えは連続に動く。</p></details>
+<div class="ex"><b>問 4</b>　OHR 最適の配分を、大きさの比が 2 倍のときと 30 倍のときで比べると、どちらが共有の LRU から大きく離れるか。</div>
+<details><summary>答え</summary><p>30 倍のとき。OHR でそろえる量は \(\bar\lambda_k/s_k\)、BHR でそろえる量は \(\bar\lambda_k\) で、2 つの基準は \(1/s_k\) の比だけ違う。比が大きいほど、OHR 最適は BHR 最適（と、§11 の例でそれに近かった共有の LRU）から離れる。</p></details>
+<div class="ex"><b>問 5</b>（発展）　Region LRU では「LRU の末尾に来るヒットを数えれば限界が分かる」が成り立たない。なぜか（§12）。</div>
+<details><summary>答え</summary><p>末尾の Region への 1 回のヒットは、そのリクエスト 1 回ではなく、Region の中の全員のその後の滞在を救うため。ヒットの回数はこの重みを持たない。小さいコンテンツの Region は中の数が多く、ほぼ全部が頻繁に touch されるので、末尾が冷えていない（付録 §M）。</p></details>
+
+<h2>14. この例題の限界</h2>
+<ul>
+<li>前提は IRM（人気が時間で変わらない）と Che 近似。人気が変わる負荷では、最適な配分も時間とともに動く。</li>
+<li>物単位の LRU の静的分割の話。Region 単位の追い出しでは凹性が保証されない（§12）。</li>
+<li>書き込み量・DRAM・再挿入は目的に入れていない。</li>
+</ul>
+</main></body></html>

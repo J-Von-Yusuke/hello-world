@@ -85,12 +85,12 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <tr><td>A1 IRM</td><td>物 i への要求は率 λ_i のポアソン、物どうし独立</td><td>在籍確率、寿命、同居の独立</td><td>時間局所性（束になる要求）で在籍率とヒット率がずれる。実トレースは近似</td><td><span class="tag t-ap">近似</span></td></tr>
 <tr><td>A2 全受け入れ・DRAM なし</td><td>ミスした物は必ず書き込み中の Region に入る</td><td>挿入率 = ミス率</td><td>受け入れ制御を入れると m_j が変わる</td><td><span class="tag t-ap">近似</span></td></tr>
 <tr><td>A3 Region 単位の削除</td><td>ヒットしても物は動かない。追い出すと中身は全部消える</td><td>物から見て FIFO</td><td>再挿入を入れると（§6 の n）、物は滞在を延長できる</td><td><span class="tag t-pf">定義</span></td></tr>
-<tr><td>A5 T 一定（Che）</td><td>追い出し年齢のばらつきを無視</td><td>全部</td><td>Region 数が少ないと誤差。CV：256 個で 0.1、4096 個で 0.015、64 個で 2〜4pt ずれ</td><td><span class="tag t-em">実測</span></td></tr>
+<tr><td>A5 T 一定（Che）</td><td>追い出し年齢のばらつきを無視</td><td>全部</td><td>Region 数が少ないと追い出しが離散的になる（Region 1 個を書くたびに 1 回）。11-17 に寿命の式へ離散の倍率と書き込み中の枠を入れ（付録 §E.9）、64 個でも 0.84pt 以内</td><td><span class="tag t-ap">近似</span><span class="tag t-em">実測</span></td></tr>
 <tr><td>A6 同居の独立</td><td>同じ Region の物は挿入の流れから独立に引かれる</td><td>M_k(t)^(n−1)</td><td>温かい物の個数の分散／平均 = 0.97（独立 1.00）。立ち上がりだけ崩れる</td><td><span class="tag t-em">実測</span></td></tr>
-<tr><td>A7 定常</td><td>長期平均を扱う</td><td>全部</td><td>人気が変わる負荷は別モデル（Region 部分は未完）</td><td><span class="tag t-no">未保証</span></td></tr>
+<tr><td>A7 定常</td><td>長期平均を扱う</td><td>全部</td><td>人気が変わる負荷は別モデル（年齢つきの再生方程式 <code>synth_age</code>。11-17 に完成、老化ありの 9 構成で 1.01pt 以内）</td><td><span class="tag t-em">実測</span></td></tr>
 </table></div>
 <details><summary>補足：検証の範囲</summary>
-<p>物単位 LRU・静的分割は 48 点で 0.3pt 以内。Region FIFO は 24 点で平均 0.1〜0.2pt。Region LRU は 24 構成で OHR 0.2pt、BHR 0.1〜0.8pt（隔離あり）。ただし検証は 1 Region の物の数 n ≤ 901。SSD 規模（n = 4,096〜10,016）では分類ありの BMR を 4〜6pt 悪く見積もる（未解決）。</p>
+<p>物単位 LRU・静的分割は 48 点で 0.3pt 以内。Region FIFO は 24 点で平均 0.1〜0.2pt。Region LRU は 24 構成で OHR 0.2pt、BHR 0.1〜0.8pt（隔離あり）。11-17 の修正（初回の要求の段階を容量で打ち切らない、追い出しの離散性）の後は、SSD 規模（n = 4,096〜10,016）で分類ありの BHR 0.61pt・分類なし 0.91pt 以内、Region 64〜4,096 個で 0.84pt 以内。</p>
 </details>
 </section>
 
@@ -257,13 +257,13 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <div class="cols">
 <ul>
 <li>e^(λ_i t)：自分の分（平均の外）。M^(n−1)：同居 n−1 個の分。同居が独立（A6）⇒ 積の期待値 = 期待値の積 <span class="tag t-pf">証明</span>（Palm–Khintchine で近似的に）。</li>
-<li>m が L に、L が m に依る ⇒ 不動点。存在は Brouwer で証明、<b>一意性は未証明</b>（両側からの連続法は同じ解に落ちた）<span class="tag t-no">未保証</span>。</li>
+<li>m が L に、L が m に依る ⇒ 不動点。存在は Brouwer で証明、<b>一意性は未証明</b>。ただし 11-17 に、初期値 7 通りすべてが同じ点に収束することを確かめた（「解が 2 つ」に見えたのは解き方の振動）<span class="tag t-em">数値</span><span class="tag t-no">証明なし</span>。</li>
 <li>二重ループ：内側＝T 固定で L,m を反復、外側＝占有=C となる T を二分法。</li>
 </ul>
 <ul>
 <li>Jensen：平均場（λ を先に平均）は寿命を短く見積もる。まれな熱い同居物の効果が M には入る（例題で 380 対 303）。</li>
 <li>Region LRU の T は「Region の最後の touch からの年齢」。物単位 LRU の T（16,125）とは別の量で、直接は比べない（T≈1,700〜1,800）。</li>
-<li>立ち上がり：空から詰めると最初の Region に熱い物が固まり ΛT が巨大で不死になる。隔離を入れると BHR の誤差 3.5→0.8pt <span class="tag t-em">実測</span>。</li>
+<li>立ち上がり：空から詰めると最初の Region に熱い物が固まり ΛT が巨大で不死になる。隔離を入れると BHR の誤差 3.5→0.8pt <span class="tag t-em">実測</span>。11-17 追記：初回の要求は容量が埋まった後もミスし、初回の順に Region に入り続ける（物の多い分類ほど長い）。容量で打ち切らずに詰めると、SSD 規模の 4〜6pt が 0.6pt 以内になった <span class="tag t-em">実測</span>。</li>
 </ul>
 </div>
 </section>
@@ -522,8 +522,8 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <tr><td>静的分割の J は凹、KKT が最適（K 分類）</td><td>d/dT E_w[λ] = −Var_w</td><td><span class="tag t-pf">証明</span></td><td>サイズ幅のある分類は条件つき（Cov(λ, λ/s) ≥ 0）</td></tr>
 <tr><td>Region の物は FIFO：h = λL/(1+λL)</td><td>再生報酬、任意停止</td><td><span class="tag t-pf">証明</span></td><td>サイクルが独立同分布（A3）</td></tr>
 <tr><td>Region LRU 寿命 (e^(ΛT)−1)/Λ</td><td>幾何和 + Wald</td><td><span class="tag t-pf">証明</span></td><td>T 一定。Region が少ないと誤差</td></tr>
-<tr><td>同居の独立、M_k^(n−1)</td><td>Palm–Khintchine</td><td><span class="tag t-ap">近似</span><span class="tag t-em">実測</span></td><td>分散/平均 0.97。n 大（4,096〜）で分類ありの BMR を 4〜6pt 悪く見積もる</td></tr>
-<tr><td>不動点の存在 / 一意</td><td>Brouwer / —</td><td><span class="tag t-pf">存在</span><span class="tag t-no">一意は未証明</span></td><td>—</td></tr>
+<tr><td>同居の独立、M_k^(n−1)</td><td>Palm–Khintchine</td><td><span class="tag t-ap">近似</span><span class="tag t-em">実測</span></td><td>分散/平均 0.97。n 大（4,096〜）の 4〜6pt のずれは同居の独立ではなく、立ち上がりの数え落としだった（付録 命題 F.2、11-17 に解決）</td></tr>
+<tr><td>不動点の存在 / 一意</td><td>Brouwer / 数値</td><td><span class="tag t-pf">存在</span><span class="tag t-no">一意は未証明</span></td><td>初期値 7 通りで同じ点（11-17）</td></tr>
 <tr><td>分類は Region FIFO では効かず LRU で効く</td><td>寿命 = T / 指数</td><td><span class="tag t-pf">証明</span><span class="tag t-em">実測</span></td><td>—</td></tr>
 <tr><td>自然な配分は KKT 点でない</td><td>末尾年齢の平準化 ≠ 限界値</td><td><span class="tag t-em">実測</span></td><td>3 分類の最適は付録 §K.2 で計算（モデルのみ）。Zipf の傾きが大きいと行き過ぎが強まる（§N）</td></tr>
 <tr><td>再挿入 n：h ≥ n の形</td><td>p(h) 単調（単調尤度比）</td><td><span class="tag t-pf">証明</span></td><td>p* は方針値。容量を奪う効果・T 帰還は未保証</td></tr>
@@ -550,7 +550,7 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <details><summary class="q">Q8. サイズ分類が OHR を上げて BHR を下げる理由を一言で。</summary>
 <p>Region の touch 率は「R × 中の物の価値密度 λ/s」で、寿命はそれについて指数的。分類すると価値密度の高い小物の Region だけが長生きし、LRU が容量を小物に寄せる（OHR↑）。その分大物の取り分が減り BHR↓。さらに冷たい小物が熱い小物に便乗して容量の約半分を取る。BHR は再挿入（n）と大物の下限（ff）で取り戻す。</p></details>
 <details><summary class="q">Q9. 検証範囲の限界は？</summary>
-<p>1 Region の物の数 n ≤ 901 で検証。SSD 規模（n = 4,096〜10,016）では分類ありの BMR を 4〜6pt 悪く見積もる（未解決）。Region 数 64 個で 2〜4pt。人気が変わる負荷の Region 部分は未完成。不動点の一意性は未証明。</p></details>
+<p>11-17 に解決：SSD 規模の 4〜6pt（立ち上がりの数え落とし、付録 命題 F.2）、Region 64 個の 2〜4pt（追い出しの離散性、§E.9）、人気が変わる負荷の Region 部分（<code>synth_age</code>、1.01pt 以内）。残る限界：不動点の一意性は数値の確認だけで証明なし。K ≥ 3 では自然な配分がどの w でも KKT 点にならない。再挿入と下限つきの Region LRU 全体のモデルはまだない。</p></details>
 </section>
 </main>
 </body>

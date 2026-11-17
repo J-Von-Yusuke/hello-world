@@ -491,7 +491,7 @@ ul{margin:4px 0;padding-left:22px}li{margin:2px 0}
 <div class="card" style="background:var(--card);border:1px solid var(--line);border-left:4px solid var(--r);border-radius:8px;padding:6px 14px;margin:8px 0"><b>検証の範囲（この例題の外では外れうる所）</b>
 <ul>
 <li>1 Region のコンテンツの数は n ≤ 901 で検証した。SSD 規模（n = 4,096〜10,016）では、サイズ分類の BMR を 4〜6pt 悪く見積もった。原因は未解決。</li>
-<li>Region の数が 64 個と少ないと 2〜4pt ずれる。</li>
+<li>Region の数が 64 個と少ないと 2〜4pt ずれていた。11-17 に、追い出しが Region 1 個を書くたびにしか起きないことと、書き込み中の Region の枠を入れて 0.84pt 以内に直した（付録 §E.9）。</li>
 <li>人気が時間で変わる負荷、Zipf の傾き α ≥ 1.2 の負荷は、シミュレータで検証していない（スライド 20）。</li>
 </ul></div>
 <details><summary>補足：再現の手順</summary>

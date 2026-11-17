@@ -73,7 +73,8 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <li>末尾のヒット密度が限界値になるのは物単位の LRU だけである理由（命題 M.1）。</li>
 <li>Zipf の傾き \(\alpha\) と分類の利得の関係：べき乗則、利得の上限、大物の損失の弾力性と、モデルの掃引（§N）。\(\alpha\gtrsim1.2\) で定常の不動点が跳ぶ（モデルが外れる範囲）ことも記した。</li>
 </ol>
-<p>数値確認は <code>tools/synth/appendix_check2.py</code>（<code>results/appendix_check2.json</code>）、<code>reinsert_check.py</code>、<code>alpha_sweep.py</code>（<code>results/alpha_sweep.json</code>）。</p></div>
+<p>数値確認は <code>tools/synth/appendix_check2.py</code>（<code>results/appendix_check2.json</code>）、<code>reinsert_check.py</code>、<code>alpha_sweep.py</code>（<code>results/alpha_sweep.json</code>）。</p>
+<p><b>11-17 追記</b>：15. Region LRU を分類ごとに持たせた静的分割で、目的 BMR / OHR / \(J\) を最大にする配分（§O）。BMR 最適な配分は自然な配分の反対の端にあり、直すとサイズ分類が混在より BMR で良くなる（W1・容量 10% で実測 +0.4pt）。教材 <a href="capacity_lagrange_lesson.html">capacity_lagrange_lesson.html</a>。</p></div>
 
 <h2>A. 系のモデル、仮定、記号</h2>
 <h3>A.1 キャッシュ</h3>
@@ -281,6 +282,7 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <div class="thm"><b>命題 E.8（不動点の存在）</b>　\(T\) を固定し、写像 \(\Phi_T:\ell\mapsto\ell'\) を (C.1)・(E.5)・(E.7)・(E.11) で定める。\(\Phi_T\) は箱 \(\mathcal B=\prod_i[T,\ell_{\max}]\) をそれ自身に写す連続写像である。ここで \(\ell_{\max}=U_{\max}+(e^{\bar n_{\max}\lambda_{\max}T}-1)/(\bar n_{\max}\lambda_{\max})\)。したがって Brouwer の定理から不動点が存在する。</div>
 <div class="pf">\(M_k\ge1\) なので \(\ell'_i\ge T\)。\(M_k(t)\le e^{\lambda_{\max}t}\) なので \(\ell'_i\le\ell_{\max}\)。\(\ell\in\mathcal B\) のとき \(m_j\ge\lambda_j/(1+\lambda_j\ell_{\max})\gt0\) なので \(U_k\) は有界で、各式は \(\ell\) について連続。<span class="qed">□</span></div>
 <p>一意性は証明していない。\(T\) の小さい側と大きい側からの連続法は同じ解に落ちた（本文 §5）。数値計算では \(\log\ell\) で半分ずつ混ぜる（線形の減衰では、熱い物に偏った最初の流れから「全部不死」の解に落ちることがあった）。外側では占有 \(\mathrm{Occ}(T)=\sum_i s_ih_i/\phi\) が \(C\) になる \(T\) を \(\log T\) の二分法で求める（\(\mathrm{Occ}\) が増加することは数値で確認）。</p>
+<div style="background:#f3efe4;border-radius:6px;padding:8px 12px;margin:8px 0"><b>11-17 追記</b>　半分ずつ混ぜる反復は、\(\alpha\ge1.2\) で 2 周期の振動になり収束していなかった（収束の速さから、写像の微分に −3 より小さい固有値があると見積もられる）。残差が減らなくなったら古い値寄りに混ぜる（0.5 → 0.95）ように直すと、初期値 7 通りすべてが同じ点に収束した。詳細と図は <a href="model_fix_1117.html">model_fix_1117.html</a> §1。一意性は、確かめた範囲での数値の結果で、証明ではない。</div>
 <p><b>数値例</b>：混在では \(T=1{,}817\)、\(\ell=25{,}694/23{,}180/22{,}986/16{,}414\)（小熱/小冷/大熱/大冷）、OHR 0.577、BHR 0.676。分割ありでは \(T=1{,}724\)、\(\ell=119{,}717/107{,}777/7{,}143/5{,}398\)、OHR 0.697、BHR 0.557（定常。隔離を入れると OHR 0.738、実測 0.737）。</p>
 
 <h3>E.8 サイズ分類の効き方：touch 密度</h3>
@@ -294,6 +296,27 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <li><b>便乗</b>：同じ Region の物は同じ \(D\) を持つので、熱い物の Region に入った冷たい物 \(j\) も \(h_j=\lambda_j\ell/(1+\lambda_j\ell)\) で長く居る。サイズ分類は同じサイズの熱い物と冷たい物を分けないので、冷たい物の容量の合計はほとんど減らない（3 サイズの例で、どの分け方でも 46〜48%）。分け方で変わるのは、どのサイズの冷たい物が便乗するかだけ。</li>
 </ul>
 
+<h3>E.9 Region の数が少ないとき：追い出しの離散性と書き込み中の枠（11-17 追記）</h3>
+<p>A5（\(T\) 一定、Che）は「無アクセスの時間が \(T\) を超えた瞬間に死ぬ」と置く。これは追い出しが連続に起きる極限である。実際の追い出しは、Region 1 個分のバイトを書くたびに 1 回だけ起きる。その間隔を</p>
+\[ \Delta=\frac{R}{\sum_i s_im_i}\qquad(\text{挿入のバイト率で } R \text{ を割ったもの}) \tag{E.14}\]
+<p>とする。\(N_R=C/R\) が大きいと \(\Delta\ll T\) で連続の極限に近い。\(N_R=64\) では \(\Delta\) が \(T\) を超えることがある（単一サイズ・容量 30% の例で、1 Region に約 940 個の物が入り、Region 1 個を書くのに数千要求かかる一方、\(T\) は約 1,000 要求）。</p>
+<div class="thm"><b>命題 E.9（離散の追い出しでの寿命）</b>　追い出しの時刻が間隔 \(\Delta\) の格子（位相は一様）で、各時刻に無アクセスの年齢が \(T\) を超えた Region が追い出されるとする。touch が率 \(\Lambda\) のポアソン過程なら、1 回の無アクセス区間で死ぬ確率は
+\[ q=e^{-\Lambda T}\,\frac{1-e^{-\Lambda\Delta}}{\Lambda\Delta}, \tag{E.15}\]
+寿命の平均は
+\[ \mathbb{E}D\ \approx\ \frac{e^{\Lambda T}-1}{\Lambda}\cdot\frac{\Lambda\Delta}{1-e^{-\Lambda\Delta}}\;+\;\frac{\Delta}{2}. \tag{E.16}\]
+\(\Delta\to0\) で (E.2) に戻る。</div>
+<div class="pf">無アクセス区間の長さ \(g\sim\mathrm{Exp}(\Lambda)\)。区間のうち年齢 \(T\) を超えた部分の長さは \((g-T)^+\) で、そこに格子の点が入る確率は \(\min\{1,(g-T)^+/\Delta\}\)。\(g\) について平均すると (E.15)。区間は独立なので、死ぬまでの区間の数は平均 \(1/q\) の幾何分布、1 区間の平均は \(1/\Lambda\) で、主要項 \(1/(\Lambda q)\) を得る。\(\Lambda\to0\)（touch のない Region）では年齢 \(T\) の後の最初の格子点で死ぬので、平均 \(\Delta/2\) の待ちを足した。<span class="qed">□</span></div>
+<p>倍率 \(\Lambda\Delta/(1-e^{-\Lambda\Delta})\ge1\) は熱い Region ほど大きい。追い出しの機会がまばらなので、熱い Region は「たまたま追い出しの瞬間に無アクセスだった」ときしか死なない。容量の条件で \(T\) は小さく決まり直す（単一サイズ、\(N_R=64\)：モデルの \(T\) は 1,808 → 1,007、実測の平均の追い出し年齢 1,088）。</p>
+<p><b>書き込み中の枠</b>：シミュレータは、書き込み中の Region にも \(N_R\) 個の枠の 1 つを割り当てる（<code>rf_region.c</code> の <code>rf_place</code>：空きの枠がなければ追い出してから開く）。書き込み中の Region は平均で半分しか埋まっていないので、分類（書き込み口）が \(K\) 個あると、物が使える容量は \(C-KR/2\) になる。\(N_R=64\)、\(K=2\) で 1.6%。</p>
+<p>(E.16) は Region の組成ごとに倍率が違うので、<code>synth_model</code> は同居の物の平均場の標本（E.3 の \(n\,\bar\lambda^{\rm ins}\)）で倍率を平均し、\(\mathbb{E}D\) に掛ける。立ち上がりの隔離（§F）の判定 \(\mathbb{E}D_r\gt H\) にも同じ倍率を掛ける。どちらも既定で入る（<code>OLDR=1</code> で 11-17 以前のモデル）。</p>
+<div class="tbl"><table>
+<tr><th>\(N_R=64\)（隔離あり）</th><th>連続の Che（旧）</th><th>§F の修正のみ</th><th>+ E.9（離散・書き込み中の枠）</th></tr>
+<tr><td>W3・容量 20%・分類あり（OHR / BHR の誤差 pt）</td><td class="n">+0.25 / −3.83</td><td class="n">+0.29 / +0.34</td><td class="n">+0.15 / −0.02</td></tr>
+<tr><td>W1・容量 30%・分類あり</td><td class="n">+1.85 / −2.81</td><td class="n">+1.37 / −0.65</td><td class="n">+0.84 / −0.74</td></tr>
+<tr><td>単一サイズ・容量 30%</td><td class="n">+0.70</td><td class="n">+0.70</td><td class="n">+0.26</td></tr>
+</table></div>
+<p>試して効かなかった補正：追い出し年齢の揺らぎ（§I、実測の CV = 0.18〜0.30 を入れると W1 で −9pt と悪化）、隔離の判定を階段から生存時間の割合 \((\mathbb{E}D/H)(1-e^{-H/\mathbb{E}D})\) に変える（ほぼ変わらず）。</p>
+
 <h2>F. 立ち上がりの隔離（Ap3 を外す）</h2>
 <div class="thm"><b>命題 F.1（充填期の終わり＝ Che の T）</b>　空のキャッシュから始めると、容量が埋まるまで追い出しはなく、各物の最初の要求だけがミスして挿入される。挿入の順は初回の要求時刻 \(\tau_i\sim\mathrm{Exp}(\lambda_i)\)（独立）の順で、充填期の終わり \(t_0\) は流体極限で
 \[ \sum_i s_i\big(1-e^{-\lambda_it_0}\big)=C, \tag{F.1}\]
@@ -301,7 +324,17 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 \[ \Lambda^{\rm init}_k(t)=n_k\,\frac{\sum_{j\in\mathcal O_k}\lambda_j^2e^{-\lambda_jt}}{\sum_{j\in\mathcal O_k}\lambda_je^{-\lambda_jt}},\qquad \frac{d\Lambda^{\rm init}_k}{dt}=-n_k\,\mathrm{Var}_w(\lambda)\le0 . \tag{F.2}\]
 最初に封じた Region ほど熱い。</div>
 <div class="pf">追い出しがなければ 2 回目以降の要求はすべてヒット。時刻 \(t\) までに挿入されたバイトは \(\sum s_i\mathbf 1\{\tau_i\le t\}\) で、その期待値が (F.1) の左辺。\(\tau_j\) の密度は \(\lambda_je^{-\lambda_jt}\)。(F.2) の比は (B.3) の \(\bar\lambda_w\) と同じ形なので、命題 B.2 と同じ計算で微分が出る。<span class="qed">□</span></div>
-<p>観測期間を \(H\) とすると、初期 Region \(r\) が終わりまで生き残る確率は、命題 E.2 より \(\exp(-H/\mathbb{E}D_r)\)（\(\Lambda_rT\gg1\)）。<code>synth_model -H</code> はこれを階段関数 \(\mathbf 1\{\mathbb{E}D_r\gt H\}\) で近似し、組成は \(\tau_i\) を標本として引いて作る。生き残る Region の物は \(h=1\)（ミスしない）とし、残りの物と容量 \(C-N_{\rm imm}R\) で定常モデルを解く。不死の集合は \(T\) に依るので、\(T\) と不死の集合を交互に解き直す。</p>
+<div class="thm"><b>命題 F.2（初回の要求の段階は充填期より長く続く。11-17 追記）</b>　分類 \(k\) の物の初回の要求は、容量が埋まった後も必ずミスして分類 \(k\) の Region に入る。時刻 \(t\) の分類 \(k\) の挿入のうち初回の要求の割合は
+\[ \frac{\sum_{j\in\mathcal O_k}\lambda_je^{-\lambda_jt}}{\sum_{j\in\mathcal O_k}\lambda_je^{-\lambda_jt}+\sum_{j\in\mathcal O_k}m_j^{\rm re}(t)}, \tag{F.3}\]
+（\(m^{\rm re}\) は追い出された物の再ミス）で、物の数 \(|\mathcal O_k|\) が大きい分類ほど遅くまで 1 に近い。この間に封じた Region の組成は、充填期と同じく初回の要求時刻 \(\tau_i\) の順で決まり、touch 率は (F.2) の \(\Lambda^{\rm init}_k(t)\) に従う。</div>
+<p>充填期の長さ \(t_0\) は容量全体で決まるが、初回の要求の段階の長さは分類ごとに決まる。大物が要求の多くを占めると、容量は大物で短時間に埋まる（1/64 の SSD 規模、要求 3:1 で約 3 万要求）。一方、420 万個の小物の初回の要求は数百万要求続く。実測では、小物の Region 333 個のうち 150 個が計測の前に封じられ、最後まで追い出されなかった（142 個は最初の 200 万要求で封じたもの）。11-16 までのモデルは容量が埋まるまでしか初回の順に詰めなかったので、不死の Region を 35 個と数え落とした。熱い小物が定常の挿入の流れに残り、\(\bar\lambda^{\rm ins}\) と \(\Lambda T\) を押し上げ、(E.13) で小物の容量が指数的に膨らんだ（同じ \(T\) で小物の取り分 0.71、実測 0.35）。これが SSD 規模で分類ありの BHR を 4〜6pt 低く見積もった原因である。</p>
+<p>観測期間を \(H\) とすると、初期 Region \(r\) が終わりまで生き残る確率は、命題 E.2 より \(\exp(-H/\mathbb{E}D_r)\)（\(\Lambda_rT\gg1\)）。<code>synth_model -H</code> は、分類ごとに<b>全部の物</b>を初回の要求時刻の順に Region へ詰め（容量で打ち切らない。命題 F.2）、これを階段関数 \(\mathbf 1\{\mathbb{E}D_r\gt H\}\) で選ぶ（\(\mathbb{E}D_r\) は (E.16)）。生き残る Region の物は \(h=1\)（ミスしない）とし、残りの物と容量 \(C-N_{\rm imm}R\) で定常モデルを解く。不死の集合は \(T\) に依るので、\(T\) と不死の集合を交互に解き直す。階段を生存時間の割合に変えても結果はほとんど変わらなかった（§E.9 の末尾）。<code>CSCAP=1</code> で容量で打ち切る旧モデル。</p>
+<div class="tbl"><table>
+<tr><th>1/64 の SSD 規模、分類あり（BHR の誤差 pt）</th><th>旧（容量で打ち切り）</th><th>新（命題 F.2）</th></tr>
+<tr><td>要求 3:1、R 256 / 626 MiB 相当</td><td class="n">−4.19 / −5.69</td><td class="n">0.00 / −0.23</td></tr>
+<tr><td>要求 95:5、R 256 / 626 MiB 相当</td><td class="n">−5.00 / −5.95</td><td class="n">−0.18 / −0.61</td></tr>
+</table></div>
+<p>要求 3:1・R 256 MiB 相当の中身：\(T\) はモデル 18,500・実測 18,500、小物の取り分 0.353・実測 0.347、分類ごとのヒット率 80.6 / 67.1・実測 80.7 / 67.1。<b>否定した仮説</b>：解き方の振動、\(T\) の揺らぎ（逆向き）、観測期間より長い「当たり」の Region が平均を押し上げる（Region ごとに寿命を \(H\) で打ち切っても 62.97 → 62.23 でほぼ変わらず）。</p>
 <p>数値例（分割あり・小物、定常の \(T=1{,}724\) で評価）：\(\Lambda^{\rm init}T\) は 13.3（最初の Region）から 9.35（\(t_0=16{,}125\)）まで下がり、\(\log\mathbb{E}D\) は 18.2 から 14.6 になる。\(\log H=\log(3\times10^7)=17.2\) がこの範囲の中に入るので、初期 Region の一部だけが不死になる。<b>人気が変わる負荷で隔離が消える理由</b>：(F.2) の \(\lambda_j\) が時間とともに下がるので \(\Lambda_r\) が下がり、\(\mathbb{E}D_r\) が指数的に縮むため。</p>
 
 <h2>G. スケール不変性と統計量</h2>
@@ -319,6 +352,7 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <tr><td>Region FIFO (D.1)</td><td>24 点</td><td>平均 0.1〜0.2pt、最大 0.9pt（混在の詰め残し）</td></tr>
 <tr><td>寿命の式 (E.2)</td><td>Region ごとに \(\Lambda\) を数え、\(\Lambda T\) の区間別に比べた</td><td>有効な \(T\) が実測の 1.00〜1.02 倍（W3）</td></tr>
 <tr><td>Region LRU（隔離あり）</td><td>24 構成</td><td>OHR 平均 0.2pt、BHR 平均 0.1pt（分類なし）・0.8pt（分類あり）</td></tr>
+<tr><td>Region LRU（隔離あり、11-17 のモデル：命題 F.2・E.9）</td><td>Region 数 64〜4,096 の 14 構成（<code>val_cv</code>）、1/64 の SSD 規模 8 構成、老化なし 6 行</td><td>\(N_R\ge256\) は 0.26pt 以内、\(N_R=64\) は 0.84pt 以内、SSD 規模は分類あり 0.61pt・分類なし 0.91pt 以内</td></tr>
 <tr><td>4 群の例</td><td>LRU / FIFO 混在 / LRU 混在 / LRU 分割（隔離あり）</td><td>OHR で 62.8/62.7、52.8/52.7、57.7/57.7、73.8/73.7</td></tr>
 <tr><td>3 サイズの例</td><td>混在・2 通りの 2 分割・3 分割</td><td>すべて 0.5pt 以内</td></tr>
 <tr><td>\(K=3\) の KKT 解 (K.3)</td><td>3 サイズの例、目的 3 通り。2% 刻みの格子の総当たりと比較（式どうし）</td><td>目的の値で \(10^{-4}\) 以内</td></tr>
@@ -330,10 +364,10 @@ U_k &= \frac{\bar n_k - 1}{2\sum_{j\in\mathcal O_k} m_j}, &
 <p class="sub">11-16 に足した 5 行のうち、シミュレータ（RegionFlash）との比較は 1 つもない。式どうし、または式とモンテカルロの照合である。</p>
 <div class="card warn"><b>モデルが外れる所（論文にするなら明記すべき条件）</b>
 <ol>
-<li><b>1 Region の物の数 \(n\) が大きい場合</b>：検証は \(n\le901\)。縮小版の SSD 規模（\(n_S=4{,}096\)〜\(10{,}016\)）では、サイズ分類の BMR を 4〜6pt 悪く見積もった（小物の取り分を多く見積もる向き）。(E.4) の階段近似と、隔離の詰め込みの近似が候補で、未解決。</li>
-<li><b>Region の数 \(N_R\) が少ない場合</b>（64 個）：2〜4pt。立ち上がり中の追い出しを無視しているため。</li>
-<li><b>人気が変わる負荷</b>：Ap3 の定常の代わりに、年齢つきの再生方程式（§J）が要る。物単位 LRU の部分は 0.25pt で合うが、Region 部分は途中。</li>
-<li><b>Zipf の傾きが大きい負荷</b>（\(\alpha\ge1.2\)、11-16 追記）：定常の不動点が跳び、容量の条件を満たす連続な解がない点がある（§N.4）。隔離つきのモデルは解けるが、運用中に固定される Region を含まない。\(\alpha\gt1\) の負荷はシミュレータで検証していない（これまでの検証は \(\alpha=0\)〜1.1）。</li>
+<li><s><b>1 Region の物の数 \(n\) が大きい場合</b>：SSD 規模で分類ありの BMR を 4〜6pt 悪く見積もる。</s> <b>11-17 解決</b>：初回の要求の段階を容量で打ち切っていたため（命題 F.2）。4 条件で分類ありの BHR の誤差 0.61pt 以内。分類なしは最大 0.91pt（要求 3:1、R 256 MiB 相当）が残る。</li>
+<li><s><b>Region の数 \(N_R\) が少ない場合</b>（64 個）：2〜4pt。</s> <b>11-17 解決</b>：原因は追い出しの離散性と書き込み中の枠（§E.9）と、命題 F.2。3 例で 0.84pt 以内（W1・容量 30%・分類ありの OHR +0.84 が最大）。</li>
+<li><b>人気が変わる負荷</b>：Ap3 の定常の代わりに、年齢つきの再生方程式（§J、<code>synth_age</code>）を使う。11-17 に完成し、老化ありの 9 構成で 1.01pt 以内（<a href="model_fix_1117.html">model_fix_1117.html</a> §4）。</li>
+<li><s><b>Zipf の傾きが大きい負荷</b>（\(\alpha\ge1.2\)）：定常の不動点が跳ぶ。</s> <b>11-17 訂正</b>：跳びは解き方の振動だった（§E.7 の追記、§N.4 の追記）。\(\alpha=1.2,1.4\) はシミュレータと 0.33pt 以内。</li>
 <li><b>再挿入・容量の下限つきの全体</b>（11-16 追記）：§K・§L は物 1 個または物単位の静的分割の式。Region LRU の不動点に再挿入と下限を組み込んだモデルはない。</li>
 </ol></div>
 
@@ -499,6 +533,7 @@ G(a\mid a')=\mathbb{E}_\nu\Big[\exp\Big(-\int_{a'}^{a}\eta\big(\lambda(u)+\Lambd
 <li>観察との差：モデル（この負荷）では符号が変わるのは \(\alpha\approx1.4\)〜1.6 で、\(\alpha=1.0\)〜1.2 ではまだ +3〜10pt の利得がある。観察では 1.0 から悪化している。(N.3) の指数 \(1-1/\alpha\) が \(\alpha=1\) で符号を変えることと、サイズの比が大きいほど最適な小物の取り分が速く下がること（比 1,000・\(A_S/A_L=3\) なら \(\alpha=1.2,1.4,1.6\) で 44%、23%、13%）は、境目が 1 に近づく向きに働くが、掃引では確かめていない。</li>
 </ul>
 <h3>N.4 定常の不動点が跳ぶ（モデルが外れる範囲）</h3>
+<div style="background:#f3efe4;border-radius:6px;padding:8px 12px;margin:8px 0"><b>11-17 追記：この節の「跳び」は解き方の振動だった。</b>直した後は容量の和がどこでも 1 で、\(\alpha=1.2,1.4\) はシミュレータと 0.33pt 以内。N.2 の自然な取り分は 60/56/52/47%（\(\alpha=1.0/1.2/1.4/1.6\)、容量 10%）で、「70〜91% への行き過ぎ」は無かった。N.3 の (b) は弱まり、\(\alpha\ge1.4\) で利得が小さいのは主に (a)。<a href="model_fix_1117.html">model_fix_1117.html</a> §2。</div>
 <p>\(\alpha\ge1.2\) の定常のモデルは、容量の条件を満たす解を持たない点がある。\(\alpha=1.4\)・容量 10%・分類ありで \(T\) を与えて解くと、小物の占有は \(T=10{,}500\) で \(0.35C\)、\(T=10{,}571\) で \(1.11C\)、\(T=10{,}650\) で \(2.21C\)（小物の全部が在籍）と跳び、その間に \(C\) をまたぐ連続な解がない（表の * の点。出力の占有の合計が \(0.71C\) や \(0.30C\) になっていることで分かる）。</p>
 <ul>
 <li>原因：順位 1 の物の \(\lambda_1T\) が数千になり、その物を含む Region の寿命 \(e^{\Lambda T}/\Lambda\) は観測できない長さになる。定常の平均 \(\ell_i=\int e^{\lambda_it}M^{n-1}dt\) は、こうした「起きれば永久に続く」まれな事象に支配され、不動点が「普通の解」と「全部が不死の解」の 2 つに分かれる（命題 E.8 は存在だけを言い、一意性は言っていない）。</li>
@@ -512,6 +547,74 @@ G(a\mid a')=\mathbb{E}_\nu\Big[\exp\Big(-\int_{a'}^{a}\eta\big(\lambda(u)+\Lambd
 <li><b>配分の行き過ぎ</b>：分類ありの実行で、分類ごとの Region の数（容量の取り分）を時系列で出し、2 の最適な取り分と比べる。</li>
 <li><b>固定された Region</b>：<code>RF_EVLOG</code> で、Region の寿命の分布と「一度も追い出されなかった Region」の割合・中身（裾の物の割合）を出す。N.4 の予想（熱い物に固定された Region が裾の物を抱える）の直接の確認になる。</li>
 </ol>
+
+<h2>O. Region LRU の静的分割と、BMR を基準にした配分（11-17 追記）</h2>
+<p>§B・§K の最適な配分は<b>物単位の LRU</b> の静的分割についてのもので、Region LRU について比べていたのは自然な配分（1 本の Region LRU を共有したときに決まる配分、§E.8・§K.2）だけだった。ここでは各分類に<b>自分の Region LRU</b> を持たせ（容量 \(C_k\)、Region の大きさ \(R\) は共通）、目的 \(J=\mathrm{BHR}+w\cdot\mathrm{OHR}\) を最大にする配分を求める。</p>
+<h3>O.1 目的と限界値</h3>
+<p>分類 \(k\) の区画を単独で解いたヒットの率を \(H_k(C_k)\) とする（§E の連立方程式を、分類 \(k\) の物だけで解く）。物から見た式は \(h_i=\lambda_i\ell_i/(1+\lambda_i\ell_i)\) のまま。単一サイズの分類では \(B_k=s_kH_k\) なので</p>
+\[ J=\sum_k\Big(\frac{s_k}{\Lambda_B}+w\Big)H_k(C_k),\qquad \sum_kC_k=C . \tag{O.1}\]
+<p>\(H_k\) が凹なら、KKT 条件は \(\big(s_k/\Lambda_B+w\big)H_k'(C_k)=\nu\)（容量を持つ分類）。<b>目的を BMR にすると、各分類の限界値に大きさ \(s_k\) が掛かる</b>。OHR では 1 回のヒットの価値が分類によらず 1 だが、BMR では \(s_k/\Lambda_B\) になり、大きい分類のヒットが \(s_L/s_S\) 倍重くなる。</p>
+<div class="thm"><b>注（\(w\) の効き方）</b>　大きい分類と小さい分類の「1 回のヒットの価値」の比は \((s_L/\Lambda_B+w)/(s_S/\Lambda_B+w)\)。W1（\(s_S=36\) KiB、\(s_L=1\) MiB、\(\Lambda_B\approx283\) KiB）では、\(w=0\) で 28.4、\(w=0.1\) で 16.4、\(w\to\infty\) で 1。<b>\(w=0.1\) は見た目より BHR 寄り</b>で、配分は BHR 最適に近い。</div>
+<h3>O.2 凹性は仮定しない：格子と動的計画法</h3>
+<p>Region LRU の \(H_k(C_k)\) は不動点の解で、\(\alpha\gtrsim1.2\) では不動点が跳ぶ（§N.4）。凹性を証明できないので、ラグランジュ乗数の二分法（§B.3）は使わず、各分類の曲線を容量の格子 \(C_k\in\{0,\ C/P,\ \dots,\ C\}\) の上で解き、\(\sum_k m_k=P\) の下で \(\sum_k J_k(m_kC/P)\) を最大にする \((m_k)\) を動的計画法で選ぶ（格子の上では厳密。計算量は分類あたり \(P\) 回の Region モデル）。実装は <code>synth_model.c</code> の <code>rpart</code>（出力 <code>rpartO</code>・<code>rpartJ</code>（\(w=0.1\)）・<code>rpartB</code>、<code>-P</code> で刻み、既定 20 = 5%）。</p>
+<h3>O.3 W1・容量 10% の結果（モデルとシミュレータ）</h3>
+<p>シミュレータは RegionFlash（DRAM なし、全受け入れ、\(R=C/256\)、2,000 万要求、先頭 25% で温める）。静的分割は、クラスごとの部分トレースを別々の RegionFlash（Region LRU）で回して足し合わせた。</p>
+<div class="tbl"><table>
+<tr><th>方式</th><th class="n">小の容量</th><th class="n">OHR モデル / 実測</th><th class="n">BHR モデル / 実測</th></tr>
+<tr><td>混在（分類なし）の Region LRU</td><td class="n">（12.9%）</td><td class="n">51.5 / 51.8</td><td class="n">55.95 / 56.61</td></tr>
+<tr><td>サイズ分類・自然な配分（1 本の Region LRU）</td><td class="n">61.5%</td><td class="n">64.5 / 64.0</td><td class="n">48.5 / 51.8</td></tr>
+<tr><td>サイズ分類・静的分割・OHR 最適</td><td class="n">80%</td><td class="n">65.8 / 67.0</td><td class="n">41.7 / 41.6</td></tr>
+<tr><td>サイズ分類・静的分割・\(w=0.1\) 最適</td><td class="n">10%</td><td class="n">49.3 / —</td><td class="n">56.87 / —</td></tr>
+<tr><td><b>サイズ分類・静的分割・BMR 最適</b></td><td class="n">5%</td><td class="n">44.1 / 43.9</td><td class="n"><b>56.92 / 56.98</b></td></tr>
+<tr><td>同じ配分を全体のトレースで下限として（<code>fc=1/ff=0.95</code>）</td><td class="n">—</td><td class="n">— / 43.9</td><td class="n">— / 57.01</td></tr>
+<tr><td>下限の山登り、目的 BMR（<code>auto=1/w=0</code>）</td><td class="n">—</td><td class="n">— / 48.5</td><td class="n">— / 56.97</td></tr>
+</table></div>
+<ul>
+<li><b>BMR 最適な配分は、自然な配分と反対の端にある</b>（小 5% 対 61.5%）。自然な配分は 1 Region の物の数 \(n_k=R/s_k\) で決まり（§E.8）、OHR 寄りの側に置かれる。そのため、サイズ分類の BMR は混在より 4.8pt 悪い（実測）。</li>
+<li>配分を BMR 最適に直すと、サイズ分類は<b>混在より BMR で +0.4pt（実測）良くなる</b>（モデルは +1.0pt。差の大半は、モデルが混在を 0.7pt 低く見積もっていること）。差は小さく、得の大部分は「自然な配分の損を取り消す」ことから来る。</li>
+<li>モデルの BMR 最適（静的分割）は実測と 0.06pt で一致した。RegionFlash の下限（1 本の LRU の上で大物に下限）でも同じ BHR が出る。山登り（目的 BMR）は下限を決め打ちせずに同じ BHR に届き、OHR は下限の決め打ちより 4.6pt 高い（BHR の山が平らなので、OHR を損なわない側で止まる）。</li>
+<li>OHR 最適の静的分割は、自然な配分より OHR で +2.9pt（実測）良い。§K.2 で「Region LRU の自然な配分は OHR 最適に近い」としたのは、物単位の静的分割の配分と比べた話で、Region LRU どうしで比べてもこの例では差は小さい。</li>
+</ul>
+<h3>O.4 何が言えて、何が言えないか</h3>
+<ul>
+<li>確かめたのは W1・容量 10% の 1 点だけ（WSL の容量を節約するため）。他の負荷・容量は <code>experiment_kit</code> の <code>./run.sh synth</code>（<code>rpartO[1]</code>・<code>rpartB[1]</code>・<code>rfloorB[1]</code>・<code>rautoB[1]</code>）で確かめる。</li>
+<li>実トレースでは <code>./run.sh paper</code> の <code>ru_auto_w0</code>・<code>r256_auto_w0</code>（下限の山登りを目的 BMR で）。論文の <code>*_auto</code> は \(w=0.1\) で、O.1 の注のとおり BHR 寄りなので、W1 程度の大きさの比では差は小さいと予想する（モデルでは 56.87 対 56.92）。差が出るとすれば、大きさの比が小さいトレース（\(w=0.1\) の重みが相対的に効く）。</li>
+<li>再挿入・DRAM・書き込み量は入れていない。BMR 最適な配分は大物に寄るので、Region あたりの物が少なく、書き込み量の比較は別に要る。</li>
+</ul>
+
+<h2>P. DRAM を前に置いたときのモデル（11-17 追記）</h2>
+<p>これまでのモデルと合成負荷の検証は DRAM なしだった。CacheLib と RegionFlash（<code>inclusion=cachelib</code>）の動作に合わせて DRAM を加える。</p>
+<h3>P.1 動作（CacheLib と RegionFlash）</h3>
+<ul>
+<li><b>DRAM ミス・SSD ヒット</b>：SSD から読んだコンテンツは DRAM に新しく割り当てられ、DRAM の LRU に入る（DRAM の容量を使う）。印 NvmClean が付き、<b>SSD のコピーは残る</b>。CacheLib：<code>cachelib/allocator/nvmcache/NvmCache.h</code> の <code>onGetComplete</code> → <code>createItem</code>（<code>allocateInternal</code> で DRAM に確保、<code>markNvmClean()</code>）→ <code>insertFromNvm</code>。RegionFlash：<code>RegionFlash.c</code> 194〜204 行（無効化するのは <code>exclusive</code> のときだけ）。</li>
+<li><b>両方ミス</b>：DRAM に入れる。SSD へは、<b>DRAM から追い出された時</b>に書く。</li>
+<li><b>DRAM から追い出された時</b>：NvmClean（有効な SSD のコピーがある）なら SSD に書き直さない。CacheLib：<code>cachelib/allocator/CacheAllocator.h</code> の <code>shouldWriteToNvmCache</code>（<code>doWrite = (!item.isNvmClean() || item.isNvmEvicted())</code>）。RegionFlash：<code>RegionFlash.c</code> 72〜88 行（<code>clean_skip_objs</code>）。</li>
+</ul>
+<h3>P.2 モデル</h3>
+<div class="thm"><b>命題 P.1（DRAM は SSD から切り離せる）</b>　上の動作では、どのリクエストの後もコンテンツは DRAM の LRU の先頭にいる（ミスなら挿入、SSD ヒットなら昇格、DRAM ヒットなら先頭へ）。したがって DRAM は全リクエストの流れに対する普通の LRU で、SSD の状態に依らない。Che 近似で特性時間 \(T_D\)（\(\sum_i s_i(1-e^{-\lambda_iT_D})=C_D\)）が決まり、DRAM のヒット率は \(1-e^{-\lambda_iT_D}\)。</div>
+<p>SSD に届くのは「前のリクエストから \(T_D\) 以上空いた」リクエストだけで、その率は</p>
+\[ a_i=\lambda_i\,e^{-\lambda_iT_D}. \tag{P.1}\]
+<p>SSD 側では、Region の touch（SSD ヒット）・挿入の流れ（ミスの率 \(m_i=a_i/(1+a_i\ell_i)\)）・在籍のすべてが、このリクエストで決まる。そこで<b>§E の連立方程式の \(\lambda_i\) を \(a_i\) に置き換えて</b>そのまま解き、全体のヒットは</p>
+\[ \text{OHR}=\sum_i \lambda_i\Big[(1-e^{-\lambda_iT_D}) + e^{-\lambda_iT_D}\,\frac{a_i\ell_i}{1+a_i\ell_i}\Big] \tag{P.2}\]
+<p>（BHR は \(s_i\) の重み）。実装は <code>synth_model -D &lt;DRAM ÷ SSD&gt;</code>（出力の <code>dram</code> 行が DRAM だけのヒット。他の行は DRAM ＋ SSD）。</p>
+<ul>
+<li><b>Region を生かす touch の率</b>は \(\Lambda'=\sum_{j\in r}\lambda_je^{-\lambda_jT_D}\)。\(\lambda e^{-\lambda T_D}\) は \(\lambda=1/T_D\) で最大で、それより熱いコンテンツほど touch に寄与しない（DRAM に住み着く）。</li>
+<li><b>入れていない近似</b>：(1) SSD への書き込みはミスの時ではなく DRAM から追い出された時なので、SSD の滞在の始まりは「DRAM の 1 回の滞在」\((e^{\lambda T_D}-1)/\lambda\) だけ遅れる。モデルはこの遅れを無視し、SSD の滞在の一部をリクエストの来ない時間に置いてしまうので、ヒットを少なく見積もる向き。(2) 1 つのコンテンツからの SSD のリクエストは間隔が \(T_D\) 以上の更新過程で、ポアソンではない（多数の重ね合わせでポアソンに近い）。</li>
+</ul>
+<h3>P.3 確認（W1・容量 10%・DRAM = SSD の 10%、2,000 万要求）</h3>
+<div class="tbl"><table>
+<tr><th>方式</th><th class="n">OHR モデル / 実測</th><th class="n">BHR モデル / 実測</th><th class="n">DRAM なしの実測 BHR</th></tr>
+<tr><td>Region FIFO</td><td class="n">49.7 / 50.5</td><td class="n">55.2 / 56.2</td><td class="n">54.1</td></tr>
+<tr><td>Region LRU・混在</td><td class="n">51.6 / 52.2</td><td class="n">56.3 / 56.9</td><td class="n">56.6</td></tr>
+<tr><td>Region LRU・サイズ分類（自然な配分）</td><td class="n">65.2 / 64.7</td><td class="n">48.6 / 52.2</td><td class="n">51.8</td></tr>
+<tr><td>Region LRU・サイズ分類＋山登り（BMR）</td><td class="n">— / 48.1</td><td class="n">— / 57.6</td><td class="n">57.0</td></tr>
+</table></div>
+<ul>
+<li>DRAM ありでも、モデルの誤差は DRAM なしと同程度（Region LRU 混在で 0.5〜0.6pt。サイズ分類の BHR +3.6pt は DRAM なしの +3.3pt と同じ既知の誤差）。Region FIFO は誤差が −0.1pt から +1.0pt に増え、向きは近似 (1) の予想どおり（モデルが低い）。DRAM のヒットはモデルで OHR 28.4%（\(T_D=1{,}263\)）。</li>
+<li><b>予想と違った点</b>：DRAM が熱い小物の touch を止めるので、サイズ分類の自然な配分の小物への偏りは弱まると予想したが、モデルでは逆に 61.5% → 64.8% と強まった。DRAM のぶん SSD の \(T\) が伸び（3,086 → 3,650）、小物の Region は温かいコンテンツの touch だけで十分に長生きするため。実測の配分は測っていない。</li>
+<li>BMR を目的にした山登りは、DRAM ありでも混在より BMR が良い（+0.7pt。DRAM なしでは +0.4pt）。</li>
+</ul>
+<p>確認したのは 1 点だけ。他の負荷は <code>experiment_kit</code> の <code>synth_workloads.txt</code> の <code>w1d</code> 行（<code>--dram 0.1</code>）と同じ形で行を足して <code>./run.sh synth</code>。DRAM ありでは物単位 LRU と、部分トレースによる静的分割は回さない（DRAM を区画で共有できないため）。</p>
 
 <h2>参考文献</h2>
 <ul>
