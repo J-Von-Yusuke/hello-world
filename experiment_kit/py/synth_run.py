@@ -10,6 +10,10 @@
   rfifo[0/1] RegionFlash、Region FIFO、分類なし / サイズ分類
   rlru[0/1]  RegionFlash、Region LRU、分類なし / サイズ分類
   rlru[2]    --g の対応で分類（τ はグループの境目）
+  rpartO[1] / rpartB[1]  Region LRU の静的分割：クラスごとの部分トレースを RegionFlash（Region LRU）で、
+             容量はモデルの OHR 最適 / BHR 最適な配分（synth_model の rpartO / rpartB）
+  rfloorB[1] 全体のトレースで、BHR 最適な配分を容量の下限（region-params=fc/ff）で与える
+  rautoB[1]  全体のトレースで、下限を山登りで決める（auto=1、目的 BHR だけ：w=0）
 いずれも DRAM なし、全受け入れ、先頭 25% の要求で温める。
 """
 import json, os, re, subprocess, sys
@@ -34,11 +38,12 @@ def lcs(trace, cap, warm):  # 物単位 LRU → (要求数, OHR, BHR)
     return int(m[1]), 1 - float(m[2]), 1 - float(m[3])
 
 
-def rf(trace, cap, R, evict, hint, warm_req, tag):
+def rf(trace, cap, R, evict, hint, warm_req, tag, extra=""):
+    if cap < R: return 0.0, 0.0  # 静的分割で容量 0 の区画
     out = f"{HOME}/o/{tag}"
     sh(f'{SIM} {trace} oracleGeneral RegionFlash {int(cap)} -e "dram-size=0,region-size={int(R)},'
        f'region-evict={evict},seal-on-repartition=inactive,seed=1,interval=1000000000,'
-       f'warmup-req={warm_req},hint={hint},out={out}" > /dev/null 2>&1')
+       f'warmup-req={warm_req},hint={hint}{extra},out={out}" > /dev/null 2>&1')
     t = json.load(open(out + ".json"))["total"]
     return t["ohr"], 1 - t["bmr"]
 
@@ -70,6 +75,7 @@ def main():
         else: spec.append(a[i]); i += 1
     n = int(opt.get("n", 20_000_000)); f = opt.get("f", "0.05,0.1,0.2,0.3"); g = opt.get("g")
     sizes = [size(s.split(":")[0]) for s in spec]
+    share = [float(s.split(":")[2]) for s in spec]; share = [x / sum(share) for x in share]  # クラスの要求の割合
     tr = f"{name}.bin"
     os.makedirs(f"{HOME}/o", exist_ok=True)
     sh(f"./synth_gen {tr} {n} 1 {' '.join(spec)} -S")
@@ -88,6 +94,20 @@ def main():
                 for ev, nm in (("lru", "rlru"), ("fifo", "rfifo")):
                     if nm == "rfifo" and v == "2": continue
                     jobs[fk, f"{nm}[{v}]"] = ex.submit(rf, tr, C, R, ev, h, warm_req, f"{name}_{fk}_{nm}{v}")
+            h1 = hints[1][1]
+            for p in ("rpartO", "rpartB"):  # Region LRU の静的分割：クラスごとの部分トレース
+                if f"{p}[1]" not in m: continue
+                for k, ck in enumerate(m[f"{p}[1]"]["Cg"].split(",")):
+                    jobs[fk, f"{p}{k}"] = ex.submit(rf, f"{tr}.c{k}", float(ck), R, "lru", "none",
+                                                    int(warm_req * share[k]), f"{name}_{fk}_{p}{k}")
+            if "rpartB[1]" in m:  # 同じ配分を全体のトレースで下限として与える：自然な配分より多く要る分類に掛ける
+                opt = [float(x) / C for x in m["rpartB[1]"]["Cg"].split(",")]
+                nat = [float(x) for x in m["rlru[1]"]["Ck"].split(",")]
+                fc = max(range(len(opt)), key=lambda k: opt[k] - nat[k])
+                jobs[fk, "rfloorB[1]"] = ex.submit(rf, tr, C, R, "lru", h1, warm_req, f"{name}_{fk}_rfloorB1",
+                                                   f",region-params=fc={fc}/ff={min(opt[fc], 0.99):.3f}")
+            jobs[fk, "rautoB[1]"] = ex.submit(rf, tr, C, R, "lru", h1, warm_req, f"{name}_{fk}_rautoB1",
+                                              ",region-params=auto=1/w=0")
     S = {}
     for (fk, nm), j in jobs.items():
         S.setdefault(fk, {})[nm] = j.result()
@@ -97,16 +117,26 @@ def main():
         s["part[1]"] = (sum(p[0] * p[1] for p in parts) / req,
                         sum(p[0] * sz * p[2] for p, sz in zip(parts, sizes)) / byt)
         s["lru"] = s["lru"][1:]
+        bw = [a * b for a, b in zip(share, sizes)]
+        for p in ("rpartO", "rpartB"):  # 区画の結果を要求の割合・バイトの割合で足し合わせる
+            ks = sorted(x for x in list(s) if x.startswith(p) and x[len(p):].isdigit())
+            if ks:
+                r = [s.pop(x) for x in ks]
+                s[f"{p}[1]"] = (sum(share[k] * r[k][0] for k in range(len(r))),
+                                sum(bw[k] * r[k][1] for k in range(len(r))) / sum(bw))
     json.dump({"name": name, "spec": spec, "group": g, "model": M, "sim": S},
               open(f"{HOME}/{name}.json", "w"), indent=1)
     for fk in M:
         print(f"f={fk}")
-        for nm in ("lru", "part[1]", "rfifo[0]", "rfifo[1]", "rlru[0]", "rlru[1]", "rlru[2]"):
-            mk = "rfifo" if nm.startswith("rfifo") else nm
+        for nm in ("lru", "part[1]", "rfifo[0]", "rfifo[1]", "rlru[0]", "rlru[1]", "rlru[2]",
+                   "rpartO[1]", "rpartB[1]", "rfloorB[1]", "rautoB[1]"):
+            mk = "rfifo" if nm.startswith("rfifo") else "rpartB[1]" if nm == "rfloorB[1]" else nm
             if nm in S[fk] and mk in M[fk]:
                 mo, mb = float(M[fk][mk]["ohr"]), float(M[fk][mk]["bhr"])
                 so, sb = S[fk][nm]
                 print(f"  {nm:9s} OHR model {mo:.4f} sim {so:.4f} ({so - mo:+.4f})   BHR model {mb:.4f} sim {sb:.4f} ({sb - mb:+.4f})")
+            elif nm in S[fk]:
+                print(f"  {nm:9s} OHR sim {S[fk][nm][0]:.4f}   BHR sim {S[fk][nm][1]:.4f}")
 
 
 main()

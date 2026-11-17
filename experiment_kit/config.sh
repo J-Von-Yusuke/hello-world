@@ -78,7 +78,15 @@ TUNE_JOBS=(
   # C 分類の数（2 / 3 / 4）
   "k3_lru_auto|$ST3,region-evict=lru,$REA" "k4_lru_auto|$ST4,region-evict=lru,$REA"
   "k3_mv0.3_auto|$ST3,region-evict=mv,region-params=w=0.3,$REA" "k4_mv0.3_auto|$ST4,region-evict=mv,region-params=w=0.3,$REA"
+  # E 名簿（ghost）の分類：追い出してすぐ戻ってきた物を別の Region へ。frac = 名簿の長さ ÷ SSD にいる物の数
+  #   （docs/Che-sim/ghost_class_check.html。大きさとも分けるなら hint=ghost:frac=0.3/tau=<τ>）
+  "ghost0.1|hint=ghost:frac=0.1,region-evict=lru" "ghost0.3|hint=ghost:frac=0.3,region-evict=lru"
+  "ghost1|hint=ghost:frac=1,region-evict=lru"
 )
+# ---- Zipf の傾きと分類の利得（che。付録 §N.5）--------------------------------------
+CHE_TAUS=${CHE_TAUS:-"16K 64K 256K 1M 4M"}   # Che 近似で試す分類の閾値の組（空白区切り。1 組に複数の τ はカンマ: "64K,1M"）。tune の st_lru の τ は自動で足す
+CHE_W=${CHE_W:-0.03,0.1,0.3,1}              # 目的 J = BHR + w·OHR の w（静的分割の最適を w ごとに出す）
+CHE_SIM=${CHE_SIM:-1}                       # 1 = RegionFlash も回す（容量の取り分の時系列と、固定された Region の記録。tune の none/obj があれば使う）
 TUNE_W=${TUNE_W:-0.3}                      # 図で「良い構成」を選ぶ目的 BHR + w·OHR の w（mv の w と同じ意味）
 TUNE_SYNTH=${TUNE_SYNTH:-"r95to5:1K:4194304:0.95:0.9,512K:25600:0.05:0.9 r3to1:1K:4194304:0.75:0.9,512K:25600:0.25:0.9"}
 TUNE_SYNTH_N=${TUNE_SYNTH_N:-60000000}     # 合成トレースの長さ（1/64 縮小 SSD: 3.75 GiB、R = 4 MiB、chunk 16 KiB、DRAM なし）
@@ -98,6 +106,10 @@ PAPER_JOBS=(
   "ru_base|hint=none,region-evict=lru,reinsert=hits:n=1"
   "ru_ff90_h3|hint=split_threshold,region-evict=lru,region-params=fc=1/ff=0.9,reinsert=hits:n=3"
   "ru_auto|hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1,reinsert=hits:n=auto/target=0.5"
+  # 目的を BMR だけにした自動（w=0。*_auto は BHR + 0.1·OHR）。Region 単位の静的分割のモデルでは、
+  # BHR 最適な配分は OHR 寄りの配分より大物に多く配る（appendix §O）。差が出るかを見る。既にある結果は回さない
+  "r256_auto_w0|region-size=$PAPER_R256,hint=split_threshold,region-evict=lru,region-params=auto=1/w=0,reinsert=hits:n=auto/target=0.5"
+  "ru_auto_w0|hint=split_threshold,region-evict=lru,region-params=auto=1/w=0,reinsert=hits:n=auto/target=0.5"
   # 切り分け: 分類なしで再挿入の閾値の自動化（n=auto）だけ。*_auto との差が「分類＋下限」の効果
   "ru_none_auto|hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"
   "r256_none_auto|region-size=$PAPER_R256,hint=none,region-evict=lru,reinsert=hits:n=auto/target=0.5"

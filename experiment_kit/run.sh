@@ -8,6 +8,8 @@
 #   ./run.sh tune [name..]      自動推定の実験（分類閾値 × 容量の配分 × 再挿入の閾値。TUNE_JOBS）→ work/tune/
 #   ./run.sh tune-synth         同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷での確認）
 #   ./run.sh tune-figs          tune の図だけ作り直す → work/tune/figs/
+#   ./run.sh che [name..]       Zipf の傾きと分類の利得（付録 §N.5：上限・静的分割の予測・容量の取り分・固定された Region）→ work/che/
+#   ./run.sh che-report         che の表と図だけ作り直す → work/che/report.html
 #   ./run.sh paper [name..]     論文用の比較（Region 256 MiB / RU × 方式 3 通り。PAPER_JOBS）→ work/paper/（図 1 枚・表 1 つ）
 #   ./run.sh paper-figs         paper の図と表を全部作り直す（paper、あれば ext と robust も）
 #   ./run.sh paper-ext [name..] CacheLib の n=0・n=3 を追加で回す（PAPER_EXT_JOBS）→ work/paper/ext/（図と表も）。既にある結果は回さない
@@ -66,6 +68,7 @@ setup() {
   gcc -O2 -o "$B/og_sat_ops" "$s/og_sat_ops.c" -lzstd &&
   gcc -O2 -o "$B/og_sample" "$s/og_sample.c" -lzstd &&
   gcc -O3 -march=native -pthread -o "$B/og_trace_stats" "$s/og_trace_stats.c" -lzstd -lm &&
+  gcc -O3 -march=native -o "$B/og_che" "$s/og_che.c" -lzstd -lm &&
   gcc -O3 -march=native -o "$WORK/synth/synth_gen" "$s/synth_gen.c" -lm &&
   gcc -O3 -march=native -o "$WORK/synth/synth_model" "$s/synth_model.c" -lm || die "C ツールのコンパイル失敗（libzstd-dev が要る）"
   log "setup OK: $CACHESIM"
@@ -229,14 +232,15 @@ tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <
   tr "\n" "\0" < "$J" | xargs -0 -P "$p" -I{} bash -c "{}"
   python3 "$KIT/py/tune_one.py" "$O" > "$ROOT/$1.json" || log "$1: 要約に失敗"
 }
-tune_one() {  # name path fmt params category source ssd: validity と同じ SSD・DRAM・Region で、主の変種（SAT_VARIANTS の先頭）だけ
-  local name=$1 path=$2 fmt=$3 params=$4 ssd=$7 tr=$WORK/traces/$1.zst
-  [ -r "$path" ] || { log "$name: $path が読めない。飛ばす"; return; }
-  prep_trace "$name" "$path" "$fmt" "$params"
-  local O=$WORK/out/$name; mkdir -p "$O"
+trace_cfg() {  # trace_cfg <name> <path> <fmt> <params> <ssd指定>: tune / che 共通。validity と同じ SSD・DRAM・Region で、主の変種（SAT_VARIANTS の先頭）
+  # 結果は呼んだ側の local に入れる: tr var TP SENV fp SSD DRAM R CH u（呼ぶ側で local 宣言しておく）
+  local name=$1 O=$WORK/out/$1
+  tr=$WORK/traces/$1.zst
+  prep_trace "$name" "$2" "$3" "$4"
+  mkdir -p "$O"
   [ -s "$O/info.json" ] || "$B/og_info" "$tr" > "$O/info.json" || die "$name: og_info 失敗"
   # 変種は validity の主結果と同じ（SAT=auto なら埋め値があるとき SAT_VARIANTS の先頭、指定があればその先頭）
-  local var=asis TP="" SENV=""
+  var=asis TP="" SENV=""
   if [ "$SAT" = auto ]; then [ "$(jq1 "$O/info.json" sat_reqs)" -gt 0 ] && var=${SAT_VARIANTS%% *}; else var=${SAT%% *}; fi
   case $var in drop|delete) TP="-t $var-obj-size=$SAT_VALUE"; SENV="SAT_DROP=$SAT_VALUE SAT_OP=$var";; esac
   if [ "$var" = fix ]; then
@@ -247,13 +251,20 @@ tune_one() {  # name path fmt params category source ssd: validity と同じ SSD
   # フットプリントは埋め値（size = SAT_VALUE）を除いて数えた、その変種の info.json（validity と共用）
   mkdir -p "$O/$var"
   [ -s "$O/$var/info.json" ] || env $SENV "$B/og_info" "$tr" > "$O/$var/info.json" || die "$name: og_info 失敗"
-  local fp SSD DRAM R CH; fp=$(jq1 "$O/$var/info.json" footprint)
+  fp=$(jq1 "$O/$var/info.json" footprint)
   fp=$(awk -v f="$fp" -v k="${TR_AMP_KEY:-1}" -v a="${TR_AMP_SIZE:-1}" 'BEGIN{printf "%.0f", f * k * a}')   # 増幅したトレースのフットプリント
-  SSD=$(ssd_bytes "$ssd" "$fp"); DRAM=$((SSD / DRAM_DIV))
+  SSD=$(ssd_bytes "$5" "$fp"); DRAM=$((SSD / DRAM_DIV))
   R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}; [ $R -lt 1048576 ] && R=1048576
   CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
+  u=$(awk -v n="$(jq1 "$O/$var/info.json" uniq)" -v k="${TR_AMP_KEY:-1}" 'BEGIN{printf "%.0f", n * k}')   # amp_key 倍の物（メモリも K 倍）
+}
+tune_one() {  # name path fmt params category source ssd: validity と同じ SSD・DRAM・Region で、主の変種（SAT_VARIANTS の先頭）だけ
+  local name=$1 path=$2 tr var TP SENV fp SSD DRAM R CH u
+  [ -r "$path" ] || { log "$name: $path が読めない。飛ばす"; return; }
+  trace_cfg "$name" "$path" "$3" "$4" "$7"
   log "tune $name/$var: footprint=$fp SSD=$SSD DRAM=$DRAM R=$R chunk=$CH amp_key=${TR_AMP_KEY:-1} amp_size=${TR_AMP_SIZE:-1} marks=${TR_MARKS:-}"
-  local pe; pe=($(auto_p "$(jq1 "$O/$var/info.json" uniq)" "$fp" "$SSD" "$DRAM"))   # validity と同じメモリの見積り（meta は P≤4）
+  local pe; pe=($(auto_p "$u" "$fp" "$SSD" "$DRAM"))   # validity と同じメモリの見積り（meta は P≤4）
+  log "tune $name/$var: 物 $u、同時実行 P=${TUNE_P:-${pe[0]}}（1 本の見積り ${pe[1]} GB、空き ${pe[2]} GB）"
   TUNE_P=${TUNE_P:-${pe[0]}} tune_run "$name" "$tr" "$SSD" "$DRAM" "$R" "$CH" "$TP" ""
   python3 - "${RUN_ROOT:-$WORK/tune}/$name.json" "$5" "$6" "$var" "${TR_AMP_KEY:-1}" "${TR_AMP_SIZE:-1}" "${TR_MARKS:-}" <<'EOF'
 import json, sys; d = json.load(open(sys.argv[1]))
@@ -261,6 +272,49 @@ d.update(category=sys.argv[2], source=sys.argv[3], variant=sys.argv[4], amp_key=
 json.dump(d, open(sys.argv[1], "w"))
 EOF
 }
+# ---------------------------------------------------------------- Zipf の傾きと分類の利得（che。付録 §N.5）
+che_one() {  # name path fmt params category source ssd → work/che/<name>.json
+  local name=$1 path=$2 tr var TP SENV fp SSD DRAM R CH u O=$WORK/che/$1 T=$WORK/tune/$1
+  [ -r "$path" ] || { log "$name: $path が読めない。飛ばす"; return; }
+  trace_cfg "$name" "$path" "$3" "$4" "$7"
+  mkdir -p "$O"
+  # (3)(4) RegionFlash：分類なし・split_threshold（Region の寿命と終了時の Region を記録）。tune に none があればそれを使う。
+  # (1) の上限は libCacheSim の素の LRU（SSD と同じ容量、DRAM なし。Che の予測と同じ条件）
+  if [ "$CHE_SIM" = 1 ]; then
+    local n iv E J=$O/jobs.txt id spec d ev; n=$(jq1 "$WORK/out/$name/$var/info.json" n); iv=$(( n / 400 )); [ $iv -lt 10000 ] && iv=10000
+    E="dram-size=$DRAM,chunk=$CH,dram-algo=lru,inclusion=cachelib,seal-on-repartition=inactive,seed=1,interval=$iv"
+    [ "${TR_AMP_KEY:-1}" != 1 ] && E="$E,amp-key=$TR_AMP_KEY"; [ "${TR_AMP_SIZE:-1}" != 1 ] && E="$E,amp-size=$TR_AMP_SIZE"
+    : > "$J"
+    for id in none st_lru; do
+      case $id in
+        none) spec="$E,region-size=$R,hint=none,region-evict=lru";;
+        st_lru) spec="$E,region-size=$R,hint=split_threshold,region-evict=lru";;
+      esac
+      [ "$id" = none ] && [ -f "$T/none/P.json" ] && continue   # tune の結果を使う（st_lru は記録が要るので回す）
+      d=$O/$id ev=""; [ "$id" = st_lru ] && ev="RF_EVLOG=$d/evlog RF_ENDDUMP=$d/enddump"
+      echo "[ -f $d/P.json ] || { mkdir -p $d && env $ev $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$spec,out=$d/P\" > $d/stdout 2>&1 || echo FAIL $d; }" >> "$J"
+    done
+    # 増幅つきのトレースでは素の LRU は回さない（cachesim の lru は amp を知らない）
+    [ "${TR_AMP_KEY:-1}" = 1 ] && [ "${TR_AMP_SIZE:-1}" = 1 ] &&
+      echo "[ -s $O/lru/res ] || { mkdir -p $O/lru && $CACHESIM $tr oracleGeneral lru $SSD ${NREQ:+-n $NREQ} $TP > $O/lru/stdout 2>&1 && grep 'byte miss ratio' $O/lru/stdout | tail -1 > $O/lru/res || echo FAIL $O/lru; }" >> "$J"
+    local pe; pe=($(auto_p "$u" "$fp" "$SSD" "$DRAM"))
+    log "che $name/$var: RegionFlash $(wc -l < "$J") 本を P=${pe[0]} で（SSD=$SSD R=$R）"
+    tr "\n" "\0" < "$J" | xargs -0 -P "${pe[0]}" -I{} bash -c "{}"
+    echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"n\":$n,\"interval\":$iv,\"nreq_limit\":\"$NREQ\"}" > "$O/config.json"
+  fi
+  # (1)(2) Che 近似の予測（物単位 LRU と静的分割。Region は入らない）。分類の閾値は CHE_TAUS と、split_threshold が最後に使った τ
+  local targs=() t st f; for t in $CHE_TAUS; do targs+=(-t "$(numfmt --from=iec ${t//,/ } | paste -sd,)"); done
+  for f in "$O/st_lru/P.json" "$T/st_lru/P.json"; do
+    st=$(python3 -c "import json; print(','.join(str(x) for x in json.load(open('$f'))['config'].get('taus') or []))" 2>/dev/null) && break
+  done
+  [ -n "$st" ] && [[ " ${targs[*]} " != *" $st "* ]] && targs+=(-t "$st")   # 同じ組は 1 度だけ
+  # 増幅（amp_key K・amp_size F）は「容量 ÷ (K·F) の元のトレース」と同じ（λ が 1/K、物が K 倍・大きさが F 倍）
+  local Cm; Cm=$(awk -v s="$SSD" -v k="${TR_AMP_KEY:-1}" -v a="${TR_AMP_SIZE:-1}" 'BEGIN{printf "%.0f", s / k / a}')
+  [ -s "$O/che.json" ] || { log "che $name: og_che（容量 $Cm、閾値 ${targs[*]}）"; env $SENV "$B/og_che" -C "$Cm" -w "$CHE_W" "${targs[@]}" "$tr" > "$O/che.json" || die "$name: og_che 失敗"; }
+  python3 "$KIT/py/che_one.py" "$O" "$T" "$name" "$5" "$6" "$var" "$TUNE_W" > "$WORK/che/$name.json" || log "che $name: 要約に失敗"
+}
+che_report() { python3 "$KIT/py/che_report.py" "$WORK/che" "$@"; }
+
 tune_synth() {  # 合成の 95:5 と 3:1（1/64 縮小の SSD）。答え（固定の下限の最良）が分かっている負荷で、自動推定が届くかを見る
   local S=$WORK/synth w name spec av
   if [ -z "${TUNE_P:-}" ]; then   # 1 本 約 1.6〜1.9 GB（6,000 万要求の実測）→ 2.5 GB と見て、空きメモリでも抑える
@@ -310,10 +364,12 @@ case $cmd in
   tune) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/tune"; each_trace tune_one "$@"; tune_figs ;;
   tune-synth) need_build; mkdir -p "$WORK/tune"; tune_synth; tune_figs ;;
   tune-figs) tune_figs "$@" ;;
+  che) check >/dev/null || { check; die "traces.tsv を直す"; }; [ "$CHE_SIM" = 1 ] && need_build; [ -x "$B/og_che" ] || setup; mkdir -p "$WORK/che"; each_trace che_one "$@"; che_report ;;
+  che-report) che_report "$@" ;;
   paper) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper"; RUN_JOBS=PAPER_JOBS RUN_ROOT=$WORK/paper each_trace tune_one "$@"; paper_figs ;;
   paper-figs) paper_figs "$@" ;;
   paper-robust) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/robust"; RUN_JOBS=PAPER_ROBUST_JOBS RUN_ROOT=$WORK/paper/robust each_trace tune_one "$@"; python3 "$KIT/py/paper_check.py" "$WORK" --robust; paper_figs --robust ;;
   paper-ext) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/ext"; RUN_JOBS=PAPER_EXT_JOBS RUN_ROOT=$WORK/paper/ext each_trace tune_one "$@"; paper_figs --ext ;;
   all) setup && check && each_trace validity_one && synth && aggregate ;;
-  *) sed -n '2,9p' "$0" ;;
+  *) sed -n '2,19p' "$0" ;;
 esac

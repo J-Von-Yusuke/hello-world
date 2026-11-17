@@ -1,6 +1,6 @@
 /* synth_model.c — synth_gen と同じ指定の IRM 負荷に対する Che 型の予測。
  *
- *   synth_model [-R region] [-f f1,f2,..] [-g 0,0,1] [-S samples] size:nobj:share:alpha ...
+ *   synth_model [-R region] [-f f1,f2,..] [-g 0,0,1] [-S samples] [-P steps] size:nobj:share:alpha ...
  *     -f  容量 = 足跡 × f（既定 0.05,0.1,0.2,0.3）  -R  Region の大きさ（既定 容量/256）
  *     -g  サイズのクラス → 分類の対応を 1 つ足す（既定で「分けない」と「クラスごと」を出す）
  *
@@ -12,7 +12,10 @@
  *   各分類 g について
  *   part[g]     物単位 LRU を分類で静的に分割、OHR 最適（限界ヒット/バイトをそろえる）
  *   partB[g]    同じく BHR 最適
- *   rlru[g]     Region LRU、分類ごとの Region
+ *   rlru[g]     Region LRU、分類ごとの Region（1 本の LRU を共有。配分は自然に決まる）
+ *   rpartO/rpartJ/rpartB[g]  Region LRU を分類ごとに別々に持たせ（静的分割）、容量を
+ *               OHR / BHR + 0.1·OHR / BHR が最大になるように配る。分類 g の曲線（容量 → ヒット）を
+ *               容量の格子（-P 刻み、既定 20）で解き、動的計画法で配分を選ぶ（凹性を仮定しない）
  * Region LRU：Region は最後の touch（封じた時・SSD ヒット）から T 経つと追い出される（Che）。
  * touch の率 Λ は中の物の要求率の和。寿命 L = (e^{ΛT}−1)/Λ = ∫_0^T e^{Λt}dt。物 i が入った
  * Region の期待寿命 L_i = ∫_0^T e^{λ_i t} E[Π_j e^{λ_j t}] dt（同居の物 j は同じ分類の挿入の流れ
@@ -94,7 +97,8 @@ static int NOU;        // 診断 NOU=1：封じるまでの待ちを入れない
 static double HOR, *pin, PINB[KMAX];
 static int NOBJ, NREG, NPIN, *obin, *oreg;
 static double *rlam, *rfill;
-#define CE(i) (B[i].c - pin[i])  // 定常モデルで扱う物の数
+static int ONLY = -1;  // ≥ 0：分類 ONLY の物だけでキャッシュを解く（静的分割の 1 区画）
+#define CE(i) (ONLY >= 0 && GR[B[i].k] != ONLY ? 0 : B[i].c - pin[i])  // 定常モデルで扱う物の数
 typedef struct { double t; int b; } fr_t;
 static int cmp_fr(const void *a, const void *b) { double x = ((fr_t *)a)->t - ((fr_t *)b)->t; return (x > 0) - (x < 0); }
 static void coldstart(double C) {  // 初回の要求の順に、分類ごとの Region に詰める（容量が埋まるまで）
@@ -296,7 +300,8 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
 static double region_solve(double C, int lru, double *ohr, double *bhr, double *occ_k) {
   double lo, hi;
   memset(pin, 0, NB * sizeof(double)), memset(PINB, 0, sizeof PINB), NPIN = 0;
-  if (lru && HOR > 0) coldstart(C);
+  int hor = lru && HOR > 0 && ONLY < 0;  // 静的分割の区画では立ち上がりの隔離を入れない
+  if (hor) coldstart(C);
   for (int outer = 0, last = -1; outer < 8; outer++) {  // T → 不死の集合 → T … が止まるまで
     lo = -5, hi = 40;
     if (TFIX && lru) lo = hi = log(TFIX);
@@ -304,7 +309,7 @@ static double region_solve(double C, int lru, double *ohr, double *bhr, double *
       double m = (lo + hi) / 2;
       if (region(exp(m), lru, ohr, bhr, occ_k) < C) lo = m; else hi = m;
     }
-    if (!(lru && HOR > 0)) break;
+    if (!hor) break;
     int np = pins(exp((lo + hi) / 2));
     if (np == last) break;
     last = NPIN = np;
@@ -313,6 +318,46 @@ static double region_solve(double C, int lru, double *ohr, double *bhr, double *
   if (lru && getenv("DUMP"))  // 診断：ビンごとの (クラス, 物の数, λ, 在籍率)
     for (int i = 0; i < NB; i++) fprintf(stderr, "B %d %g %.4e %.5f\n", B[i].k, B[i].c, B[i].lam, pres[i]);
   return exp((lo + hi) / 2);
+}
+/* Region LRU の静的分割：分類 g に容量 m·C/P（m = 0..P）を与えた区画を単独で解き、
+ * 目的 a·BHR + b·OHR の和が最大になる (m_g)（Σ m_g = P）を動的計画法で選ぶ */
+static int P = 20;
+static void rpart(double C, int ng, int v) {
+  static double oh[KMAX][201], bh[KMAX][201];
+  double ck[KMAX];
+  for (int g = 0; g < ng; g++) {
+    double foot = 0, ho = 0, hb = 0;
+    for (int i = 0; i < NB; i++)
+      if (GR[B[i].k] == g) foot += B[i].c * B[i].s, ho += B[i].c * B[i].lam, hb += B[i].c * B[i].lam * B[i].s / TB;
+    oh[g][0] = bh[g][0] = 0;
+    ONLY = g;
+    for (int m = 1; m <= P; m++)
+      if (C * m / P >= foot) oh[g][m] = ho, bh[g][m] = hb;  // 区画が分類の全部を持てる
+      else region_solve(C * m / P, 1, &oh[g][m], &bh[g][m], ck);
+    ONLY = -1;
+  }
+  const char *nm[3] = {"rpartO", "rpartJ", "rpartB"};
+  const double wa[3] = {0, 1, 1}, wb[3] = {1, 0.1, 0};
+  for (int o = 0; o < 3; o++) {
+    double best[KMAX + 1][201];
+    int ch[KMAX][201], m[KMAX];
+    for (int r = 0; r <= P; r++) best[0][r] = r ? -INFINITY : 0;
+    for (int g = 0; g < ng; g++)
+      for (int r = 0; r <= P; r++) {
+        best[g + 1][r] = -INFINITY;
+        for (int x = 0; x <= r; x++) {
+          double v = best[g][r - x] + wa[o] * bh[g][x] + wb[o] * oh[g][x];
+          if (v > best[g + 1][r]) best[g + 1][r] = v, ch[g][r] = x;
+        }
+      }
+    double so = 0, sb = 0;
+    for (int g = ng - 1, r = P; g >= 0; r -= m[g], g--) m[g] = ch[g][r], so += oh[g][m[g]], sb += bh[g][m[g]];
+    char t[32];
+    snprintf(t, sizeof t, "%s[%d]", nm[o], v);
+    printf("  %-9s ohr=%.4f bhr=%.4f Cg=", t, so, sb);
+    for (int g = 0; g < ng; g++) printf("%.0f%s", C * m[g] / P, g < ng - 1 ? "," : "");
+    printf("\n");
+  }
 }
 static void put_hk(const char *nm, double o, double b, double T, const double *ck, double C, const double *sh) {
   printf("  %-9s ohr=%.4f bhr=%.4f T=%.0f Ck=", nm, o, b, T);
@@ -338,6 +383,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[a], "-S")) S = atoi(argv[++a]);
     else if (!strcmp(argv[a], "-c")) CV = strcmp(argv[++a], "auto") ? atof(argv[a]) : -1;
     else if (!strcmp(argv[a], "-H")) HOR = atof(argv[++a]);
+    else if (!strcmp(argv[a], "-P")) P = atoi(argv[++a]) > 200 ? 200 : atoi(argv[a]);  // 0 = 静的分割を解かない
     else if (!strcmp(argv[a], "-f")) { nf = 0; for (char *t = strtok(argv[++a], ","); t; t = strtok(NULL, ",")) fr[nf++] = atof(t); }
     else if (!strcmp(argv[a], "-g")) { int k = 0; for (char *t = strtok(argv[++a], ","); t; t = strtok(NULL, ",")) grs[2][k++] = atoi(t); ngr = 3; }
     else { char *p = argv[a]; SZ[K] = parse_size(strtok(p, ":")); no[K] = strtoull(strtok(NULL, ":"), NULL, 10);
@@ -399,6 +445,7 @@ int main(int argc, char **argv) {
       T = region_solve(C, 1, &o, &b, ck);
       snprintf(nm, sizeof nm, "rlru[%d]", v);
       put_hk(nm, o, b, T, ck, C, sh);
+      if (v && P > 0) rpart(C, ng, v);
     }
     fflush(stdout);
   }

@@ -12,6 +12,7 @@ traces.tsv ─┐                       ┌→ work/results/<name>.<変種>.json
 config.sh  ─┼→ run.sh validity ─────┤
             │                       └→ work/out/<name>/<変種>/…（cachesim の生の出力）
 synth_workloads.txt → run.sh synth → work/synth/*.json
+traces.tsv → run.sh che → work/che/report.html, che_summary.csv（Zipf の傾きと分類の利得。§6.4）
                                       ↓
                        run.sh aggregate → work/results/report.html, per_trace.csv, by_*.csv, synth_summary.csv
                                           work/results/figs/  スライド用の図（SVG・PNG）、説明（index.html・captions.md）、slides.pptx
@@ -176,6 +177,7 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU（既定 = CPU 
 | `work/results/by_category.csv` ほか | グループごとの統計（長い形式: group, metric, n, mean, median, min, max, n_positive, n_negative, traces） |
 | `work/results/<name>.<変種>.json` | 1 本の詳細（先頭 N の曲線を含む） |
 | `work/results/synth_summary.csv` | 合成負荷の理論と実測（OHR/BHR） |
+| `work/synth/<負荷>.json` | 1 負荷の理論（`model`）と実測（`sim`）。11-17 から Region LRU の静的分割も入る：`rpartO[1]` / `rpartB[1]`（クラスごとの部分トレースを RegionFlash で、容量はモデルの OHR 最適 / BMR 最適な配分）、`rfloorB[1]`（同じ BMR 最適な配分を全体のトレースで下限として与える）、`rautoB[1]`（下限の山登り、目的 BMR だけ）。モデルが 1 容量あたり Region LRU を 40 回ほど解くので、1 負荷 × 4 容量で 20〜30 分かかる。前の版の `<負荷>.json` があると飛ばすので、消してから `./run.sh synth` |
 | `work/out/<name>/<変種>/<id>/` | cachesim の生の出力（`P.json` `P.interval.csv` `P.class.csv` `P.sizebin.csv`） |
 | `work/results/figs/` | **スライド用の図と説明**（§6.1） |
 
@@ -230,6 +232,7 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU（既定 = CPU 
 |---|---|---|
 | 分類閾値（1〜3 個） | `hint=split_threshold` / `st_hr_refine:k_max=3` / `st_recursive:depth=2` | 書いた物の大きさの分布から SplitThreshold が決め直す（既存） |
 | 分類閾値（目的から） | `hint=mini:M=64/w=0.1` | 物の 1/M を τ の候補（各オクターブと分割なし）ごとの影の Region LRU に流し、目的が最大の τ を採る（縮小シミュレーション）。Meta で最良の固定 τ に −0.19pt（SplitThreshold は −0.96pt）。途中で τ を切り替えると効果が出きらない場合がある（w01）。影の分だけメモリが増える |
+| 熱/冷の分類（名簿） | `hint=ghost:frac=0.3`（大きさとも分けるなら `/tau=<τ>`） | SSD から追い出した物の ID を名簿に残し（長さ = frac × SSD にいる物の数）、ミスして書く物が名簿に載っていれば別の分類（実績あり）の Region へ。同じ設定の全量トレースで、分類なしより BMR が Meta −0.23pt・Tencent −1.8pt・w01 −0.4pt、書き込み −0.6〜−4.7%。最良の固定 τ と重ねると Tencent −2.3pt・w01 −4.0pt。名簿の分だけメモリが増える（w01 で frac=1 なら約 4,100 万件・約 1.6 GB）。Tencent はブロックトレース |
 | 容量の配分（本命） | `region-evict=lru,region-params=auto=1/w=<重み>` | 大物の下限 ff を、N 回の追い出しごとに測った目的 BHR + w·OHR が上がる向きへ 0.02 ずつ動かす（山登り）。出発点は大物が受け入れたバイトの割合 |
 | 容量の配分（比較用） | `region-evict=mv,region-params=w=<重み>` | 分類ごとの LRU 末尾のヒット密度が最も低い分類から追い出す。1 Region に物が多い分類では末尾が冷えず限界値を誤る（合成 95:5 で −2.6pt） |
 | 再挿入の閾値 | `reinsert=hits:n=auto/target=0.5/eps=0.02` | 分類ごと・ヒット回数 h ごとに「書き直した物が次の滞在でまた当たった割合」を数え、target を越える最小の h を n にする |
@@ -258,6 +261,49 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU（既定 = CPU 
 
 分類は多くても 4 つ（閾値 3 個）まで: 分類ごとに書き込み中の Region（FDP なら RU）が要り、書き込み先が散るほど各 Region の書き込み速度が落ちて開いたままの時間が延び、空きも増えるため。
 
+## 6.4 Zipf の傾きと分類の利得（che）
+
+「Zipf の傾きが小さいトレースでは分類で改善し、大きいトレースでは混ぜた方が良い」という観察を、モデル（`docs/Che-sim/region_model_appendix.html` §N）の筋で説明できるかを、トレースごとに 4 項目で確かめる。
+
+```bash
+./run.sh che                 # traces.tsv の全部（tune を先に回してあれば、その none と split_threshold の τ を使う）
+./run.sh che wiki_cdn        # 一部だけ
+./run.sh che-report          # 表と図だけ作り直す
+CHE_SIM=0 ./run.sh che       # RegionFlash を回さず、Che の予測だけ（数十秒/本）
+```
+
+| 項目 | 何を出すか | どこから |
+|---|---|---|
+| (1) 上限 | 物単位 LRU のミス率。分類で取り返せる OHR はこれより多くない | Che の予測（`og_che`）と、cachesim の素の `lru`（SSD と同じ容量、DRAM なし） |
+| (2) 静的分割の予測 | 分けたときの OHR/BHR、OHR・BHR・J 最適な容量の取り分、Zipf の傾き（全体・分類ごと） | `og_che`：物ごとの（大きさ, 要求回数）から λ = 回数 ÷ 全要求として Che 近似（IRM）で解く。Region の効果は入らない |
+| (3) 容量の取り分 | split_threshold の Region LRU で、分類ごとの生きている Region の割合の時系列と後半の平均 | RegionFlash の `P.interval.class.csv`（封じた − 追い出した） |
+| (4) 固定された Region | 終了時に残っている Region のうち、トレースの先頭 10%・50% に封じたものの割合。追い出した Region の寿命（トレース長に対する分位） | RegionFlash を `RF_EVLOG`・`RF_ENDDUMP` つきで回す |
+
+出力は `work/che/`：`report.html`（図 6 枚と表）、`che_summary.csv`（1 行 1 トレース）、`<name>.json`（全部）、`<name>/`（`che.json` と RegionFlash の生の出力）。
+
+**report.html の読み方**（ページの冒頭にも書いてある）。α が大きいトレースほど、次の 3 つが揃えば「分類が逆効果」をモデルの筋で説明できる。
+
+1. 上限（素の LRU のミス率）と、静的分割の予測利得が小さい。
+2. Region LRU の自然な小物の取り分が、最適な取り分（対角線）より上にずれる。
+3. 先頭 10% に封じて残った Region が増える。
+
+揃わなければ、独立参照モデルの外（人気の時間変化など）を疑う。「Che − 実測の OHR」が大きく負のトレースは時間局所性が強く、Che の数字（予測利得・最適な取り分）は目安にとどまる。
+
+**設定**（`config.sh`）：
+
+- `CHE_TAUS`：Che で試す分類の閾値。既定 `16K 64K 256K 1M 4M`。split_threshold の τ は自動で足す。
+- `CHE_W`：目的 J = BHR + w·OHR の w。
+- `CHE_SIM`：RegionFlash を回すかどうか。
+
+**注意**
+
+- **SSD 容量**：validity・tune と同じ（`traces.tsv` の `ssd` 列）。Che と素の LRU は SSD の容量だけで、DRAM は入れていない。
+- **Region の数**：Region が少ないと（例: 小さいトレースで R = 626.5 MiB だと十数個）、取り分の時系列と固定された Region の割合が粗くなる。100 個以上が目安。`REGION_BYTES= ./run.sh che` で SSD ÷ `REGION_N` にできる。
+- **τ の丸め**：Che の閾値は 1/4 オクターブの格子に丸める（出力の `taus_eff`）。2 の冪は丸めない。
+- **傾き α の求め方**：順位 r と要求回数 c の両対数の最小二乗。r = 10 から「2 回以上要求された物」の最後の順位までを、1 桁 20 点に間引いて当てる。別の方法で測った傾きとは値がずれうる。
+- **増幅（amp_key・amp_size）つきのトレース**：Che は容量を K·F で割って同じ答えを出す。素の LRU は回さない。
+- **og_che のメモリ**：物 1 個あたり約 50 B（表の倍々拡張の山）。w01（物 1.2 億個）で 6.4 GB、18 秒。
+
 ## 6.3 論文用の比較（paper）：Region を CacheLib の上限と RU で比べる
 
 FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限（256 MiB）より大きい。Region を RU に合わせると DLWA = 1 になるが、Region が大きいぶん道連れと書き直し（アプリ層の GC）が増える。書き込み時のサイズ分類がその増加を抑えるかを、6 構成（`config.sh` の `PAPER_JOBS`）で測る。DLWA は実機と CacheLib で測るので、ここでは測らない。
@@ -265,10 +311,15 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 | id | Region | 方式 |
 |---|---|---|
 | `r256_base`（**基準**） | 256 MiB（`PAPER_R256`） | 分類なし、再挿入 n=1（CacheLib 相当） |
-| `r256_ff90_h3` / `r256_auto` | 256 MiB | サイズ分類＋大物の下限 0.9＋n=3（手動） / 下限の山登り＋n=auto（自動） |
+| `r256_ff90_h3` / `r256_auto` | 256 MiB | サイズ分類＋大物の下限 0.9＋n=3（手動） / 下限の山登り＋n=auto（自動）。山登りの目的は J = BHR + 0.1·OHR（`region-params=auto=1/w=0.1`、BMR + 0.1·MR の最小化と同じ）。手動の 0.9 はコスト式から決めた値ではなく、合成負荷で見た値の決め打ち |
 | `ru_base` | RU = `REGION_BYTES`（既定 656932864 = 626.5 MiB） | 分類なし、再挿入 n=1 |
-| `ru_ff90_h3` / `ru_auto` | RU | 同上の手動 / 自動 |
+| `ru_ff90_h3` / `ru_auto` | RU | 同上の手動 / 自動（目的も同じ J = BHR + 0.1·OHR） |
 | `ru_none_auto` / `r256_none_auto`（切り分け） | RU / 256 MiB | 分類なしで再挿入の閾値の自動化（n=auto）だけ。`*_auto` との差が「分類＋下限」の効果、`*_base` との差が n=auto の効果 |
+| `ru_auto_w0` / `r256_auto_w0`（11-17 追加） | RU / 256 MiB | `*_auto` と同じで、下限の山登りの目的を BMR だけにする（`w=0`。`*_auto` は BHR + 0.1·OHR）。Region 単位の静的分割のモデルでは BMR 最適な配分が大物に寄り、サイズ分類が混在より BMR で勝つ（`../docs/Che-sim/region_model_appendix.html` §O）。実トレースでも差が出るかを見る |
+
+**11-17 に足した 2 構成だけ回す**：`./run.sh paper` は `P.json` のある構成を飛ばすので、そのまま実行すれば `*_auto_w0` だけが走り、図と表は全構成で作り直される。
+
+**11-17 の修正（山登りの OHR の項）**：下限の山登り（`auto=1`）の目的 J の OHR の項が、SSD のヒットだけを数えていた（BHR の項は DRAM と SSD の両方）。DRAM と SSD のヒットの合計に直した（`evict/region_basic.c`・`region_policy.h`・`ssd/rf_region.c`）。`w=0`（`*_auto_w0`）の結果はビット単位で変わらない（確認済み）。`w>0` の `*_auto`（w=0.1）は、DRAM がある構成では前の版と別物になる。揃えて比べるなら、`work/paper/*/ru_auto` と `r256_auto` を消してから `./run.sh paper`（`setup` がパッチの違いを見つけて cachesim を作り直す）。tune の `*hc*` も同様。
 
 **追加の比較（paper-ext）**：CacheLib（R=256 MiB、分類なし）の再挿入なし `r256_n0`・`r256_n2`・`r256_n3`（n=1 は基準 `r256_base`。`config.sh` の `PAPER_EXT_JOBS`）。「書き直しの閾値だけ上げた CacheLib」と比べても、分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。
 

@@ -278,13 +278,13 @@ sj = [j for j in sj if isinstance(j, dict) and "sim" in j]
 if sj:
     H.append("<h2>7. 合成トレースの評価（理論 = Che 型モデル、実測 = cachesim）</h2><p class='m'>OHR / BHR は物ヒット率 / バイトヒット率。分割効果 = サイズ分類 rlru[1] − 分類なし rlru[0]。誤差 = 実測 − 理論（OHR, BHR）。</p>")
     out = open(f"{R}/synth_summary.csv", "w", newline=""); w = csv.writer(out); w.writerow(["workload", "f", "policy", "sim_ohr", "sim_bhr", "model_ohr", "model_bhr"])
-    names = ["lru", "part[1]", "rfifo[0]", "rfifo[1]", "rlru[0]", "rlru[1]", "rlru[2]"]; body = []
+    names = ["lru", "part[1]", "rfifo[0]", "rfifo[1]", "rlru[0]", "rlru[1]", "rlru[2]", "rpartO[1]", "rpartB[1]", "rfloorB[1]", "rautoB[1]"]; body = []
     for j in sj:
         for fk, s in j["sim"].items():
             m = j["model"].get(fk, {}); cells = []
             for nm in names:
                 if nm not in s: cells.append(""); continue
-                mk = "rfifo" if nm.startswith("rfifo") else nm
+                mk = "rfifo" if nm.startswith("rfifo") else "rpartB[1]" if nm == "rfloorB[1]" else nm
                 mo = m.get(mk); w.writerow([j["name"], fk, nm, s[nm][0], s[nm][1], mo["ohr"] if mo else "", mo["bhr"] if mo else ""])
                 cells.append(f'{s[nm][0]:.3f}/{s[nm][1]:.3f}' + (f' <span class="m">({s[nm][0]-float(mo["ohr"]):+.3f}/{s[nm][1]-float(mo["bhr"]):+.3f})</span>' if mo else ""))
             gain = ""

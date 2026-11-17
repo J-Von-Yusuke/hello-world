@@ -8,7 +8,7 @@
   r256_base     Region 256 MiB（CacheLib の上限）・分類なし・再挿入 n=1        ← 基準（いまの CacheLib）
   ru_base       Region = RU（626.5 MiB）・分類なし・再挿入 n=1                ← 上限を外して RU に合わせただけ
   ru_ff90_h3    Region = RU・サイズ分類・大物の下限 0.9・再挿入 n=3（手で調整）  ← 提案
-  ru_auto       Region = RU・サイズ分類（SplitThreshold）・下限の山登り・再挿入 n=auto（全部自動） ← 提案
+  ru_auto       Region = RU・サイズ分類（SplitThreshold）・下限の山登り（目的 J = BHR + 0.1·OHR）・再挿入 n=auto（全部自動） ← 提案
   r256_ff90_h3, r256_auto  同じ方式を 256 MiB で                              ← 分類の効果が Region の大きさによらないか
   ru_none_auto, r256_none_auto  分類なしで再挿入の閾値の自動化（n=auto）だけ     ← 切り分け：*_auto との差が分類＋下限の効果
 指標（図は値そのもの、表は基準との差 = 構成 − 基準）:
@@ -35,7 +35,7 @@ BASE = "r256_base"
 ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto"] if EXT else   # ext: CacheLib の閾値違いと提案
          ["r256_base", "r256_n0", "r256_n2", "r256_n3", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"]
          if COND else   # 条件ごと: その条件で回した構成を全部
-         ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"])   # 図と表に並べる順
+         ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "ru_auto_w0", "r256_none_auto", "r256_ff90_h3", "r256_auto", "r256_auto_w0"])   # 図と表に並べる順
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
     "r256_n0": ("CacheLib n=0（書き直しなし）", "CacheLib n=0 (no rewrite)"),
@@ -45,12 +45,14 @@ NAME = {
     "ru_none_auto": ("R=RU＋n=auto（分類なし）", "R=RU + auto n (no class.)"),
     "r256_none_auto": ("R=256MiB＋n=auto（分類なし）", "R=256MiB + auto n (no class.)"),
     "ru_ff90_h3": ("R=RU＋分類（手動）", "R=RU + class. (manual)"),
-    "ru_auto": ("R=RU＋分類（自動）", "R=RU + class. (auto)"),
+    "ru_auto": ("R=RU＋分類（自動・BHR+0.1·OHR）", "R=RU + class. (auto, BHR+0.1·OHR)"),
     "r256_ff90_h3": ("R=256MiB＋分類（手動）", "R=256MiB + class. (manual)"),
-    "r256_auto": ("R=256MiB＋分類（自動）", "R=256MiB + class. (auto)"),
+    "r256_auto": ("R=256MiB＋分類（自動・BHR+0.1·OHR）", "R=256MiB + class. (auto, BHR+0.1·OHR)"),
+    "ru_auto_w0": ("R=RU＋分類（自動・BHR のみ）", "R=RU + class. (auto, BHR only)"),
+    "r256_auto_w0": ("R=256MiB＋分類（自動・BHR のみ）", "R=256MiB + class. (auto, BHR only)"),
 }
 COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
-       "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a"}
+       "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a", "ru_auto_w0": "#5b3a8c", "r256_auto_w0": "#8c3a5b"}
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
 

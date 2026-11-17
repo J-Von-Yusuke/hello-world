@@ -39,10 +39,10 @@ index 4b36a6f..5c7e5ff 100644
        params->block_size = (int)(strtol(value, &end, 0));
      } else if (strcasecmp(key, "header") == 0 ||
 diff --git a/libCacheSim/cache/CMakeLists.txt b/libCacheSim/cache/CMakeLists.txt
-index 49968ff..34445df 100644
+index 49968ff..e004517 100644
 --- a/libCacheSim/cache/CMakeLists.txt
 +++ b/libCacheSim/cache/CMakeLists.txt
-@@ -71,6 +71,49 @@ set(eviction_sources_c
+@@ -71,6 +71,50 @@ set(eviction_sources_c
          eviction/S3FIFOd.c
          eviction/other/flashProb.c
          eviction/other/S3LRU.c
@@ -67,6 +67,7 @@ index 49968ff..34445df 100644
 +        eviction/flash/hint/basic.c
 +        eviction/flash/hint/split_threshold.c
 +        eviction/flash/hint/mini.c
++        eviction/flash/hint/ghost.c
 +        eviction/flash/hint/split_threshold_req.c
 +        eviction/flash/hint/hitrate.c
 +        eviction/flash/hint/refine.c
@@ -92,7 +93,7 @@ index 49968ff..34445df 100644
  )
  
  # C++ eviction algorithms
-@@ -150,6 +193,7 @@ set(cache_sources_c
+@@ -150,6 +194,7 @@ set(cache_sources_c
      plugin.c
  )
  
@@ -2813,7 +2814,7 @@ index 0000000..212351a
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_basic.c b/libCacheSim/cache/eviction/flash/evict/region_basic.c
 new file mode 100644
-index 0000000..f410223
+index 0000000..6859305
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_basic.c
 @@ -0,0 +1,191 @@
@@ -2833,7 +2834,7 @@ index 0000000..f410223
 +//  (default 4N: a window must outlast the time a large object evicted now
 +//  takes to come back as a miss, or lowering ff looks good because the small
 +//  class's extra hits show at once and the large class's losses only later;
-+//  with win = N the floor ran down to 0.1 on the synthetic 3:1) it measures J = hit bytes / requested bytes + w * SSD hits /
++//  with win = N the floor ran down to 0.1 on the synthetic 3:1) it measures J = hit bytes / requested bytes + w * hits (DRAM and SSD) /
 +//  requests over the window, and moves ff by `step` (default 0.02) the same
 +//  way again if J rose, the other way if it fell; ff starts at the given ff,
 +//  or else at class fc's share of the bytes admitted in the first window in
@@ -2928,7 +2929,7 @@ index 0000000..f410223
 +  x->picks++, x->ffsum += x->ff;
 +  if (*v->reqs < x->r0) x->np = 0, x->pend = x->ffstart;  // counters reset (warm-up end): start again from the byte share
 +  if (x->np++ == 0) {
-+    x->r0 = *v->reqs, x->rb0 = *v->req_bytes, x->h0 = *v->ssd_hits, x->hb0 = *v->hit_bytes;
++    x->r0 = *v->reqs, x->rb0 = *v->req_bytes, x->h0 = *v->ssd_hits + *v->dram_hits, x->hb0 = *v->hit_bytes;
 +    for (uint32_t c = 0; c < v->kmax && c < 256; c++) x->ab0[c] = v->admit_b[c];
 +    return;
 +  }
@@ -2944,7 +2945,7 @@ index 0000000..f410223
 +  }
 +  if (x->np <= x->win || *v->reqs == x->r0 || *v->req_bytes == x->rb0) return;
 +  double j = (double)(*v->hit_bytes - x->hb0) / (double)(*v->req_bytes - x->rb0) +
-+             x->w * (double)(*v->ssd_hits - x->h0) / (double)(*v->reqs - x->r0);
++             x->w * (double)(*v->ssd_hits + *v->dram_hits - x->h0) / (double)(*v->reqs - x->r0);
 +  if (j == j && x->jprev == x->jprev && j < x->jprev) x->dir = -x->dir;
 +  x->jprev = j, x->np = 0;
 +  x->ff = fmin(0.99, fmax(0, x->ff + x->dir * x->step));
@@ -3881,7 +3882,7 @@ index 0000000..471465b
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_policy.h b/libCacheSim/cache/eviction/flash/evict/region_policy.h
 new file mode 100644
-index 0000000..28b2a14
+index 0000000..b145966
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_policy.h
 @@ -0,0 +1,93 @@
@@ -3919,7 +3920,7 @@ index 0000000..28b2a14
 +  const int64_t *t;                    // the current request, from 0
 +  const uint64_t *admit_n, *admit_b;   // [kmax] objects / bytes admitted, all time
 +  const uint64_t *reqs, *req_bytes;    // requests / requested bytes so far (since the warm-up reset)
-+  const uint64_t *ssd_hits, *hit_bytes; // SSD hits / hit bytes (DRAM and SSD) so far
++  const uint64_t *ssd_hits, *dram_hits, *hit_bytes; // SSD hits / DRAM hits / hit bytes (DRAM and SSD) so far
 +} rf_rview_t;
 +
 +typedef struct rf_rpol rf_rpol_t;
@@ -4139,6 +4140,145 @@ index 0000000..23fd99c
 +const rf_hint_ops_t rf_hint_fixed_ops = {
 +    .name = "fixed", .params = P_FIXED, .create = fixed_create, .destroy = destroy,
 +    .on_insert = on_insert, .epoch = epoch, .bounds = bounds, .max_classes = max_classes};
+diff --git a/libCacheSim/cache/eviction/flash/hint/ghost.c b/libCacheSim/cache/eviction/flash/hint/ghost.c
+new file mode 100644
+index 0000000..ba01743
+--- /dev/null
++++ b/libCacheSim/cache/eviction/flash/hint/ghost.c
+@@ -0,0 +1,133 @@
++/* ghost.c — 名簿（ghost）の分類（hint=ghost）。SSD から追い出した物の ID を名簿に残し、
++ * ミスして書く物が名簿に載っていれば「すぐ戻ってきた＝人気」とみなして分類 1（実績あり）へ、
++ * 載っていなければ分類 0（新入り）へ。再挿入する物は当たった実績があるので分類 1。
++ * 便乗（同じ Region の不人気な物が人気の物と一緒に長生きする）を、書き込み時に熱/冷を分けて減らす
++ * （docs/Che-sim/ghost_class_check.html。tools/synth/ghost_sim.c の Region LRU で検証した方式）。
++ *
++ *   hint=ghost:frac=0.1          名簿の長さ = frac × SSD にいる物の数（実行中に数える）
++ *   hint=ghost:n=5000            名簿の長さを物の数で固定（n > 0 なら frac より優先）
++ *   hint=ghost:tau=64K           大きさでも分ける：分類 = 2 × (大きさの分類) + (実績あり)
++ *
++ * 名簿は追い出した順の輪（古いものから消える）と、ID → 入れた通し番号のハッシュ。
++ * 「載っている」＝通し番号が新しい方から長さ以内。輪は長さに合わせて伸ばす（縮めない）。 */
++#include "../util/hashmap.h"
++#include "regionflash_hint.h"
++
++struct rf_hint {
++  hmap_t pos;                // ID → 名簿に入れた通し番号 + 1
++  uint64_t *ring, rcap;      // 通し番号 mod rcap → ID（輪から落ちた ID をハッシュから消すため）
++  uint64_t seq;              // 名簿に入れた数
++  int64_t live;              // SSD にいる物の数（書いた − 追い出した。再挿入の書き直しは ±0）
++  double frac;
++  uint64_t nfix;
++  int64_t taus[KMAX_LIMIT];
++  uint32_t ntau, kmax;
++  uint64_t n_hot[2], n_ins[2];  // 報告用：書いた物のうち実績ありの数（[0] 新しく書いた物、[1] 再挿入）
++  uint64_t len_sum, len_cnt;
++};
++
++static const param_spec_t P_GHOST[] = {
++    {"frac", P_DOUBLE, "0.1", NULL, "名簿の長さ ÷ SSD にいる物の数"},
++    {"n", P_UINT, "0", NULL, "名簿の長さ（物の数）。0 なら frac で決める"},
++    {"tau", P_LIST, "", NULL, "大きさの境界 τ（昇順、K/M/G 可）。分類 = 2 × 大きさの分類 + 実績あり"},
++    {NULL}};
++
++static int create(rf_hint_t **out, const param_vals_t *v, const hint_env_t *env) {
++  rf_hint_t *h = xcalloc(1, sizeof(*h));
++  double a[KMAX_LIMIT];
++  h->frac = pv_dbl(v, "frac");
++  h->nfix = (uint64_t)pv_int(v, "n");
++  h->ntau = (uint32_t)pv_list(v, "tau", a, KMAX_LIMIT);
++  for (uint32_t i = 0; i < h->ntau; i++) {
++    h->taus[i] = (int64_t)a[i];
++    if (i && h->taus[i] <= h->taus[i - 1]) die("ghost: tau must be strictly increasing");
++  }
++  h->kmax = 2 * (h->ntau + 1);
++  if (h->kmax > env->k_max) die("ghost: %u classes > k_max %u", h->kmax, env->k_max);
++  if (h->frac <= 0 && !h->nfix) die("ghost: frac or n must be > 0");
++  h->rcap = 1024;
++  h->ring = xcalloc(h->rcap, sizeof(uint64_t));
++  hm_init(&h->pos, 1024);
++  *out = h;
++  return 0;
++}
++static void destroy(rf_hint_t *h) {
++  hm_free(&h->pos);
++  free(h->ring);
++  free(h);
++}
++
++static uint64_t glen(const rf_hint_t *h) {
++  if (h->nfix) return h->nfix;
++  double n = h->frac * (double)(h->live > 0 ? h->live : 0);
++  return n < 1 ? 1 : (uint64_t)n;
++}
++
++/* 輪の容量を len 以上にする。並びは通し番号 mod rcap なので、入れ直す */
++static void grow(rf_hint_t *h, uint64_t len) {
++  if (len <= h->rcap) return;
++  uint64_t nc = h->rcap;
++  while (nc < len) nc *= 2;
++  uint64_t *nr = xcalloc(nc, sizeof(uint64_t));
++  uint64_t lo = h->seq > h->rcap ? h->seq - h->rcap : 0;
++  for (uint64_t s = lo; s < h->seq; s++) nr[s % nc] = h->ring[s % h->rcap];
++  free(h->ring);
++  h->ring = nr, h->rcap = nc;
++}
++
++static int in_ghost(rf_hint_t *h, uint64_t id) {
++  uint64_t *p = hm_get(&h->pos, id);
++  if (!p) return 0;
++  uint64_t s = *p - 1, len = glen(h);
++  return h->seq - s <= len && h->seq - s <= h->rcap;
++}
++
++static uint32_t on_insert(rf_hint_t *h, const rf_hint_ev_t *e) {
++  int re = e->source == SRC_REINSERT;
++  int hot = re || in_ghost(h, e->id);
++  if (!re) h->live++;
++  h->n_ins[re]++, h->n_hot[re] += hot;
++  if (hot) hm_del(&h->pos, e->id);  // 名簿から外す（書いたので、もう「消された物」ではない）
++  return 2 * class_of_taus(h->taus, h->ntau, e->size) + (uint32_t)hot;
++}
++
++static void on_evict(rf_hint_t *h, const rf_hint_ev_t *e) {
++  h->live--;
++  uint64_t len = glen(h);
++  grow(h, len);
++  uint64_t slot = h->seq % h->rcap;
++  if (h->seq >= h->rcap) {  // 輪から落ちる ID：まだその通し番号ならハッシュから消す
++    uint64_t old = h->ring[slot], *p = hm_get(&h->pos, old);
++    if (p && *p - 1 == h->seq - h->rcap) hm_del(&h->pos, old);
++  }
++  h->ring[slot] = e->id;
++  hm_put(&h->pos, e->id, ++h->seq);
++  h->len_sum += len, h->len_cnt++;
++}
++
++static uint32_t epoch(const rf_hint_t *h) {
++  (void)h;
++  return 0;
++}
++static uint32_t bounds(const rf_hint_t *h, int64_t *out, uint32_t max) {
++  uint32_t n = h->ntau < max ? h->ntau : max;
++  memcpy(out, h->taus, n * sizeof(int64_t));
++  return n;
++}
++static uint32_t classes(const rf_hint_t *h, uint8_t *out, uint32_t max) {  // 書いていない物は新入り
++  for (uint32_t i = 0; i <= h->ntau && i < max; i++) out[i] = (uint8_t)(2 * i);
++  return h->ntau + 1;
++}
++static uint32_t max_classes(const rf_hint_t *h) { return h->kmax; }
++static void report(rf_hint_t *h, FILE *f) {
++  fprintf(f, "{\"frac\": %g, \"n\": %llu, \"mean_len\": %.1f, \"live_end\": %lld, "
++             "\"new_writes\": %llu, \"new_hot\": %llu, \"reinserts\": %llu, \"ghost_entries\": %llu}",
++          h->frac, (unsigned long long)h->nfix, h->len_cnt ? (double)h->len_sum / h->len_cnt : 0.0,
++          (long long)h->live, (unsigned long long)h->n_ins[0], (unsigned long long)h->n_hot[0],
++          (unsigned long long)h->n_ins[1], (unsigned long long)h->pos.n);
++}
++
++const rf_hint_ops_t rf_hint_ghost_ops = {
++    .name = "ghost", .params = P_GHOST, .create = create, .destroy = destroy,
++    .on_insert = on_insert, .on_evict = on_evict, .epoch = epoch, .bounds = bounds,
++    .classes = classes, .max_classes = max_classes, .report = report};
 diff --git a/libCacheSim/cache/eviction/flash/hint/hitrate.c b/libCacheSim/cache/eviction/flash/hint/hitrate.c
 new file mode 100644
 index 0000000..3450b3d
@@ -5764,10 +5904,10 @@ index 0000000..1d8bfba
 +#endif /* REGIONFLASH_HINT_H */
 diff --git a/libCacheSim/cache/eviction/flash/hint/rf_hint.c b/libCacheSim/cache/eviction/flash/hint/rf_hint.c
 new file mode 100644
-index 0000000..54b3a94
+index 0000000..2038825
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/rf_hint.c
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,148 @@
 +//
 +//  rf_hint.c — the write path's plugins by name (hint providers RF_HINTS;
 +//  admission policies ADMISSIONS, ../admit/admit.c), and what RegionFlash
@@ -5794,7 +5934,7 @@ index 0000000..54b3a94
 +    rf_hint_st_recursive_ops, rf_hint_split_threshold_req_ops, rf_hint_st_hitrate_ops,
 +    rf_hint_st_hr_refine_ops, rf_hint_hr_segment_ops, rf_hint_profile_ops, rf_hint_oracle_gdt_ops,
 +    rf_hint_key_ops, rf_hint_oracle_key_ops, rf_hint_oracle_keyinfo_ops, rf_hint_value_ops,
-+    rf_hint_pdens_ops, rf_hint_mini_ops;
++    rf_hint_pdens_ops, rf_hint_mini_ops, rf_hint_ghost_ops;
 +static const rf_hint_ops_t *const RF_HINTS[] = {
 +    &rf_hint_none_ops,           &rf_hint_fixed_ops,
 +    &rf_hint_split_threshold_ops, &rf_hint_st_recursive_ops,
@@ -5804,6 +5944,7 @@ index 0000000..54b3a94
 +    &rf_hint_key_ops,            &rf_hint_oracle_key_ops,
 +    &rf_hint_oracle_keyinfo_ops, &rf_hint_value_ops,
 +    &rf_hint_pdens_ops,         &rf_hint_mini_ops,
++    &rf_hint_ghost_ops,
 +    NULL};
 +
 +/* spec "name:k=v/k=v" -> the ops of an admission policy (kind 0) or a hint
@@ -6866,7 +7007,7 @@ index 0000000..fc9592e
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_region.c b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
 new file mode 100644
-index 0000000..4ffb6c6
+index 0000000..84bf28d
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
 @@ -0,0 +1,400 @@
@@ -7251,7 +7392,7 @@ index 0000000..4ffb6c6
 +    p->fdp.counting = &p->counting;
 +    rf_fdp_init(&p->fdp, p->N, p->R, p->kmax);
 +  }
-+  p->rview = (rf_rview_t){p->reg, p->N, p->kmax, p->R, &p->t, p->admit_n, p->admit_b, &p->tot.reqs, &p->tot.req_bytes, &p->tot.ssd_hits, &p->tot.hit_bytes};
++  p->rview = (rf_rview_t){p->reg, p->N, p->kmax, p->R, &p->t, p->admit_n, p->admit_b, &p->tot.reqs, &p->tot.req_bytes, &p->tot.ssd_hits, &p->tot.dram_hits, &p->tot.hit_bytes};
 +  if (p->rops != NULL) p->rpol = p->rops->create(&p->rview, rparams);
 +}
 +
