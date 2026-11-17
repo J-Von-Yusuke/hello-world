@@ -19,7 +19,7 @@ FF = ["st_lru", "st_ff50", "st_ff70", "st_ff80", "st_ff90", "st_ff95"]
 TOL = 0.02   # pt（d_write は % なので 0.02%）
 # 表に出す順（無い構成は飛ばす。TUNE_JOBS に足した構成も末尾に出る）
 ORDER = ["mini_hc0.1_auto", "st_hc0.1_auto", "st_ff90_auto", "st_ff90_h3", "st_ff90_h1", "st_lru_auto", "none_auto",
-         "mini_lru", "st_hc0.03", "st_hc0.1", "st_hc0.3", "st_hc1", "st_mv0.3_auto", "k3_lru_auto", "k4_lru_auto"]
+         "mini_lru", "st_hc0", "st_hc0.03", "st_hc0.1", "st_hc0.3", "st_hc1", "st_mv0.3_auto", "k3_lru_auto", "k4_lru_auto"]
 
 
 def load(kit, work):

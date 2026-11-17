@@ -18,8 +18,8 @@ out = f"{WORK}/tune/figs"; shutil.rmtree(out, ignore_errors=True); os.makedirs(o
 figs = []
 BASE = "none_h1"
 FF = ["st_lru", "st_ff50", "st_ff70", "st_ff80", "st_ff90", "st_ff95"]
-MV = ["st_mv1", "st_mv0.3", "st_mv0.1", "st_mv0.03"]
-HC = ["st_hc1", "st_hc0.3", "st_hc0.1", "st_hc0.03"]
+MV = ["st_mv1", "st_mv0.3", "st_mv0.1", "st_mv0.03", "st_mv0"]
+HC = ["st_hc1", "st_hc0.3", "st_hc0.1", "st_hc0.03", "st_hc0"]
 J = lambda r: (1 - r["bmr"]) + W * r["ohr"]          # 目的 BHR + w·OHR
 
 
@@ -116,7 +116,7 @@ if names:
             "st_hc0.1_auto = 分割閾値は SplitThreshold + 下限を山登り (w=0.1) + 再挿入 n=auto。st_ff90_auto = 固定の下限 0.9 + n=auto。st_mv0.3_auto = 末尾の密度の配分 + n=auto。")
 
 # (5) 自動と固定の最良の差（同じ目的で、w ごと）
-WS = [("0.03", 0.03), ("0.1", 0.1), ("0.3", 0.3), ("1", 1.0)]
+WS = [("0", 0.0), ("0.03", 0.03), ("0.1", 0.1), ("0.3", 0.3), ("1", 1.0)]
 gap = [(n, T[n]["runs"]) for n in T if any(i in T[n]["runs"] for i in FF)]
 if gap:
     Jw = lambda r, w: (1 - r["bmr"]) + w * r["ohr"]

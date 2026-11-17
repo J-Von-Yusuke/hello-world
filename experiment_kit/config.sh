@@ -66,6 +66,7 @@ TUNE_JOBS=(
   "st_ff95|$ST2,region-evict=lru,region-params=fc=1/ff=0.95"
   "st_hc0.03|$ST2,region-evict=lru,region-params=auto=1/w=0.03" "st_hc0.1|$ST2,region-evict=lru,region-params=auto=1/w=0.1"
   "st_hc0.3|$ST2,region-evict=lru,region-params=auto=1/w=0.3"   "st_hc1|$ST2,region-evict=lru,region-params=auto=1/w=1"
+  "st_hc0|$ST2,region-evict=lru,region-params=auto=1/w=0"        "st_mv0|$ST2,region-evict=mv,region-params=w=0"   # w=0 = BMR だけ（11-17）
   "st_hc0.1_auto|$ST2,region-evict=lru,region-params=auto=1/w=0.1,$REA"
   "st_mv0.03|$ST2,region-evict=mv,region-params=w=0.03" "st_mv0.1|$ST2,region-evict=mv,region-params=w=0.1"
   "st_mv0.3|$ST2,region-evict=mv,region-params=w=0.3"   "st_mv1|$ST2,region-evict=mv,region-params=w=1"

@@ -163,6 +163,8 @@ class Ax:
         k = len(groups); inner = s.bw * 0.8; w = inner / max(k, 1)
         fs = 20 if w > 80 else 17
         show = labels and w >= tw(fmt(-1.0, d, sign), fs) + 6   # 隣の棒の数字と重ならない幅があるときだけ
+        fv = min(17, w - 3)   # 横に入らないときは縦書き（字の高さが棒の幅に入れば）
+        vert = labels and not show and fv >= 10
         for gi, (name, col, vals, err) in enumerate(groups):
             for i, v in enumerate(vals):
                 if v is None or v != v: continue
@@ -174,6 +176,13 @@ class Ax:
                     lo, hi = err[i]; cx = x + w / 2; top, bot = min(y1, s.Y(hi)), max(y1, s.Y(lo))
                     s.f.e.append(f'<path d="M{cx:.1f},{s.Y(lo):.1f}V{s.Y(hi):.1f}M{cx-9:.1f},{s.Y(lo):.1f}h18M{cx-9:.1f},{s.Y(hi):.1f}h18" stroke="#333" stroke-width="3" fill="none"/>')
                 if show: s.f.t(x + w / 2, top - 8 if v >= 0 else bot + fs + 4, fmt(v, d, sign), fs, "middle", INK)
+                elif vert:  # 棒の外（上 / 下）に縦に。軸の外にはみ出すなら、棒が十分長ければ棒の中に白で
+                    txt = fmt(v, d, sign); L = tw(txt, fv); cx = x + w / 2 + fv * 0.35
+                    out = top - 6 - L >= s.y0 if v >= 0 else bot + 6 + L <= s.y1
+                    if out or abs(y1 - y0) < L + 10:
+                        s.f.t(cx, top - 6 if v >= 0 else bot + 6, txt, fv, "start" if v >= 0 else "end", INK, rot=-90)
+                    else:
+                        s.f.t(cx, top + 6 if v >= 0 else bot - 6, txt, fv, "end" if v >= 0 else "start", "#fff", "bold", rot=-90)
 
     def stack(s, layers, labels=True, d=2):
         """layers = [(名前, 色, [値]*カテゴリ数)] を下から積む（正の値）。"""
