@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSD キャッシュのモデル入門</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;
+  --sh:#2b6cb0;--sc:#90b4dd;--lh:#c05621;--lc:#f0b27a;--step:#fbfcfe}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;
+  --sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26;--step:#181c23}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;
+  --sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26;--step:#181c23}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.85 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:820px;margin:0 auto;padding:28px 16px 80px}
+h1{font-size:25px;line-height:1.4;margin:0 0 6px}
+h2{font-size:20px;margin:0 0 6px;line-height:1.45}
+.sub,.mut{color:var(--mut)}
+.step{background:var(--step);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin:22px 0}
+.lab{display:inline-block;font-size:12px;font-weight:700;color:#fff;background:var(--a);border-radius:10px;padding:0 10px;margin-bottom:6px}
+.q{border-left:4px solid var(--b);padding:2px 12px;margin:8px 0;font-weight:700}
+.one{background:var(--card);border-radius:8px;padding:6px 12px;margin:10px 0 0;border-left:4px solid var(--g)}
+.one b{color:var(--g)}
+.f{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 14px;margin:10px 0;font-size:17px;text-align:center;overflow-x:auto}
+.f .w{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:0 6px;background:var(--bg)}
+.frac{display:inline-flex;flex-direction:column;vertical-align:middle;text-align:center;margin:0 4px}
+.frac>span:first-child{border-bottom:1.5px solid var(--fg);padding:0 4px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:4px 7px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto}
+svg{max-width:100%;height:auto;display:block;margin:8px 0}svg text{fill:var(--fg);font-size:13px}
+details{margin:8px 0;border-top:1px dashed var(--line);padding-top:4px}summary{cursor:pointer;color:var(--mut);font-size:14px}
+ul,ol{margin:4px 0;padding-left:24px}li{margin:3px 0}
+.key{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;margin-right:4px}
+.toc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 18px;margin:16px 0}
+.toc ol{columns:2;column-gap:28px}@media (max-width:640px){.toc ol{columns:1}}
+input[type=range]{width:100%}
+.big{font-size:20px;font-weight:700;color:var(--a)}
+.words{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;margin:8px 0}.words b{white-space:nowrap}
+</style>
+</head>
+<body><main>
+<h1>SSD キャッシュはなぜ「サイズで分ける」と変わるのか：Che 近似からモデルの完成形まで</h1>
+<p class="sub">学部生向け。<b>記号は使わず、言葉で書く</b>。式に出てくる数学は「e の何乗」（指数関数）と「平均」だけ。1 つの例題を最初から最後まで使い、1 段ごとに「問い → 直感 → 式 → 例題の数字」の順で進む。
+数値は <a href="che_to_region_walkthrough.html">che_to_region_walkthrough.html</a> と同じ（モデルの計算と、シミュレータ libCacheSim での実測）。記号つきの証明は <a href="region_model_appendix.html">付録</a>。</p>
+
+<div class="toc"><b>目次</b>
+<ol>
+<li>何を知りたいのか</li>
+<li>例題：4 種類のコンテンツ</li>
+<li>この資料で使う言葉（5 つだけ）</li>
+<li>普通の LRU：Che 近似</li>
+<li>容量を分けると得か</li>
+<li>SSD は箱ごとにしか消せない</li>
+<li>コンテンツの一生と、Region FIFO</li>
+<li>Region LRU の箱の寿命</li>
+<li>同居するのは誰か</li>
+<li>サイズで分けると何が起きるか</li>
+<li>便乗：不人気コンテンツが容量を食う</li>
+<li>立ち上がりの補正と、実測との照合</li>
+<li>モデルの完成形（全体図）</li>
+<li>モデルから実装へ</li>
+<li>このモデルが言えないこと</li>
+<li>確認問題</li>
+</ol></div>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">1</span>
+<h2>何を知りたいのか</h2>
+<p><b>キャッシュ</b>は、よく使うコンテンツを手元の速い記憶装置に置いておく仕組み。CDN なら、遠いサーバーから毎回取り寄せる代わりに、近くの SSD に置いておく。リクエストが来たとき手元にあれば<b>ヒット</b>、なければ<b>ミス</b>（取り寄せて、手元に入れる）。</p>
+<ul>
+<li><b>OHR</b>：リクエストの何回に 1 回当たったか。速さに効く。</li>
+<li><b>BHR</b>：送ったバイトのうち手元から出せた分。回線の節約に効く。外れた分（1 − BHR）を BMR と呼ぶ。</li>
+</ul>
+<p>SSD キャッシュには特有の事情がある（第 6 段）：コンテンツを 1 個ずつは消せず、<b>Region</b> と呼ぶ大きな箱ごとまとめて消す。そこで「小さいコンテンツと大きいコンテンツを別々の箱に入れると、OHR が上がり BHR が下がる」という現象が起きる。</p>
+<div class="q">知りたいこと：なぜそうなるのか。どれだけ変わるのか。どう調整すればよいのか。</div>
+<p>そのために、「人気」と「容量」から OHR・BHR を計算する方法（モデル）を、教科書の Che 近似から 1 段ずつ組み立てる。</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">2</span>
+<h2>例題：4 種類のコンテンツ</h2>
+<p>手で追えるように、コンテンツを 4 グループだけにする。同じグループのコンテンツは全部同じ人気。</p>
+<div class="tbl"><table>
+<tr><th>グループ</th><th class="n">大きさ</th><th class="n">個数</th><th class="n">全リクエストのうち受ける分</th></tr>
+<tr><td><span class="key" style="background:var(--sh)"></span>S熱（小さくて人気）</td><td class="n">4 KiB</td><td class="n">8,000</td><td class="n">60%</td></tr>
+<tr><td><span class="key" style="background:var(--sc)"></span>S冷（小さくて不人気）</td><td class="n">4 KiB</td><td class="n">72,000</td><td class="n">15%</td></tr>
+<tr><td><span class="key" style="background:var(--lh)"></span>L熱（大きくて人気）</td><td class="n">64 KiB</td><td class="n">800</td><td class="n">20%</td></tr>
+<tr><td><span class="key" style="background:var(--lc)"></span>L冷（大きくて不人気）</td><td class="n">64 KiB</td><td class="n">7,200</td><td class="n">5%</td></tr>
+</table></div>
+<ul>
+<li>キャッシュの容量は 128 MiB。全コンテンツを 1 個ずつ置くと 812 MiB なので、<b>6 分の 1 ほどしか置けない</b>。</li>
+<li>箱（Region）は 512 KiB。小さいコンテンツなら 128 個、大きいコンテンツなら 8 個入る。箱は全部で 256 個。</li>
+</ul>
+<p class="mut">現実のコンテンツは 4 グループではなく、人気が少しずつ違う何百万個もある。それでも考え方は同じで、足し合わせる数が増えるだけ。</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">3</span>
+<h2>この資料で使う言葉（5 つだけ）</h2>
+<p>時計は「リクエストの回数」で数える。全体でリクエストが 1 回来るごとに時計が 1 進む。</p>
+<div class="words">
+<b>人気</b><span>コンテンツ 1 個が、リクエスト 1 回あたり平均何回呼ばれるか。S熱なら 60% ÷ 8,000 個 = 0.000075（13,333 リクエストに 1 回）。</span>
+<b>猶予</b><span>普通の LRU で、最後に呼ばれてから消されるまでの時間（第 4 段）。Region LRU では、箱が最後に呼ばれてから消されるまでの時間（第 8 段）。</span>
+<b>手元にいる時間</b><span>コンテンツが箱に入ってから、箱ごと消されるまでの時間（第 7 段）。</span>
+<b>箱の人気</b><span>箱の中のコンテンツの人気を全部足したもの。箱がリクエスト 1 回あたり何回当たるか（第 8 段）。</span>
+<b>当たる見込み</b><span>そのコンテンツへのリクエストが、何回に何回ヒットするか。0〜1 の数。</span>
+</div>
+<p><b>呼ばれ方の前提</b>：コンテンツが呼ばれるタイミングは「ばらばら」とする。前に呼ばれてからの時間に関係なく、いつでも同じように次が来うる。だから「しばらく来ていないから、そろそろ来る」ということはない。どこから待ち始めても、次に呼ばれるまでの待ちは平均「1 ÷ 人気」。</p>
+<p class="mut">現実のリクエストは束になって来ることがあり、ずれの原因になる（第 15 段）。</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">4</span>
+<h2>普通の LRU：Che 近似</h2>
+<div class="q">コンテンツを 1 個ずつ消せる普通のキャッシュ（LRU）で、各コンテンツの当たる見込みはいくつか。</div>
+<p><b>LRU</b> は、容量が足りなくなったら「最後に呼ばれてからいちばん時間がたったコンテンツ」を消す。満杯のキャッシュでは、消される瞬間の「最後に呼ばれてからの時間」はだいたい一定になる。これを<b>猶予</b>と呼ぶ。<b>Che 近似</b>は、猶予を一定とみなす考え方。</p>
+<svg viewBox="0 0 760 140" role="img" aria-label="猶予とヒット">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<g font-size="13">
+<line x1="20" y1="70" x2="740" y2="70" stroke="var(--mut)"/>
+<g stroke="var(--a)" stroke-width="3"><line x1="60" y1="54" x2="60" y2="70"/><line x1="200" y1="54" x2="200" y2="70"/><line x1="560" y1="54" x2="560" y2="70"/></g>
+<text x="60" y="46" text-anchor="middle">呼ばれる</text><text x="200" y="46" text-anchor="middle">呼ばれる</text><text x="560" y="46" text-anchor="middle">呼ばれる</text>
+<rect x="60" y="74" width="140" height="14" fill="var(--g)" opacity=".35"/><rect x="200" y="74" width="220" height="14" fill="var(--g)" opacity=".35"/>
+<text x="310" y="85" text-anchor="middle" font-size="12">手元にある（呼ばれてから猶予の間）</text>
+<text x="200" y="110" text-anchor="middle" fill="var(--g)">間隔が猶予以内 → ヒット</text>
+<text x="560" y="110" text-anchor="middle" fill="var(--r)">間隔が猶予を超えた → 消えていてミス</text>
+<path d="M200,126H420" stroke="var(--fg)" marker-start="url(#ar)" marker-end="url(#ar)"/><text x="310" y="138" text-anchor="middle" font-size="12">猶予</text>
+</g></svg>
+<p>だから「ヒットする」＝「前に呼ばれてから猶予以内に次が来る」。その見込みを計算する。</p>
+<ul>
+<li>猶予の間に呼ばれる回数の平均は「人気 × 猶予」。これを <b>x</b> とおく（この段だけで使う）。</li>
+<li>猶予を細かく 1,000 区間に切ると、1 区間で呼ばれる見込みは x ÷ 1,000。1 区間も呼ばれない見込みは (1 − x/1,000) を 1,000 回掛けたもの。</li>
+<li>区間をもっと細かくすると、これは e<sup>−x</sup> に近づく（e の定義そのもの）。</li>
+</ul>
+<div class="f">当たる見込み ＝ 1 − e<sup>−x</sup>　　（x ＝ 人気 × 猶予 ＝ 猶予の間に呼ばれる回数の平均）</div>
+<p>x = 1 なら 0.63、x = 3 なら 0.95。猶予の間に平均 3 回呼ばれるコンテンツは、ほぼ必ず当たる。</p>
+<p><b>猶予はどう決まるか</b>：キャッシュが満杯という条件で決まる。</p>
+<div class="f">各グループの（個数 × 大きさ × 当たる見込み）を足したもの ＝ 容量</div>
+<p>当たる見込みは、そのコンテンツが手元にある時間の比でもある（第 7 段で理由を説明）ので、「個数 × 大きさ × 当たる見込み」がグループが平均して使っている容量になる。猶予を伸ばすほど左辺は増えるので、「足りなければ伸ばす、多すぎれば縮める」を繰り返せば（二分法）猶予が 1 つに決まる。</p>
+<div class="tbl"><table>
+<tr><th>例題（猶予 = 16,125 リクエスト）</th><th class="n">猶予の間に呼ばれる回数</th><th class="n">当たる見込み</th><th class="n">使う容量</th></tr>
+<tr><td>S熱</td><td class="n">1.21</td><td class="n">0.702</td><td class="n">17%</td></tr>
+<tr><td>S冷</td><td class="n">0.03</td><td class="n">0.033</td><td class="n">7%</td></tr>
+<tr><td>L熱</td><td class="n">4.03</td><td class="n">0.982</td><td class="n">38%</td></tr>
+<tr><td>L冷</td><td class="n">0.11</td><td class="n">0.106</td><td class="n">37%</td></tr>
+</table></div>
+<p>OHR は「受ける分 × 当たる見込み」の合計：0.60 × 0.702 + 0.15 × 0.033 + 0.20 × 0.982 + 0.05 × 0.106 = <b>62.8%</b>。BHR は大きさの重みをつけて <b>76.9%</b>。シミュレータの実測は 62.7% / 76.9% で、ほぼぴったり合う。</p>
+<div class="one"><b>ひとことで</b>：LRU では「最後に呼ばれてから猶予以内なら、まだある」。当たる見込みは 1 − e<sup>−(人気 × 猶予)</sup>。猶予は満杯の条件で決まる。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">5</span>
+<h2>容量を分けると得か</h2>
+<div class="q">小さいコンテンツ用と大きいコンテンツ用に LRU を 2 つ用意して、容量を分けたら OHR は上がるか。</div>
+<p>考え方は「<b>容量をあと少し増やしたら、ヒットがどれだけ増えるか</b>」（経済学の「限界効用」と同じ）。</p>
+<ul>
+<li>共有の LRU で測ると、小さいコンテンツ側に容量を足したときの増え方は、大きいコンテンツ側の <b>27 倍</b>。</li>
+<li>理由：大きいコンテンツ 1 個（64 KiB）を置く場所に、小さいコンテンツが 16 個置ける。人気が同じくらいなら、16 個のほうがヒットが多い。</li>
+<li>なら、大きい側から小さい側へ容量を移す。移すほど小さい側の得は減り（人気のものはもう入っていて、残りは不人気なもの）、大きい側の損は増える。<b>両方の増え方がそろったところ</b>で止めるのが最適。</li>
+</ul>
+<svg viewBox="0 0 700 200" role="img" aria-label="増え方がそろう点">
+<g font-size="13">
+<line x1="60" y1="170" x2="660" y2="170" stroke="var(--mut)"/><line x1="60" y1="20" x2="60" y2="170" stroke="var(--mut)"/>
+<text x="360" y="195" text-anchor="middle">小さいコンテンツに配る容量 →</text><text x="20" y="95" transform="rotate(-90 20 95)" text-anchor="middle">ヒットの増え方</text>
+<path d="M70,30 C200,90 400,140 650,160" fill="none" stroke="var(--sh)" stroke-width="2.5"/><text x="120" y="32" fill="var(--sh)">小さい側に足す得</text>
+<path d="M70,165 C300,150 450,110 650,35" fill="none" stroke="var(--lh)" stroke-width="2.5"/><text x="560" y="40" fill="var(--lh)" text-anchor="end">大きい側から引く損</text>
+<circle cx="395" cy="128" r="6" fill="var(--g)"/><line x1="395" y1="128" x2="395" y2="170" stroke="var(--g)" stroke-dasharray="4 3"/><text x="395" y="118" text-anchor="middle" fill="var(--g)">そろう点 = 最適</text>
+</g></svg>
+<div class="tbl"><table>
+<tr><th>例題</th><th class="n">小さいコンテンツの容量</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>共有の LRU</td><td class="n">24%</td><td class="n">62.8%</td><td class="n">76.9%</td></tr>
+<tr><td>分けて最適に配る</td><td class="n">49%</td><td class="n" style="color:var(--g)"><b>78.1%</b></td><td class="n" style="color:var(--r)"><b>70.9%</b></td></tr>
+</table></div>
+<p><b>BHR は下がる</b>。BHR はバイトで数えるので、大きいコンテンツ 1 個のヒットが小さいコンテンツ 16 個分になる。OHR を上げる配り方と BHR を上げる配り方は逆向き。そこで「BHR と OHR のどちらをどれだけ重く見るか」を決めて、1 つの目的にまとめる。</p>
+<p class="mut">「足すほど得が減っていく」形なので、そろう点はただ 1 つで、それが最良。分け方が 3 つ以上でも同じ。</p>
+<div class="one"><b>ひとことで</b>：容量は「あと少し足したときのヒットの増え方」がそろうように配るのが最適。共有の LRU はそうなっていない。この最適を、あとで比べる<b>基準</b>にする。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">6</span>
+<h2>SSD は箱ごとにしか消せない</h2>
+<div class="q">SSD キャッシュは普通の LRU と何が違うのか。</div>
+<p>SSD は、小さく書いたり消したりを繰り返すと遅くなり、寿命も縮む。そこで SSD キャッシュは、新しいコンテンツを <b>Region</b>（以下、箱）に順に詰め、満杯になったら箱を閉じて書き込む。消すときも<b>箱ごと</b>消す。</p>
+<svg viewBox="0 0 760 150" role="img" aria-label="箱の書き込みと削除">
+<g font-size="13">
+<text x="20" y="22" font-weight="700">書き込み中の箱</text>
+<rect x="20" y="30" width="150" height="40" rx="5" fill="none" stroke="var(--b)" stroke-width="2"/>
+<g fill="var(--sh)"><rect x="26" y="36" width="18" height="28"/><rect x="48" y="36" width="18" height="28"/><rect x="70" y="36" width="18" height="28"/></g>
+<text x="95" y="90" text-anchor="middle" fill="var(--mut)">ミスしたコンテンツを順に詰める</text>
+<path d="M175,50H230" stroke="var(--mut)" stroke-width="2" marker-end="url(#ar)"/>
+<text x="250" y="22" font-weight="700">閉じた箱（SSD に書いた）</text>
+<g><rect x="250" y="30" width="110" height="40" rx="5" fill="var(--card)" stroke="var(--line)"/><rect x="370" y="30" width="110" height="40" rx="5" fill="var(--card)" stroke="var(--line)"/><rect x="490" y="30" width="110" height="40" rx="5" fill="var(--card)" stroke="var(--line)"/></g>
+<rect x="620" y="30" width="110" height="40" rx="5" fill="var(--r)" opacity=".2" stroke="var(--r)"/><text x="675" y="55" text-anchor="middle" fill="var(--r)">箱ごと消す</text>
+<text x="20" y="125">大事な点：<tspan font-weight="700">ヒットしてもコンテンツは動かない。</tspan>箱が消されると、中の人気コンテンツも一緒に消える。</text>
+</g></svg>
+<p>どの箱を消すかの決め方が 2 通りある。</p>
+<ul>
+<li><b>Region FIFO</b>：いちばん昔に閉じた箱を消す。</li>
+<li><b>Region LRU</b>：中のどれかが最後に呼ばれてから、いちばん時間がたった箱を消す。中の 1 個がヒットすると、箱全体が「最近使った」扱いになる。</li>
+</ul>
+<p><b>サイズで分ける</b>とは、小さいコンテンツ用の箱と大きいコンテンツ用の箱を別々に詰めること。</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">7</span>
+<h2>コンテンツの一生と、Region FIFO</h2>
+<div class="q">箱ごと消されるとき、コンテンツ 1 個の当たる見込みはいくつか。</div>
+<p>コンテンツ 1 個を追いかける。ヒットしても動かないので、一生は次の繰り返しになる。</p>
+<svg viewBox="0 0 760 120" role="img" aria-label="入る、滞在、消える、待つの繰り返し">
+<g font-size="13">
+<rect x="20" y="30" width="220" height="28" fill="var(--g)" opacity=".4"/><text x="130" y="49" text-anchor="middle">手元にいる：来たら全部ヒット</text>
+<rect x="240" y="30" width="120" height="28" fill="var(--line)"/><text x="300" y="49" text-anchor="middle">いない</text>
+<rect x="360" y="30" width="220" height="28" fill="var(--g)" opacity=".4"/><text x="470" y="49" text-anchor="middle">手元にいる</text>
+<rect x="580" y="30" width="120" height="28" fill="var(--line)"/><text x="640" y="49" text-anchor="middle">いない</text>
+<text x="20" y="22" fill="var(--r)">ミスして入る</text><text x="360" y="22" fill="var(--r)">ミスして入る</text>
+<text x="240" y="78" text-anchor="middle">箱ごと消える</text><text x="580" y="78" text-anchor="middle">箱ごと消える</text>
+<path d="M20,98H360" stroke="var(--fg)" marker-start="url(#ar)" marker-end="url(#ar)"/><text x="190" y="114" text-anchor="middle">1 周：ミスはちょうど 1 回、ヒットは「手元にいる間に呼ばれた回数」</text>
+</g></svg>
+<p><b>1 周の中のリクエストを数える</b>のがこつ。</p>
+<ul>
+<li>ミスは 1 周にちょうど 1 回（いないときに呼ばれて、入り直す瞬間）。</li>
+<li>ヒットは、手元にいる間に呼ばれた回数。平均「人気 × 手元にいる時間」回。これを <b>y</b> とおく。</li>
+<li>だから 1 周で平均 y 回当たって 1 回外れる。</li>
+</ul>
+<div class="f">当たる見込み ＝ <span class="frac"><span>y</span><span>y ＋ 1</span></span>　　（y ＝ 人気 × 手元にいる時間 ＝ 手元にいる間に呼ばれる回数の平均）</div>
+<p>y = 1 なら 0.5、y = 4 なら 0.8。手元にいる間に平均 4 回呼ばれるなら、5 回に 4 回当たる。</p>
+<p>これがモデル全体の土台。<b>箱の事情はすべて「手元にいる時間」に押し込まれる</b>。あとは手元にいる時間が何で決まるかを考えればよい。</p>
+<p><b>Region FIFO の場合</b>：箱は閉じた順に消されるので、どの箱も閉じてから同じ時間で消える。だから全コンテンツで手元にいる時間が同じ。<b>当たる見込みは人気だけで決まり、分け方に関係ない</b>。</p>
+<div class="tbl"><table>
+<tr><th>例題</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>普通の LRU（第 4 段）</td><td class="n">62.8%</td><td class="n">76.9%</td></tr>
+<tr><td>Region FIFO・混ぜる</td><td class="n">52.8%</td><td class="n">65.0%</td></tr>
+<tr><td>Region FIFO・サイズで分ける</td><td class="n">54.3%</td><td class="n">66.2%</td></tr>
+</table></div>
+<p>分けた差 +1.5pt は、混ぜると箱に詰め残しが出る（大きいコンテンツが入らなくなった時点で閉じる）分だけ。普通の LRU より 10pt 低いのは、ヒットしても延命されず、人気コンテンツも一定時間で消されるから。</p>
+<div class="one"><b>ひとことで</b>：1 周で平均 y 回当たり 1 回外れるので、当たる見込みは y ÷ (y + 1)。FIFO では手元にいる時間が全員同じなので、サイズで分けても効かない。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">8</span>
+<h2>Region LRU の箱の寿命</h2>
+<div class="q">Region LRU では、箱はどれだけ生き延びるか。</div>
+<p>Region LRU では、中のどれか 1 個がヒットするたびに箱の時計が 0 に戻る。<b>何も呼ばれない時間が猶予を超えたら、その箱が消される</b>。</p>
+<svg viewBox="0 0 760 110" role="img" aria-label="箱の寿命">
+<g font-size="13">
+<line x1="20" y1="50" x2="740" y2="50" stroke="var(--mut)"/>
+<text x="20" y="38">閉じる</text><line x1="20" y1="42" x2="20" y2="58" stroke="var(--fg)" stroke-width="2"/>
+<g stroke="var(--b)" stroke-width="3"><line x1="100" y1="42" x2="100" y2="58"/><line x1="150" y1="42" x2="150" y2="58"/><line x1="260" y1="42" x2="260" y2="58"/><line x1="320" y1="42" x2="320" y2="58"/><line x1="420" y1="42" x2="420" y2="58"/></g>
+<text x="260" y="32" text-anchor="middle">中のどれかが呼ばれる（間隔はどれも猶予より短い）</text>
+<rect x="420" y="62" width="240" height="12" fill="var(--r)" opacity=".35"/><text x="540" y="92" text-anchor="middle" fill="var(--r)">猶予の間なにも来ない → 消される</text>
+</g></svg>
+<p>箱にとっての人気は、中のコンテンツの人気を全部足したもの（<b>箱の人気</b>）。猶予の間に箱が呼ばれる回数の平均「箱の人気 × 猶予」を <b>z</b> とおく。</p>
+<p>計算は「くじ引き」で考える。箱が呼ばれるたびに「次に呼ばれるまでの間が猶予を超えるか」というくじを引く。</p>
+<ul>
+<li>超える（＝消える）のは、第 4 段と同じ計算で e<sup>z</sup> 回に 1 回。</li>
+<li>だから消えるまでに、平均 e<sup>z</sup> − 1 回は生き延びる。</li>
+<li>1 回生き延びるごとに、およそ「1 ÷ 箱の人気」の時間が過ぎる。きちんと足し合わせると、次の式になる。</li>
+</ul>
+<div class="f">箱の寿命 ÷ 猶予 ＝ <span class="frac"><span>e<sup>z</sup> − 1</span><span>z</span></span>　　（z ＝ 箱の人気 × 猶予 ＝ 猶予の間に箱が呼ばれる回数の平均）</div>
+<p><b>大事なのは、z が e の肩に乗っていること</b>。箱の人気が少し上がるだけで、寿命は何倍にも延びる。</p>
+<div class="step" style="margin:10px 0;background:var(--card)">
+<label for="lt">z（猶予の間に箱が呼ばれる回数の平均）：<b id="ltv">2.0</b></label>
+<input id="lt" type="range" min="0.2" max="7" step="0.1" value="2">
+<p style="margin:4px 0">寿命は猶予の <span class="big" id="lr"></span>　<span class="mut" id="lc"></span></p>
+</div>
+<p>例：z = 1.8 から 5.4 へ（箱の人気が 3 倍）にすると、寿命は <b>14.5 倍</b>になる。</p>
+<div class="one"><b>ひとことで</b>：Region LRU の箱は、猶予の間に呼ばれる回数 z について、指数的に長生きする。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">9</span>
+<h2>同居するのは誰か：堂々巡りを解く</h2>
+<div class="q">箱の人気は何で決まるか。</div>
+<p>箱に入るのは、<b>ミスして入ってきたコンテンツ</b>だけ。人気コンテンツはめったにミスしないので、あまり入ってこない。だから箱の中身は不人気なコンテンツに偏る。</p>
+<div class="tbl"><table>
+<tr><th>例題（小さいコンテンツの箱）</th><th class="n">S熱</th><th class="n">S冷</th></tr>
+<tr><td>リクエストのうち外れる分</td><td class="n">10 回に 1 回</td><td class="n">10 回に 8 回</td></tr>
+<tr><td>箱に入ってくる数の内訳</td><td class="n">3 個に 1 個</td><td class="n">3 個に 2 個</td></tr>
+</table></div>
+<p>受けるリクエストは S熱が 4 倍多い（60% 対 15%）のに、箱に入ってくる数は S冷のほうが 2 倍多い。</p>
+<p>ここで<b>堂々巡り</b>が起きる。</p>
+<svg viewBox="0 0 760 150" role="img" aria-label="堂々巡り">
+<g font-size="13">
+<rect x="20" y="40" width="170" height="60" rx="10" fill="var(--card)" stroke="var(--a)"/><text x="105" y="66" text-anchor="middle">誰がミスするか</text><text x="105" y="86" text-anchor="middle">（入ってくる内訳）</text>
+<rect x="295" y="40" width="170" height="60" rx="10" fill="var(--card)" stroke="var(--a)"/><text x="380" y="66" text-anchor="middle">箱の中身と</text><text x="380" y="86" text-anchor="middle">箱の人気</text>
+<rect x="570" y="40" width="170" height="60" rx="10" fill="var(--card)" stroke="var(--a)"/><text x="655" y="66" text-anchor="middle">箱の寿命</text><text x="655" y="86" text-anchor="middle">（手元にいる時間）</text>
+<path d="M190,70H291M465,70H566" stroke="var(--mut)" stroke-width="2" marker-end="url(#ar)"/>
+<path d="M655,100 C655,140 105,140 105,104" fill="none" stroke="var(--mut)" stroke-width="2" marker-end="url(#ar)"/><text x="380" y="134" text-anchor="middle" fill="var(--mut)">手元にいる時間が決まると、誰がミスするかが決まる（第 7 段）</text>
+</g></svg>
+<p>解き方は単純で、<b>適当な値から始めて、ぐるぐる回して値が動かなくなるまで繰り返す</b>。例題では 15〜30 回で止まる。さらにその外側で、「全部の箱で容量がちょうど満杯」になるように猶予を二分法で決める（第 4 段と同じ）。</p>
+<p class="mut">細かい注意：同居するコンテンツの人気を先に平均してから計算すると、寿命を短く見積もる。たまに人気コンテンツが混ざった箱は大きく長生きするので、その分を平均に入れる必要がある（例題で 25% の差）。</p>
+<div class="one"><b>ひとことで</b>：箱に入るのはミスしたコンテンツなので、中身は不人気に偏る。「ミス → 中身 → 寿命 → ミス」の堂々巡りは、繰り返し計算で解ける。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">10</span>
+<h2>サイズで分けると何が起きるか</h2>
+<div class="q">小さいコンテンツの箱と大きいコンテンツの箱を分けると、なぜ OHR が上がるのか。</div>
+<p>箱の大きさは同じ 512 KiB。小さいコンテンツの箱には 128 個、大きいコンテンツの箱には 8 個入る。<b>箱の人気は「中の個数 × 1 個の人気」</b>なので、言い換えると「箱の大きさ × 1 バイトあたりの人気」になる。1 バイトあたりでは小さいコンテンツのほうが人気が高いので、小さいコンテンツの箱だけ箱の人気が高くなる。</p>
+<div class="tbl"><table>
+<tr><th>例題の箱</th><th class="n">猶予の間に呼ばれる回数 z</th><th class="n">寿命（リクエスト）</th></tr>
+<tr><td>混ぜる（どの箱も似たようなもの）</td><td class="n">3.3〜3.6</td><td class="n">14,400〜18,100</td></tr>
+<tr><td>分ける：小さいコンテンツの箱</td><td class="n">5.8</td><td class="n"><b>94,600</b></td></tr>
+<tr><td>分ける：大きいコンテンツの箱</td><td class="n">2.1</td><td class="n"><b>5,890</b></td></tr>
+</table></div>
+<p>箱の人気の差は 2.7 倍なのに、<b>寿命の差は 16 倍</b>（第 8 段の指数のせい）。</p>
+<p><b>寿命が容量の配り方を決める</b>。お店にいる客の数は「1 分に入ってくる客の数 × 1 人がいる時間」になる。同じように、</p>
+<div class="f">ある種類が持つ箱の数 ＝ 箱を書き終えるペース × 1 箱が消されるまで残る時間</div>
+<p>小さいコンテンツの箱は 16 倍長く残るので、容量の多くを小さいコンテンツが持つことになる。</p>
+<div class="tbl"><table>
+<tr><th>例題</th><th class="n">小さいコンテンツの容量</th><th class="n">OHR</th><th class="n">BHR</th></tr>
+<tr><td>Region LRU・混ぜる</td><td class="n">27%</td><td class="n">57.7%</td><td class="n">67.6%</td></tr>
+<tr><td>Region LRU・サイズで分ける</td><td class="n">62%</td><td class="n" style="color:var(--g)"><b>69.7%</b></td><td class="n" style="color:var(--r)"><b>55.7%</b></td></tr>
+<tr><td style="color:var(--mut)">（基準）分けて最適に配る（第 5 段）</td><td class="n mut">49%</td><td class="n mut">78.1%</td><td class="n mut">70.9%</td></tr>
+</table></div>
+<ul>
+<li>第 5 段で見たとおり、小さいコンテンツに容量を寄せると OHR は上がり、BHR は下がる。Region LRU は<b>これを勝手にやる</b>。</li>
+<li>ただし寄せ過ぎる（最適 49% に対して 62%）。Region LRU は「ヒットの増え方をそろえる」仕組みではなく、「寿命の掛け算」で配っているから。</li>
+</ul>
+<div class="one"><b>ひとことで</b>：分けると小さいコンテンツの箱だけ人気が高くなり、寿命が指数的に延びて容量を取る。だから OHR↑ BHR↓。ただし寄せ過ぎる。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">11</span>
+<h2>便乗：不人気コンテンツが容量を食う</h2>
+<div class="q">寄せた容量は、ちゃんとヒットに使われているか。</div>
+<p>同じ箱のコンテンツは、同じ時間だけ手元に残る。だから<b>人気コンテンツと同じ箱に入った不人気コンテンツも、一緒に長生きする</b>。これを便乗と呼ぶ。</p>
+<div class="tbl"><table>
+<tr><th>サイズで分けた Region LRU</th><th class="n">使う容量</th><th class="n">稼ぐヒット（全リクエストのうち）</th></tr>
+<tr><td><span class="key" style="background:var(--sh)"></span>S熱</td><td class="n">22%</td><td class="n">54.0%</td></tr>
+<tr><td><span class="key" style="background:var(--sc)"></span>S冷</td><td class="n" style="color:var(--r)"><b>40%</b></td><td class="n" style="color:var(--r)"><b>2.8%</b></td></tr>
+<tr><td><span class="key" style="background:var(--lh)"></span>L熱</td><td class="n">25%</td><td class="n">12.8%</td></tr>
+<tr><td><span class="key" style="background:var(--lc)"></span>L冷</td><td class="n">13%</td><td class="n">0.2%</td></tr>
+</table></div>
+<p>S冷は容量の 40% を使って、ヒットは 2.8% しか稼がない。その分が L熱から削られ、BHR が下がる。</p>
+<ul>
+<li>サイズで分けても、同じサイズの人気・不人気は同じ箱に混ざる。だから<b>サイズの分け方をいくら細かくしても便乗は消えない</b>（3 サイズの例でも、不人気コンテンツの合計は 46〜48% で変わらない）。</li>
+<li>人気・不人気でも分けられれば（理想の 4 分類）、OHR 81.2%、BHR 81.3% まで上がる。ただし、それには人気を前もって知る必要がある。</li>
+</ul>
+<div class="one"><b>ひとことで</b>：同じ箱のコンテンツは運命をともにする。不人気コンテンツが人気コンテンツに便乗して容量を食い、BHR を下げる。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">12</span>
+<h2>立ち上がりの補正と、実測との照合</h2>
+<div class="q">ここまでの計算は、シミュレータの実測と合うか。</div>
+<p>1 つだけ補正が要る。空のキャッシュから始めると、最初はほとんど全部がミスし、人気コンテンツほど先に来る。だから<b>最初の箱には S熱ばかりが詰まる</b>。そういう箱は人気が高すぎて（猶予の間に 17〜21 回呼ばれる）、寿命が 10 億リクエストを超え、事実上消えない。</p>
+<ul>
+<li>例題では 256 箱のうち 59 箱がこうなる。そこに入った S熱は常に手元にあるものとし、残りの容量でこれまでの計算をやり直す。</li>
+<li>この箱は S熱だけなので便乗がなく、成績が良くなる。</li>
+</ul>
+<div class="tbl"><table>
+<tr><th>例題</th><th class="n">モデル OHR / BHR</th><th class="n">実測 OHR / BHR</th></tr>
+<tr><td>普通の LRU</td><td class="n">62.8 / 76.9</td><td class="n">62.7 / 76.9</td></tr>
+<tr><td>Region FIFO・混ぜる</td><td class="n">52.8 / 65.0</td><td class="n">52.7 / 65.0</td></tr>
+<tr><td>Region FIFO・分ける</td><td class="n">54.3 / 66.2</td><td class="n">54.2 / 66.1</td></tr>
+<tr><td>Region LRU・混ぜる</td><td class="n">57.7 / 67.6</td><td class="n">57.7 / 67.6</td></tr>
+<tr><td>Region LRU・分ける（補正なし）</td><td class="n">69.7 / 55.7</td><td class="n" rowspan="2">73.7 / 62.9</td></tr>
+<tr><td>Region LRU・分ける（立ち上がり補正あり）</td><td class="n"><b>73.8 / 63.4</b></td></tr>
+</table></div>
+<p>補正を入れると、どの行もモデルと実測が 0.5pt 以内で合う（実測は 3,000 万リクエスト）。</p>
+<div class="one"><b>ひとことで</b>：最初に人気コンテンツだけで詰まった箱は消えない。これを別扱いにすれば、モデルは実測とよく合う。</div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">13</span>
+<h2>モデルの完成形（全体図）</h2>
+<p>ここまでの部品を 1 枚にまとめる。これが「Region LRU のサイズ分類モデル」の完成形。</p>
+<svg viewBox="0 0 780 440" role="img" aria-label="モデルの全体図">
+<g font-size="13">
+<rect x="10" y="10" width="760" height="54" rx="10" fill="var(--card)" stroke="var(--line)"/>
+<text x="390" y="32" text-anchor="middle" font-weight="700">入力</text>
+<text x="390" y="52" text-anchor="middle">各コンテンツの人気と大きさ ／ 容量 ／ 箱の大きさ ／ 分け方（サイズの境目）</text>
+<rect x="10" y="84" width="760" height="252" rx="12" fill="none" stroke="var(--a)" stroke-width="2"/>
+<text x="24" y="106" font-weight="700" fill="var(--a)">外側：ちょうど満杯になる猶予を二分法で探す（第 4 段）</text>
+<rect x="34" y="118" width="712" height="160" rx="10" fill="none" stroke="var(--b)" stroke-width="2"/>
+<text x="48" y="140" font-weight="700" fill="var(--b)">内側：猶予を固定して、堂々巡りが止まるまで繰り返す（第 9 段）</text>
+<rect x="54" y="154" width="200" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="154" y="178" text-anchor="middle">① 誰がミスして</text><text x="154" y="200" text-anchor="middle">入ってくるか</text>
+<rect x="290" y="154" width="200" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="390" y="178" text-anchor="middle">② 箱の中身と</text><text x="390" y="200" text-anchor="middle">箱の人気</text>
+<rect x="526" y="154" width="200" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="626" y="178" text-anchor="middle">③ 箱の寿命</text><text x="626" y="200" text-anchor="middle">＝ 手元にいる時間（第 8 段）</text>
+<path d="M254,185H286M490,185H522" stroke="var(--mut)" stroke-width="2" marker-end="url(#ar)"/>
+<path d="M626,216 C626,262 154,262 154,220" fill="none" stroke="var(--mut)" stroke-width="2" marker-end="url(#ar)"/>
+<text x="390" y="270" text-anchor="middle" fill="var(--mut)">手元にいる時間が変われば、誰がミスするかが変わる → 動かなくなるまで</text>
+<text x="390" y="304" text-anchor="middle">④ 当たる見込み ＝ y ÷ (y + 1)（第 7 段）　→　⑤ 使う容量の合計</text>
+<text x="390" y="326" text-anchor="middle" fill="var(--mut)">⑤ が容量より少なければ猶予を伸ばし、多ければ縮める</text>
+<rect x="10" y="356" width="370" height="74" rx="10" fill="var(--card)" stroke="var(--line)"/>
+<text x="195" y="380" text-anchor="middle" font-weight="700">補正：立ち上がり（第 12 段）</text><text x="195" y="402" text-anchor="middle">最初に人気コンテンツだけで</text><text x="195" y="420" text-anchor="middle">詰まった箱は「消えない」扱い</text>
+<rect x="400" y="356" width="370" height="74" rx="10" fill="var(--card)" stroke="var(--g)"/>
+<text x="585" y="380" text-anchor="middle" font-weight="700">出力</text><text x="585" y="402" text-anchor="middle">OHR ＝（受ける分 × 当たる見込み）の合計</text><text x="585" y="420" text-anchor="middle">BHR、種類ごとの容量、箱の寿命</text>
+</g></svg>
+<p>使った考え方は、高校〜学部 1・2 年で習うものばかり。</p>
+<div class="tbl"><table>
+<tr><th>段</th><th>使った考え方</th><th>どこで</th></tr>
+<tr><td>3</td><td>「ばらばらに来る」：いつから待っても次までの平均は同じ</td><td>呼ばれ方の前提</td></tr>
+<tr><td>4</td><td>細かく切って掛け合わせると e になる、二分法</td><td>当たる見込み 1 − e<sup>−x</sup>、猶予を決める</td></tr>
+<tr><td>5</td><td>「あと少し足したときの増え方」をそろえる</td><td>容量の最適な配り方</td></tr>
+<tr><td>7</td><td>1 周の中でヒットとミスを数える</td><td>当たる見込み y ÷ (y + 1)</td></tr>
+<tr><td>8</td><td>くじ引きを何回で外すか</td><td>箱の寿命</td></tr>
+<tr><td>9</td><td>答えが動かなくなるまで繰り返す</td><td>堂々巡りを解く</td></tr>
+<tr><td>10</td><td>「客の数 ＝ 入るペース × いる時間」</td><td>容量の配られ方</td></tr>
+</table></div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">14</span>
+<h2>モデルから実装へ：何を調整すればよいか</h2>
+<p>モデルで分かった欠点は 2 つ。(1) 容量を小さいコンテンツに寄せ過ぎる、(2) 便乗で BHR が下がる。RegionFlash（実装）では、これを 2 つのつまみで直す。どちらも値は実行中に測って決め、モデルの数値には頼らない。</p>
+<div class="tbl"><table>
+<tr><th>つまみ</th><th>何をするか</th><th>モデルが教えること</th><th>値の決め方</th></tr>
+<tr><td><b>書き直しの回数 n</b></td><td>箱を消すとき、その箱にいる間に n 回以上当たったコンテンツは新しい箱に書き直して残す</td><td>人気がばらばらなら、たくさん当たったコンテンツほど次も当たりやすい。だから「n 回以上なら残す」という形が最良</td><td>「書き直したコンテンツが次も当たったか」を種類ごとに数え、2 回に 1 回以上当たる最小の n を使う（例：大 3、小 2）</td></tr>
+<tr><td><b>大きいコンテンツの最低容量</b></td><td>大きいコンテンツの箱を、決めた量以上は残す</td><td>目的（BHR と OHR を混ぜたもの）の山は 1 つ。だから「上がれば同じ向き、下がれば逆向き」で頂上に着く</td><td>一定期間ごとに目的を測って少しずつ動かす（山登り）。固定で一番良い値との差は 0.1pt 以内（BHR 重視、合成データ）</td></tr>
+</table></div>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">15</span>
+<h2>このモデルが言えないこと</h2>
+<ul>
+<li><b>リクエストの束</b>：実際のリクエストは「ばらばら」ではなく、短い間に集中したり、人気が日ごとに変わったりする。モデルはそれを含まない。実トレースでは、普通の LRU のヒット率の予測がトレースによって 10〜30pt ずれた。</li>
+<li><b>人気の偏りが強いとき</b>：ごく少数のコンテンツにリクエストが集中する負荷では、普通の LRU でほとんど当たるので、分けても得がない。以前は「計算が安定しない」と書いたが、これは繰り返し計算の混ぜ方が粗くて答えが行ったり来たりしていただけだった。混ぜ方を直すと計算は落ち着き、シミュレーションと 0.33pt 以内で合った（11-17）。</li>
+<li><b>箱が大きいとき</b>：実際の SSD の規模（箱 1 つに 4,096〜10,016 個）では、分けたときの BHR の予測が 4〜6pt ずれていた。原因は「最初の数百万リクエストの間にできる、人気のコンテンツで埋まった箱」を数え落としていたこと。小さいコンテンツは数が多いので、キャッシュが一杯になった後も「初めてのリクエスト」が長く続き、その間に人気の箱ができて最後まで消えない。数え直すと 0.61pt 以内に合った（11-17）。</li>
+<li><b>箱の数が少ないとき</b>（64 個）：2〜4pt ずれていた。箱を消す機会は「箱 1 つを書き終えたとき」しか来ないので、箱が大きいと消す機会がまばらになり、人気の箱は思ったより長生きする。これを入れると 0.84pt 以内に合った（11-18）。</li>
+<li><b>繰り返し計算の答えが 1 つか</b>：答えがあることは示せたが、1 つしかないことはまだ示せていない。出発点を 7 通り変えても同じ答えに行き着くことは確かめた。</li>
+</ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="step"><span class="lab">16</span>
+<h2>確認問題</h2>
+<ol>
+<li>普通の LRU で、猶予 16,125 リクエスト、L熱の人気 0.00025 のとき、当たる見込みは？（e<sup>−4</sup> ≈ 0.018）</li>
+<li>Region FIFO で、サイズで分けても成績がほとんど変わらないのはなぜか。1 文で。</li>
+<li>箱が猶予の間に呼ばれる回数 z を 2 から 4 にすると、寿命は何倍になるか。（e<sup>2</sup> ≈ 7.4、e<sup>4</sup> ≈ 54.6）</li>
+<li>箱に入ってくるコンテンツが、受けるリクエストに比べて不人気側に偏るのはなぜか。</li>
+<li>サイズで分けた Region LRU で BHR が下がる理由を 2 つ挙げよ。</li>
+</ol>
+<details><summary>答え</summary>
+<ol>
+<li>人気 × 猶予 = 0.00025 × 16,125 ≈ 4。当たる見込み ≈ 1 − 0.018 = 0.98。</li>
+<li>箱は閉じた順に消されるので、どのコンテンツも手元にいる時間が同じになり、当たる見込みが人気だけで決まるから。</li>
+<li>寿命 ÷ 猶予は z = 2 で (7.4 − 1) ÷ 2 = 3.2、z = 4 で (54.6 − 1) ÷ 4 = 13.4。13.4 ÷ 3.2 ≈ 4.2 倍。箱の人気が 2 倍で、寿命は 4 倍以上になる。</li>
+<li>箱に入るのはミスしたコンテンツだけで、人気コンテンツはミスしにくいから。</li>
+<li>(a) 寿命の長い小さいコンテンツの箱が容量を取り、大きい人気コンテンツの分が減る。(b) 不人気な小さいコンテンツが人気コンテンツの箱に便乗し、ほとんどヒットしないのに容量を使う。</li>
+</ol>
+</details>
+</section>
+</main>
+<script>
+(function(){
+  var s=document.getElementById('lt'),v=document.getElementById('ltv'),r=document.getElementById('lr'),c=document.getElementById('lc');
+  function f(z){return (Math.exp(z)-1)/z}
+  function up(){var z=+s.value;v.textContent=z.toFixed(1);r.textContent=f(z).toFixed(1)+' 倍';
+    c.textContent='（箱の人気を 2 倍にすると、寿命は今の '+(f(2*z)/f(z)).toFixed(1)+' 倍）';}
+  s.addEventListener('input',up);up();
+})();
+</script>
+</body></html>

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Region モデル入門（学部レベルから）</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.8 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 16px 72px}
+h1{font-size:24px;margin:0 0 4px}
+h2{font-size:20px;margin:48px 0 8px;border-bottom:2px solid var(--a);padding-bottom:4px}
+h3{font-size:16.5px;margin:28px 0 6px}
+.sub{color:var(--mut);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:12px 0;overflow-x:auto}
+.ok{border-left:4px solid var(--g)}.warn{border-left:4px solid var(--b)}.as{border-left:4px solid var(--a)}.use{border-left:4px solid var(--p)}
+.use>b:first-child{color:var(--p)}
+.katex-display{overflow-x:auto;overflow-y:hidden;padding:2px 0}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px}
+details{margin:8px 0;border:1px solid var(--line);border-radius:8px;padding:6px 12px}summary{cursor:pointer;font-weight:600}
+svg{max-width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:12px}
+ul,ol{margin:4px 0;padding-left:24px}li{margin:3px 0}
+.mut{color:var(--mut)}
+.lab{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:center}
+@media (max-width:720px){.lab{grid-template-columns:1fr}}
+input[type=range]{width:100%}
+.big{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.toc a{color:var(--a);text-decoration:none}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"></script>
+</head>
+<body>
+<main>
+<h1>Region モデル入門：学部の確率・微積分から、今回のモデルを説明できるようになるまで</h1>
+<p class="sub">2026-11-16。前提は、高校〜学部 1・2 年の微積分（指数関数、積分、偏微分）と確率の初歩（期待値、条件つき確率）。
+読み終えると、<a href="region_lru_derivation.html">region_lru_derivation.html</a>（導出）と <a href="region_model_appendix.html">region_model_appendix.html</a>（証明つきの付録）が読め、<a href="theory_defense_overview.html">theory_defense_overview.html</a> の 21 枚を自分の言葉で説明できる、というのが目標。
+各節は「道具 → なぜ要るか（モデルのどこで使うか）→ 練習問題」の順。練習問題の数値は、例題（<a href="che_to_region_walkthrough.html">walkthrough</a>）の値と合わせてある。</p>
+
+<div class="card as toc"><b>目次</b>
+<ol start="0">
+<li><a href="#s0">到達目標と、道具の地図</a></li>
+<li><a href="#s1">キャッシュの基礎（用語）</a></li>
+<li><a href="#s2">確率の道具 9 個</a></li>
+<li><a href="#s3">最適化の道具 4 個</a></li>
+<li><a href="#s4">Zipf 分布</a></li>
+<li><a href="#s5">モデルを 8 段で組み立てる</a></li>
+<li><a href="#s6">実行中の調整の 2 つの理屈</a></li>
+<li><a href="#s7">説明の型（30 秒・3 分・質問されたとき）</a></li>
+<li><a href="#s8">次に読むもの</a></li>
+</ol></div>
+
+<!-- ============================================================ -->
+<h2 id="s0">0. 到達目標と、道具の地図</h2>
+<p>このモデルが答える問いは 1 つ：<b>「SSD キャッシュで、物をサイズ別の Region に分けて書くと、ヒット率はどう変わるか。それはなぜか」</b>。答えは 1 行の式に行き着く。</p>
+<div class="card ok">\[ \underbrace{h_i=\frac{\lambda_iL_i}{1+\lambda_iL_i}}_{\text{物のヒット率}}\qquad
+\underbrace{\mathbb{E}[\text{寿命}]=\frac{e^{\Lambda T}-1}{\Lambda}}_{\text{Region の寿命}}\qquad
+\underbrace{\Lambda\approx R\cdot\mathbb{E}\Big[\frac{\lambda}{s}\Big]}_{\text{Region の touch 率 = 価値密度}} \]
+<p>読み方：物は Region が生きている間だけキャッシュにいる。Region の寿命は「中の物がどれだけ頻繁に触られるか（Λ）」の<b>指数</b>で伸びる。Λ は中の物の「1 バイトあたりの人気 λ/s」で決まる。だから、λ/s の高い物（小物）だけを集めた Region は極端に長生きし、容量を取る。</p></div>
+<p>この 3 つの式を導くのに要る道具と、使う場所の対応：</p>
+<svg viewBox="0 0 900 330" role="img" aria-label="道具とモデルの対応">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<g font-size="12">
+<text x="110" y="16" text-anchor="middle" font-weight="700">道具（§2〜§4）</text><text x="620" y="16" text-anchor="middle" font-weight="700">モデルの段（§5 の ①〜⑥）と調整（§6 の Ⓐ・Ⓑ）</text>
+<g fill="var(--card)" stroke="var(--line)">
+<rect x="10" y="26" width="200" height="26" rx="6"/><rect x="10" y="58" width="200" height="26" rx="6"/><rect x="10" y="90" width="200" height="26" rx="6"/><rect x="10" y="122" width="200" height="26" rx="6"/><rect x="10" y="154" width="200" height="26" rx="6"/><rect x="10" y="186" width="200" height="26" rx="6"/><rect x="10" y="218" width="200" height="26" rx="6"/><rect x="10" y="250" width="200" height="26" rx="6"/><rect x="10" y="282" width="200" height="26" rx="6"/></g>
+<text x="110" y="43" text-anchor="middle">指数分布・無記憶性</text><text x="110" y="75" text-anchor="middle">ポアソン過程の重ね合わせ</text><text x="110" y="107" text-anchor="middle">幾何分布・Wald の恒等式</text><text x="110" y="139" text-anchor="middle">再生報酬の定理・PASTA</text><text x="110" y="171" text-anchor="middle">Little の公式</text><text x="110" y="203" text-anchor="middle">積率母関数・Jensen</text><text x="110" y="235" text-anchor="middle">凹関数・ラグランジュ（KKT）</text><text x="110" y="267" text-anchor="middle">二分法・不動点</text><text x="110" y="299" text-anchor="middle">ベイズの定理</text>
+<g fill="var(--card)" stroke="var(--a)">
+<rect x="420" y="26" width="460" height="26" rx="6"/><rect x="420" y="62" width="460" height="26" rx="6"/><rect x="420" y="98" width="460" height="26" rx="6"/><rect x="420" y="134" width="460" height="26" rx="6"/><rect x="420" y="170" width="460" height="26" rx="6"/><rect x="420" y="206" width="460" height="26" rx="6"/><rect x="420" y="242" width="460" height="26" rx="6"/><rect x="420" y="278" width="460" height="26" rx="6"/></g>
+<text x="430" y="43">① 物単位 LRU（Che）：h = 1 − e^(−λT)</text>
+<text x="430" y="79">② 容量の最適な分け方：限界値をそろえる</text>
+<text x="430" y="115">③ Region の物は FIFO：h = λL/(1+λL)</text>
+<text x="430" y="151">④ Region LRU の寿命：(e^(ΛT) − 1)/Λ</text>
+<text x="430" y="187">⑤ 同居の物で平均：L = ∫ e^(λt) M(t)^(n−1) dt</text>
+<text x="430" y="223">⑥ 容量の条件と不動点（T を決める）</text>
+<text x="430" y="259">Ⓐ 再挿入の閾値：p(h) は h とともに増える（§6）</text>
+<text x="430" y="295">Ⓑ 容量の下限：山が 1 つなら山登りで足りる（§6）</text>
+<g stroke="var(--mut)" fill="none" marker-end="url(#ar)">
+<path d="M210,39H418"/><path d="M210,71C300,71 330,147 418,147"/><path d="M210,39C290,39 340,145 418,143"/><path d="M210,103C300,103 330,149 418,149"/><path d="M210,135C300,135 330,111 418,111"/><path d="M210,167C300,167 330,219 418,217"/><path d="M210,199C300,199 330,183 418,183"/><path d="M210,231C300,231 330,75 418,75"/><path d="M210,263C300,263 330,221 418,221"/><path d="M210,295C300,295 330,255 418,255"/><path d="M210,231C310,235 340,291 418,291"/>
+</g></g></svg>
+
+<!-- ============================================================ -->
+<h2 id="s1">1. キャッシュの基礎（用語）</h2>
+<div class="tbl"><table>
+<tr><th>用語</th><th>意味</th></tr>
+<tr><td>キャッシュ、ヒット、ミス</td><td>よく使うデータを手元（速い記憶装置）に置く仕組み。要求された物が手元にあればヒット、なければミス（遠くから取り直して書き込む）</td></tr>
+<tr><td>OHR（object hit ratio）</td><td>ヒットした要求の数 ÷ 全要求の数。「回数」で数える</td></tr>
+<tr><td>BHR、BMR</td><td>ヒットしたバイト ÷ 要求されたバイト。BMR = 1 − BHR。「量」で数える。大きい物ほど重く効く</td></tr>
+<tr><td>LRU</td><td>いっぱいになったら、最後に使われてから最も時間が経った物を捨てる</td></tr>
+<tr><td>FIFO</td><td>いっぱいになったら、最も古く入った物を捨てる（使われても延命しない）</td></tr>
+<tr><td>Region</td><td>SSD（フラッシュ）を大きな箱（数 MiB〜数百 MiB）に区切ったもの。フラッシュは小さな単位で上書き・消去すると遅く寿命も縮むので、箱に順に書き足し、<b>箱ごとまとめて消す</b></td></tr>
+<tr><td>Region FIFO / Region LRU</td><td>箱を捨てる順。FIFO は書き終えた（封じた）順、LRU は「中のどれかが最後に使われた時刻」の古い順</td></tr>
+<tr><td>touch</td><td>Region の時計を「今」に戻す出来事。封じた時と、中の物がヒットした時</td></tr>
+<tr><td>分類（サイズ分類）</td><td>書き込むときに、物をサイズなどで分けて別々の Region に入れること</td></tr>
+<tr><td>IRM（独立参照モデル）</td><td>「各物への要求は、その物固有の一定の率で、他と無関係に来る」という負荷の仮定。このモデルの土台</td></tr>
+</table></div>
+<div class="card warn"><b>物単位と Region 単位の違いが、このモデルの出発点</b>
+<p>物単位の LRU では、ヒットした物は 1 個だけ先頭に移る。Region キャッシュでは、<b>ヒットしても物は動かない</b>。動くのは Region の時計だけで、消えるときは Region の全員が一緒に消える。だから「冷たい物が熱い物と同じ Region に入って一緒に生き延びる（便乗）」や「熱い物が冷たい Region と一緒に消される」が起きる。</p></div>
+
+<!-- ============================================================ -->
+<h2 id="s2">2. 確率の道具 9 個</h2>
+
+<h3>2.1 指数分布と無記憶性</h3>
+<p>「次に何かが起きるまでの待ち時間」を表す分布。率 \(\lambda\)（単位時間あたり平均 \(\lambda\) 回起きる）のとき</p>
+\[ P(X>t)=e^{-\lambda t},\qquad \mathbb{E}[X]=\frac1\lambda . \]
+<p><b>無記憶性</b>：すでに \(s\) だけ待った後でも、残りの待ち時間の分布は最初と同じ。</p>
+\[ P(X>s+t\mid X>s)=\frac{e^{-\lambda(s+t)}}{e^{-\lambda s}}=e^{-\lambda t}. \]
+<div class="card use"><b>使う所</b>：① Che 近似（最後の要求から T 以内に次が来る確率 \(1-e^{-\lambda T}\)）。③ 物が消えた後、次の要求までの平均が「いつ消えたかに関係なく」\(1/\lambda\) であること。</div>
+<details><summary>練習 1：例題の S熱（\(\lambda=7.5\times10^{-5}\)）は、T = 16,125 のとき何 % ヒットするか</summary>
+<p>\(\lambda T=1.209\)、\(h=1-e^{-1.209}=0.702\)。walkthrough のスライド 4 の値。</p></details>
+
+<h3>2.2 ポアソン過程：重ね合わせと「誰が鳴らしたか」</h3>
+<p>出来事の間隔が独立な指数分布（率 \(\lambda\)）のとき、その出来事の列をポアソン過程と呼ぶ。大事な性質は 2 つ。</p>
+<ul>
+<li><b>重ね合わせ</b>：独立なポアソン過程（率 \(\lambda_1,\dots,\lambda_n\)）をまとめて 1 本の列と見ると、率 \(\Lambda=\sum_j\lambda_j\) のポアソン過程になる。</li>
+<li><b>誰が鳴らしたか</b>：まとめた列の 1 つの出来事が物 \(i\) のものである確率は \(\lambda_i/\Lambda\)。出来事ごとに独立。</li>
+</ul>
+<div class="card use"><b>使う所</b>：④ Region の touch は「中の物への要求の重ね合わせ」。だから touch の率は中の物の \(\lambda\) の和 \(\Lambda\) で、間隔は \(\mathrm{Exp}(\Lambda)\)。Ⓐ 再挿入で「次の touch が自分の要求である確率 \(\lambda/\Lambda\)」。</div>
+<details><summary>練習 2：例題の小物の Region（128 個、挿入された物の平均 \(\lambda\) は \(2.61\times10^{-5}\)）の touch 率は</summary>
+<p>\(\Lambda=128\times2.61\times10^{-5}=3.34\times10^{-3}\)。約 300 要求に 1 回、Region の誰かが触られる。</p></details>
+
+<h3>2.3 幾何分布</h3>
+<p>成功確率 \(p\) の試行を、初めて成功するまで繰り返す。成功するまでの「失敗の回数」の平均は</p>
+\[ \mathbb{E}[\text{失敗の回数}]=\frac{1-p}{p}. \]
+<div class="card use"><b>使う所</b>：④ Region は touch の間隔が T を超えたら死ぬ。「間隔が T を超える」を成功（確率 \(p=e^{-\Lambda T}\)）と見ると、死ぬまでに生き延びる間隔の数の平均は \((1-p)/p=e^{\Lambda T}-1\)。Ⓐ 1 回の滞在でのヒット数も幾何分布。</div>
+<details><summary>練習 3：\(\Lambda T=1.8\) の Region は、死ぬまでに平均何回 touch されるか</summary>
+<p>\(p=e^{-1.8}=0.165\)、\((1-p)/p=5.05\) 回。\(\Lambda T=5.4\) なら \(e^{5.4}-1=220\) 回。ΛT が 3 倍で 44 倍。</p></details>
+
+<h3>2.4 Wald の恒等式（個数がランダムな和の平均）</h3>
+<p>独立で同じ分布の \(X_1,X_2,\dots\) を、ランダムな個数 \(K\) だけ足す。\(K\) が「それまでに見た値だけで決まる」（先を見ない）なら</p>
+\[ \mathbb{E}\Big[\sum_{m=1}^{K}X_m\Big]=\mathbb{E}[K]\cdot\mathbb{E}[X]. \]
+<div class="card use"><b>使う所</b>：④ 寿命 = 生き延びた間隔の和 + 最後の T。③ 滞在中のヒット数の平均が \(\lambda_i\times\)（滞在の平均）になること。Ⓐ 再挿入で滞在が何回もつながるときの合計。</div>
+
+<h3>2.5 再生報酬の定理</h3>
+<p>同じ性質の「サイクル」が独立に繰り返されるとき、長い目で見た時間平均は</p>
+\[ \text{長期の平均}=\frac{\mathbb{E}[\text{1 サイクルで得る量}]}{\mathbb{E}[\text{1 サイクルの長さ}]} . \]
+<p>例：平均 9 時間動いて平均 1 時間止まる機械は、時間の 90% 動いている。動く時間・止まる時間の分布の形は関係ない（平均だけで決まる）。</p>
+<div class="card use"><b>使う所</b>：③ 物のサイクル =「いる（平均 \(L\)）＋いない（平均 \(1/\lambda\)）」。いる時間の割合が \(L/(L+1/\lambda)\)。Region の寿命がどんな分布でも、平均 \(L\) だけで決まるのがこの定理のおかげ。</div>
+<details><summary>練習 4：\(\lambda=7.5\times10^{-5}\) の物が、入るたびに平均 \(L=119{,}717\) 要求のあいだ居られるなら、在籍率は</summary>
+<p>\(\lambda L=8.98\)、\(h=8.98/9.98=0.900\)。walkthrough スライド 14 の S熱 の値。</p></details>
+
+<h3>2.6 PASTA（ポアソン到着は時間平均を見る）</h3>
+<p>ポアソン過程で来る要求が「その瞬間に物がいる」確率は、「時間で見て物がいる割合」と等しい。</p>
+<div class="card use"><b>使う所</b>：③「在籍している時間の割合」＝「要求がヒットする割合」。要求がまとまって来る負荷（IRM でない）では等しくならない。これがモデルの限界の 1 つ。</div>
+
+<h3>2.7 Little の公式</h3>
+<p>店にいる客の平均人数 = 客が来る率 × 1 人の平均滞在時間（\(N=\rho W\)）。分布によらない。</p>
+<div class="card use"><b>使う所</b>：⑥ 容量。ある分類が抱える Region の数 = 新しい Region を書き終えるペース（要求 1 回あたり何個）× 1 個が追い出されるまで残る時間。寿命が長い分類ほど容量を多く占める。</div>
+<details><summary>練習 5：Region が 100 要求に 1 個封じられ、平均寿命が 25,600 要求なら、Region は何個あるか</summary>
+<p>\(0.01\times25{,}600=256\) 個。</p></details>
+
+<h3>2.8 積率母関数と Jensen の不等式</h3>
+<p>\(M(t)=\mathbb{E}[e^{tX}]\) を積率母関数という。独立な \(X_1,\dots,X_n\) の和については</p>
+\[ \mathbb{E}\big[e^{t(X_1+\dots+X_n)}\big]=\prod_a\mathbb{E}[e^{tX_a}]=M(t)^n . \]
+<p><b>Jensen</b>：下に凸な関数 \(f\) では \(\mathbb{E}[f(X)]\ge f(\mathbb{E}[X])\)。\(e^x\) は下に凸なので \(\mathbb{E}[e^{X}]\ge e^{\mathbb{E}[X]}\)。</p>
+<div class="card use"><b>使う所</b>：⑤ Region の Λ は「同居の物の \(\lambda\) の和」。寿命 \(\int_0^Te^{\Lambda t}dt\) を同居の物について平均すると、和の指数なので \(M(t)^{n-1}\) になる。Jensen は「λ を先に平均して指数に入れる（平均場）と、寿命を短く見積もる」ことを言う。まれに熱い物が混ざる Region は、平均よりずっと長生きする。</div>
+<details><summary>練習 6：\(X\) が確率 1/2 ずつで 0 か 2 のとき、\(\mathbb{E}[e^X]\) と \(e^{\mathbb{E}[X]}\) を比べる</summary>
+<p>\(\mathbb{E}[e^X]=(1+7.39)/2=4.19\)、\(e^{1}=2.72\)。平均場は 35% 小さく見積もる。</p></details>
+
+<h3>2.9 ベイズの定理</h3>
+<p>観測 \(h\) を見た後の、原因 \(\lambda\) の確からしさ：\(\pi(\lambda\mid h)\propto\pi(\lambda)\times P(h\mid\lambda)\)。</p>
+<div class="card use"><b>使う所</b>：Ⓐ「この滞在で \(h\) 回ヒットした物は、人気 \(\lambda\) が高い物である可能性が高い」。ヒット数が多いほど、次も当たる確率 \(p(h)\) が上がる。</div>
+<details><summary>練習 7：物の 90% は「次に当たる確率 a = 0.1」、10% は「a = 0.9」。1 滞在のヒット数 \(h\) の確率は \((1-a)a^h\)。\(p(h)\) を \(h=0,1,2,3\) で求める</summary>
+<p>事後の重みは \(\pi(1-a)a^h\)。\(h=0\)：0.81 と 0.01 → \(p=0.11\)。\(h=1\)：0.081 と 0.009 → \(p=0.18\)。\(h=2\)：0.0081 と 0.0081 → \(p=0.50\)。\(h=3\)：0.00081 と 0.00729 → \(p=0.82\)。
+\(p^*=0.5\) なら「2 回以上ヒットした物だけ書き直す」が答えになる。λ が 1 種類しかなければ \(p\) は \(h\) によらず一定で、ヒット数は何の手がかりにもならない。</p></details>
+
+<!-- ============================================================ -->
+<h2 id="s3">3. 最適化の道具 4 個</h2>
+<h3>3.1 凹関数と「限界値」</h3>
+<p>\(f''\le0\) の関数を凹という。「増やすほど、増え方が鈍る」。キャッシュでは、容量を増やすほどヒットは増えるが、増え方（<b>限界値</b> \(dH/dC\)：容量を 1 バイト足したときに増えるヒット）は小さくなる。最初に入るのは一番人気の物で、後から入る物ほど人気が低いから。</p>
+
+<h3>3.2 ラグランジュの未定乗数法（KKT 条件）＝「限界値をそろえる」</h3>
+<p>全体の容量 \(C\) を分類 1・2 に \(C_1+C_2=C\) と分けて \(H_1(C_1)+H_2(C_2)\) を最大にする。最適では</p>
+\[ \frac{dH_1}{dC_1}=\frac{dH_2}{dC_2}\;(=\mu). \]
+<p>理由：もし分類 1 の限界値の方が大きければ、分類 2 から 1 バイト移すだけで合計が増える。移せなくなるのは両方が等しいとき。\(H_k\) が凹なら、この条件を満たす点はただ 1 つで、それが最大（山が 1 つ）。分類が 3 つ以上でも同じで、全分類の限界値が等しくなる。</p>
+<details><summary>練習 8：\(H_1=\sqrt{C_1}\)、\(H_2=2\sqrt{C_2}\)、\(C_1+C_2=100\) の最適な分け方</summary>
+<p>\(1/(2\sqrt{C_1})=1/\sqrt{C_2}\) から \(C_2=4C_1\)、\(C_1=20\)、\(C_2=80\)。合計 \(4.47+17.89=22.36\)。半々（50/50）なら \(7.07+14.14=21.21\)。</p></details>
+<div class="card use"><b>使う所</b>：② 物単位で容量を分けるときの最適。例題では、共有の LRU のままだと小物の限界値が大物の 27 倍あり、そろうまで小物へ移すと OHR が 62.8% → 78.1% になる。これが「分類の効果の基準」。</div>
+
+<h3>3.3 二分法</h3>
+<p>増加する関数 \(F\) で \(F(T)=C\) となる \(T\) を探す：範囲の真ん中で \(F\) を計算し、\(C\) より小さければ右半分、大きければ左半分に絞る。繰り返すと答えに収束する。</p>
+<div class="card use"><b>使う所</b>：①⑥「占有が容量 C に等しくなる T」を求める。占有は T について増加する。</div>
+
+<h3>3.4 不動点の反復</h3>
+<p>\(x=\Phi(x)\) を満たす \(x\) を不動点という。「\(x\) を仮に決める → \(\Phi(x)\) を計算 → それを新しい \(x\) にする」を繰り返して求める。</p>
+<div class="card use"><b>使う所</b>：⑥ 滞在 \(L\) は「誰が同居するか（挿入の流れ）」で決まり、挿入の流れは「誰がどれだけミスするか」つまり \(L\) で決まる。互いに依存するので、反復で同時に解く。循環論法ではなく、つじつまの合う答えを探している。</div>
+
+<!-- ============================================================ -->
+<h2 id="s4">4. Zipf 分布</h2>
+<p>人気の順位 \(r\) の物の要求率が \(\lambda_r\propto r^{-\alpha}\) である分布。\(\alpha\) を傾き（slope）という。両対数のグラフで直線になり、その傾きが \(-\alpha\)。</p>
+<div class="lab">
+<svg viewBox="0 0 420 250" role="img" aria-label="Zipf の人気分布">
+<g font-size="12"><line x1="50" y1="210" x2="400" y2="210" stroke="var(--mut)"/><line x1="50" y1="20" x2="50" y2="210" stroke="var(--mut)"/>
+<text x="225" y="240" text-anchor="middle">順位 r（対数）</text><text x="14" y="115" transform="rotate(-90 14 115)" text-anchor="middle">要求率 λ（対数）</text>
+<line x1="50" y1="80" x2="400" y2="164" stroke="var(--a)" stroke-width="2"/><text x="330" y="140" fill="var(--a)">α = 0.7（なだらか）</text>
+<line x1="50" y1="30" x2="400" y2="198" stroke="var(--r)" stroke-width="2"/><text x="150" y="60" fill="var(--r)">α = 1.4（急）</text>
+</g></svg>
+<div>
+<ul>
+<li>\(\alpha\) が小さい（0.7）：人気が広く薄く散る。少し冷たい物にも要求がたくさん残っている。</li>
+<li>\(\alpha\) が大きい（1.4）：ごく少数の物に要求が集中する。残りはほとんど要求されない。</li>
+</ul>
+<p>キャッシュ容量 \(C\) との関係（Che 近似から出る。付録 N）：</p>
+\[ \alpha<1:\ \text{ヒット}\propto C^{\,1-\alpha},\qquad \alpha>1:\ \text{ミス}\propto C^{-(\alpha-1)} . \]
+</div></div>
+<details><summary>練習 9：容量を 2 倍にしたとき、α = 0.7 と α = 1.4 で何が起きるか</summary>
+<p>α = 0.7：ヒットが \(2^{0.3}=1.23\) 倍（容量を増やす価値がまだ大きい）。α = 1.4：ミスが \(2^{-0.4}=0.76\) 倍になるが、元のミスがすでに小さい（数 %）ので、増えるヒットは 1pt 未満。</p></details>
+<div class="card use"><b>使う所</b>：分類の効果の大きさ。分類は容量を「限界値の高い分類」へ移す操作なので、<b>限界値がまだ大きい負荷（α が小さい）ほど得が大きい</b>。α が大きいと、どの分類もすでに飽和していて、移しても得るものが少ない。</div>
+
+<!-- ============================================================ -->
+<h2 id="s5">5. モデルを 8 段で組み立てる</h2>
+<p>ここからは道具を順に使うだけ。各段の「使う道具」を確かめながら読む。</p>
+
+<h3>① 物単位 LRU（Che 近似）　<span class="mut">道具：2.1、3.3</span></h3>
+<p>LRU で捨てられるのは「最後の要求から最も時間が経った物」。その経過時間を一定値 \(T\) とみなす（物が多いと、ほとんど揺れない）。すると物 \(i\) がいるのは「直近 \(T\) の間に要求があったとき」で、無記憶性から</p>
+\[ h_i=1-e^{-\lambda_iT},\qquad \sum_is_i\,(1-e^{-\lambda_iT})=C\ \ (\text{二分法で } T \text{ を決める}). \]
+
+<h3>② 容量の最適な分け方　<span class="mut">道具：3.1、3.2</span></h3>
+<p>分類ごとに LRU を持たせ、容量を配る。ヒットは容量の凹関数なので、最適は「限界値が等しい」配分。限界値は</p>
+\[ \frac{dH_k}{dC_k}=\frac{\sum\lambda_i^2e^{-\lambda_iT_k}}{\sum s_i\lambda_ie^{-\lambda_iT_k}}\approx\frac{\text{境目にいる物の }\lambda}{s_k} . \]
+<p>つまり「いま追い出されかけている物の、1 バイトあたりの人気 \(\lambda/s\)」。小さい物ほど同じ人気でも \(\lambda/s\) が高いので、OHR を上げたいなら小物に容量を回すのが得になる。BHR を上げたいなら、分子に \(s\) が掛かって \(s\) が消え、「境目の \(\lambda\)」をそろえることになる（共有の LRU がほぼそれ）。</p>
+
+<h3>③ Region の物は FIFO　<span class="mut">道具：2.1、2.4、2.5、2.6</span></h3>
+<svg viewBox="0 0 900 110" role="img" aria-label="物のサイクル">
+<g font-size="12">
+<rect x="20" y="30" width="250" height="26" fill="var(--g)" opacity=".4"/><text x="145" y="48" text-anchor="middle">いる（平均 L）：要求は全部ヒット</text>
+<rect x="270" y="30" width="130" height="26" fill="var(--line)"/><text x="335" y="48" text-anchor="middle">いない（平均 1/λ）</text>
+<rect x="400" y="30" width="250" height="26" fill="var(--g)" opacity=".4"/><text x="525" y="48" text-anchor="middle">いる（平均 L）</text>
+<rect x="650" y="30" width="130" height="26" fill="var(--line)"/><text x="715" y="48" text-anchor="middle">いない</text>
+<text x="20" y="22" fill="var(--r)">ミス → 書き込む</text><text x="400" y="22" fill="var(--r)">ミス → 書き込む</text>
+<text x="270" y="76" text-anchor="middle">Region が消える</text><text x="650" y="76" text-anchor="middle">Region が消える</text>
+<path d="M20,92H400" stroke="var(--fg)" marker-start="url(#ar)" marker-end="url(#ar)"/><text x="210" y="106" text-anchor="middle">1 サイクル</text>
+</g></svg>
+<p>Region キャッシュではヒットしても物は動かないので、物は「書き込まれる → Region が消えるまでいる → 次の要求でミス」を繰り返す。再生報酬の定理から</p>
+\[ h_i=\frac{L_i}{L_i+1/\lambda_i}=\frac{\lambda_iL_i}{1+\lambda_iL_i},\qquad \text{書き込みの率 } m_i=\frac{\lambda_i}{1+\lambda_iL_i}. \]
+<p><b>ここが要</b>：Region がどう選ばれて消えるかは、すべて「滞在の平均 \(L_i\)」に押し込まれる。残りの段は \(L_i\) を求めるだけ。</p>
+
+<h3>④ Region FIFO と Region LRU の寿命　<span class="mut">道具：2.2、2.3、2.4</span></h3>
+<p><b>Region FIFO</b>：どの Region も封じてから同じ時間 \(T\) で消える。全員 \(L_i=T\)。寿命が中身に依らないので、<b>分類しても何も変わらない</b>。</p>
+<p><b>Region LRU</b>：Region は「touch の間隔が \(T\) を超えたら」消える。touch は率 \(\Lambda\) のポアソン過程（重ね合わせ）。間隔が \(T\) を超える確率は \(p=e^{-\Lambda T}\)、それまでに生き延びる間隔の数は幾何分布、Wald の恒等式でまとめると</p>
+\[ \mathbb{E}[\text{寿命}]=\frac{e^{\Lambda T}-1}{\Lambda}. \]
+<div class="lab">
+<div>
+<p>下のつまみで \(\Lambda T\) を動かすと、寿命が \(T\) の何倍になるかが出る。<b>足し算で増やすと掛け算で伸びる</b>のが指数。</p>
+<input type="range" id="lt" min="0.2" max="12" step="0.1" value="2.1" aria-label="ΛT">
+<p>\(\Lambda T\) = <span class="big" id="ltv">2.1</span>　→　寿命 ÷ T = <span class="big" id="lifev">3.4</span></p>
+<p class="mut">例題：大物の分類 ΛT = 2.10（寿命 3.4T）、混在 3.3〜3.6（8〜10T）、小物の分類 5.76（55T）。</p>
+</div>
+<svg viewBox="0 0 420 240" role="img" aria-label="寿命と ΛT">
+<g font-size="12"><line x1="50" y1="200" x2="400" y2="200" stroke="var(--mut)"/><line x1="50" y1="20" x2="50" y2="200" stroke="var(--mut)"/>
+<text x="225" y="232" text-anchor="middle">ΛT</text><text x="14" y="110" transform="rotate(-90 14 110)" text-anchor="middle">寿命 ÷ T（対数）</text>
+<text x="50" y="215" text-anchor="middle">0</text><text x="167" y="215" text-anchor="middle">4</text><text x="283" y="215" text-anchor="middle">8</text><text x="400" y="215" text-anchor="middle">12</text>
+<text x="44" y="204" text-anchor="end">1</text><text x="44" y="156" text-anchor="end">10</text><text x="44" y="111" text-anchor="end">10²</text><text x="44" y="66" text-anchor="end">10³</text><text x="44" y="24" text-anchor="end">10⁴</text>
+<polyline id="curve" fill="none" stroke="var(--fg)" stroke-width="2" points=""/>
+<circle id="dot" cx="50" cy="200" r="6" fill="var(--b)"/>
+</g></svg>
+</div>
+
+<h3>⑤ Λ を物から組み立てる　<span class="mut">道具：2.2、2.8</span></h3>
+<p>物 \(i\) の入った Region の \(\Lambda\) は「自分の \(\lambda_i\) ＋ 同居の \(n-1\) 個の \(\lambda\) の和」。寿命を積分の形 \(\int_0^Te^{\Lambda t}dt\) に書くと、和の指数は積に分かれ、同居の物が独立なら積の平均は平均の積（積率母関数）：</p>
+\[ L_i=\int_0^Te^{\lambda_it}\,M_k(t)^{\,n_k-1}\,dt,\qquad M_k(t)=\frac{\sum_{j}m_je^{\lambda_jt}}{\sum_jm_j}. \]
+<p>同居の物は「書き込まれた物」なので、重みは書き込みの率 \(m_j\)。<b>熱い物はめったにミスしないので、同居の物は冷たい物に偏る</b>。</p>
+
+<h3>⑥ 容量の条件と不動点　<span class="mut">道具：2.7、3.3、3.4</span></h3>
+<p>\(L\) は \(m\) に、\(m\) は \(L\) に依るので反復で解く（不動点）。最後に、占有 \(\sum s_ih_i\)（詰め残しの補正つき）が容量 \(C\) に等しくなる \(T\) を二分法で探す。</p>
+
+<h3>⑦ 分類すると何が起きるか　<span class="mut">道具：2.7 と ④ の指数</span></h3>
+\[ \Lambda_k\approx n_k\times(\text{同居の物の平均 }\lambda)=\frac{R}{s_k}\,\bar\lambda=R\times\overline{\Big(\frac{\lambda}{s}\Big)} . \]
+<ul>
+<li>混ぜると、どの Region も \(\Lambda\) がならされて寿命が同じくらいになる。</li>
+<li>サイズで分けると、小物の Region は物の数 \(n\) が多いぶん \(\Lambda\) が大きく、寿命が指数的に長い。Little の公式から、長生きの Region が容量を取る。</li>
+<li>結果：小物に容量が寄り、OHR が上がる。大物の取り分が減り、BHR は下がる。</li>
+<li>副作用（便乗）：同じ Region の物は同じ寿命を持つので、熱い小物と同じ Region に入った冷たい小物も長く居座る。サイズだけで分けても、同じサイズの熱い物と冷たい物は分かれない。</li>
+</ul>
+<details><summary>練習 10：例題で、小物の Region の Λ は 3.34×10⁻³、大物は 1.22×10⁻³、T = 1,724。寿命の比は</summary>
+<p>小物：\(\Lambda T=5.76\)、\((e^{5.76}-1)/\Lambda=94{,}600\)。大物：\(\Lambda T=2.10\)、\(5{,}890\)。Λ の比は 2.7 倍、寿命の比は 16 倍。</p></details>
+
+<h3>⑧ 立ち上がりの注意</h3>
+<p>空のキャッシュから始めると、最初は全部ミスなので、最初の Region には熱い物が固まって入る。その Region は \(\Lambda T\) が極端に大きく、観測期間の間は消えない（不死）。人気が変わらない合成負荷に特有の現象で、モデルでは別に足している。人気が時間とともに変わる負荷では消える。</p>
+
+<!-- ============================================================ -->
+<h2 id="s6">6. 実行中の調整の 2 つの理屈</h2>
+<h3>Ⓐ 再挿入の閾値 n<span class="mut">道具：2.2、2.3、2.9</span></h3>
+<p>消す Region の中の物を、新しい Region に書き直して残すかどうか。書き直せば、次の滞在で当たる確率 \(p\) の分だけミスが減り、書き込みは正味 \((1-p)s\) 増える。だから「\(p\) が高い物だけ書き直す」のが得。</p>
+<p>\(p\) は直接見えないが、今回の滞在のヒット数 \(h\) が手がかりになる（練習 7）。人気 \(\lambda\) が混ざっている限り \(p(h)\) は \(h\) とともに増えるので、<b>「\(h\ge n\) なら書き直す」という形の規則が最適</b>になる。\(n\) は、実行中に「書き直した物が次に当たった割合」を \(h\) ごとに数えて決める。</p>
+
+<h3>Ⓑ 容量の下限 ff<span class="mut">道具：3.1、3.2</span></h3>
+<p>分類すると容量が小物に寄り過ぎる（⑦）。そこで大物の分類に「最低これだけは持たせる」という下限 \(f\!f\) を置く。目的 \(J=\mathrm{BHR}+w\cdot\mathrm{OHR}\) は分け方について凹（山が 1 つ）なので、</p>
+<blockquote>一定の期間ごとに \(J\) を測り、上がっていれば同じ向きへ、下がっていれば逆向きへ \(f\!f\) を少し動かす</blockquote>
+<p>だけで山の頂上の近くに着く。注意は期間の長さ：大物を追い出した損は、その物が次に要求されて初めてミスとして見える。期間が短いと得だけが見えて、下限を下げ続けてしまう。</p>
+
+<!-- ============================================================ -->
+<h2 id="s7">7. 説明の型</h2>
+<div class="card ok"><b>30 秒</b>
+<p>SSD キャッシュは箱（Region）ごとに消すので、物の寿命は箱の寿命で決まります。箱は中の誰かが使われるたびに延命され、寿命は「中の物の人気の合計」の指数で伸びます。サイズで分けると、小さい物の箱は中の数が多いので人気の合計が大きく、極端に長生きします。その結果、容量が小さい物に寄って、回数で数えるヒット率は上がり、量で数えるヒット率は下がります。</p></div>
+<div class="card ok"><b>3 分（式を 3 つだけ）</b>
+<ol>
+<li>物は「入る → 箱が消えるまでいる → ミスして入り直す」を繰り返すので、ヒット率は \(h=\lambda L/(1+\lambda L)\)。\(L\) は箱の中での滞在の平均です（再生報酬の定理）。</li>
+<li>箱は「誰も使われない時間が \(T\) を超えたら」消えます。使われる率が \(\Lambda\) なら、寿命の平均は \((e^{\Lambda T}-1)/\Lambda\) です（幾何分布）。</li>
+<li>\(\Lambda\) は箱の大きさ × 中の物の「1 バイトあたりの人気」です。分けると箱ごとの \(\Lambda\) に差がつき、寿命は指数で開きます。FIFO だと寿命が全員同じなので、分けても変わりません。</li>
+</ol>
+<p>モデルは合成負荷のシミュレーションと 1pt 以内で合います。ただし前提は「人気が変わらない・要求が独立」で、実トレースでは近似です。</p></div>
+<div class="tbl"><table>
+<tr><th>質問されたら</th><th>答えの核</th><th>使う道具</th></tr>
+<tr><td>なぜ平均 \(L\) だけでよいのか</td><td>再生報酬の定理は分布の形を要らない</td><td>2.5</td></tr>
+<tr><td>なぜ寿命が指数なのか</td><td>「T 以上あく」確率が \(e^{-\Lambda T}\)、あくまでの回数は幾何分布</td><td>2.2、2.3</td></tr>
+<tr><td>なぜ FIFO では効かないのか</td><td>寿命が中身に依らず全員 T</td><td>④</td></tr>
+<tr><td>なぜ BHR が下がるのか</td><td>大物の取り分が減る。冷たい小物が便乗して容量を取る</td><td>⑦</td></tr>
+<tr><td>どこが近似か</td><td>T 一定、同居の独立、IRM、定常</td><td>2.6 ほか</td></tr>
+<tr><td>分類が逆効果になるのはいつか</td><td>限界値がどの分類でも小さいとき（α が大きく飽和）、分類間で λ/s の差がないとき</td><td>3.2、4</td></tr>
+</table></div>
+
+<!-- ============================================================ -->
+<h2 id="s8">8. 次に読むもの</h2>
+<ol>
+<li><a href="che_to_region_walkthrough.html">che_to_region_walkthrough.html</a>：4 グループの例題で、①〜⑦ を実際の数字で計算する。</li>
+<li><a href="region_lru_derivation.html">region_lru_derivation.html</a>：③〜⑥ の導出を 1 行ずつ。想定問答 12 問。</li>
+<li><a href="theory_defense_overview.html">theory_defense_overview.html</a>：全体の筋と、多分割、自動調整。</li>
+<li><a href="region_model_appendix.html">region_model_appendix.html</a>：補題・証明の形。§K〜§N が自動調整・多分割・Zipf の傾き。</li>
+</ol>
+<p>道具そのものを教科書で確かめるなら：指数分布・ポアソン過程・再生報酬・PASTA・Little は S. Ross『Introduction to Probability Models』（待ち行列と再生理論の章）。ラグランジュと KKT は Boyd &amp; Vandenberghe『Convex Optimization』5 章。Che 近似は Che–Tung–Wang (2002) と Fricker–Robert–Roberts (2012)。</p>
+</main>
+<script>
+(function(){
+  var X0=50,X1=400,Y0=200,Y1=20,XM=12,LM=4; // 縦軸は log10(寿命/T) = 0〜4
+  function f(x){return Math.log10(Math.expm1(x)/x);}
+  function px(x){return X0+(X1-X0)*x/XM;} function py(v){return Y0-(Y0-Y1)*Math.min(v,LM)/LM;}
+  var pts=[];for(var x=0.05;x<=XM;x+=0.1){var v=f(x);if(v>LM)break;pts.push(px(x).toFixed(1)+','+py(v).toFixed(1));}
+  document.getElementById('curve').setAttribute('points',pts.join(' '));
+  var s=document.getElementById('lt');
+  function upd(){var x=+s.value,r=Math.expm1(x)/x;
+    document.getElementById('ltv').textContent=x.toFixed(1);
+    document.getElementById('lifev').textContent=r<100?r.toFixed(1):Math.round(r).toLocaleString();
+    var d=document.getElementById('dot');d.setAttribute('cx',px(x));d.setAttribute('cy',py(f(x)));}
+  s.addEventListener('input',upd);upd();
+})();
+</script>
+</body>
+</html>
