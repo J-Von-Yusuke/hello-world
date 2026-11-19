@@ -9,7 +9,7 @@
 # 実験
 #   validity [name..]      トレース実験（分類方法 HINTS × 再挿入 × 書き込み予算）  → work/out/
 #   synth                  合成負荷                                              → work/synth/
-#   tune [name..]          自動推定の実験（TUNE_JOBS）                             → work/tune/
+#   tune [name..]          自動推定の実験（TUNE_JOBS のうち TUNE_METHODS）          → work/tune/
 #   tune-synth             同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷）    → work/tune/
 #   che [name..]           Zipf の傾きと分類の利得（付録 §N.5）                     → work/che/
 #   paper [name..]         論文用の比較（PAPER_METHODS）                           → work/paper/
@@ -397,6 +397,18 @@ paper_set() {  # paper_set <選択> <出力先> <base|-> <methods.tsv の置き�
   paper_pick "$sel" "$root" "$b" "$out"
   RUN_JOBS=PICKED RUN_ROOT=$root each_trace tune_one "$@"
 }
+tune_pick() {  # TUNE_JOBS から TUNE_METHODS（id の並び。all = 全部）を PICKED に。図の基準 none_h1 は必ず入れる
+  local s id bad="" ids
+  PICKED=()
+  if [ "$(echo $TUNE_METHODS)" = all ]; then PICKED=("${TUNE_JOBS[@]}"); return; fi
+  ids=$(printf '%s\n' none_h1 $TUNE_METHODS | awk '!seen[$0]++')
+  for id in $ids; do
+    for s in "${TUNE_JOBS[@]}"; do [ "${s%%|*}" = "$id" ] && { PICKED+=("$s"); continue 2; }; done
+    bad="$bad $id"
+  done
+  [ -n "$bad" ] && die "TUNE_JOBS に無い id:$bad"
+  log "tune: ${#PICKED[@]} 構成（${PICKED[*]%%|*}）"
+}
 paper_final() {  # 論文の本番用（PAPER_FINAL_METHODS）。結果は paper / paper-ext と共有し（済んだ run は回さない）、図と表は work/paper/final/
   local F=$WORK/paper/final all extset main ext id
   paper_pick "$PAPER_FINAL_METHODS" "$F" base   # 先に全部を確かめ、final/methods.tsv = 図と表の並び
@@ -438,8 +450,8 @@ case $cmd in
   # 実験
   validity)     need_traces; need_build; each_trace validity_one "$@" ;;
   synth)        need_build; synth ;;
-  tune)         need_traces; need_build; mkdir -p "$WORK/tune"; each_trace tune_one "$@"; tune_figs ;;
-  tune-synth)   need_build; mkdir -p "$WORK/tune"; tune_synth; tune_figs ;;
+  tune)         need_traces; need_build; mkdir -p "$WORK/tune"; tune_pick; RUN_JOBS=PICKED each_trace tune_one "$@"; tune_figs ;;
+  tune-synth)   need_build; mkdir -p "$WORK/tune"; tune_pick; RUN_JOBS=PICKED tune_synth; tune_figs ;;
   che)          need_traces; [ "$CHE_SIM" = 1 ] && need_build; [ -x "$B/og_che" ] || setup
                 mkdir -p "$WORK/che"; each_trace che_one "$@"; che_report ;;
   paper)        need_traces; need_build; paper_set "$PAPER_METHODS" "$WORK/paper" base "" "$@"; paper_figs ;;

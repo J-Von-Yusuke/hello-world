@@ -12,7 +12,7 @@ TRACECONV=${TRACECONV:-$WORK/b/bin/traceConv}
 
 # ---- 資源 -------------------------------------------------------------
 P=${P:-auto}                               # 同時に走らせる cachesim の数。auto = 空きメモリと 1 本の見積りから変種ごとに決める（数字なら固定）
-# auto の見積り（実測で決めた。README の「メモリと同時実行数」）。u = 物の数、x = min(1, (SSD+DRAM)/フットプリント)
+# auto の見積り（実測で決めた。README §5.3「メモリと同時実行数」）。u = 物の数、x = min(1, (SSD+DRAM)/フットプリント)
 #   1 本 ≈ max(MEM_BASE + MEM_SEEN·u + MEM_RES·u·x,  MEM_BASE + MEM_RES_OBJ·u·x) × MEM_SAFETY   （Region 構成, 物単位 SSD 構成）
 #   P = floor(MemAvailable × MEM_FRAC ÷ 1 本) を 1〜NCPU（既定 = 総コア数 − 1）に収める
 MEM_BASE=${MEM_BASE:-400000000}            # 固定分 [B]（nha の none: 346 MB）
@@ -84,6 +84,9 @@ TUNE_JOBS=(
   "ghost0.1|hint=ghost:frac=0.1,region-evict=lru" "ghost0.3|hint=ghost:frac=0.3,region-evict=lru"
   "ghost1|hint=ghost:frac=1,region-evict=lru"
 )
+# tune・tune-synth で回す構成（上の id を空白区切りで。all = 全部）。図の基準 none_h1 は必ず入る。
+# 例: TUNE_METHODS="none_auto st_hc0.1_auto mini_hc0.1_auto" ./run.sh tune meta_nha
+TUNE_METHODS=${TUNE_METHODS:-all}
 # ---- Zipf の傾きと分類の利得（che。付録 §N.5）--------------------------------------
 CHE_TAUS=${CHE_TAUS:-"16K 64K 256K 1M 4M"}   # Che 近似で試す分類の閾値の組（空白区切り。1 組に複数の τ はカンマ: "64K,1M"）。tune の st_lru の τ は自動で足す
 CHE_W=${CHE_W:-0.03,0.1,0.3,1}              # 目的 J = BHR + w·OHR の w（静的分割の最適を w ごとに出す）
@@ -128,7 +131,7 @@ PAPER_CATALOG=(
   # 切り分け: 分類なしで n=auto だけ（*_auto との差 = 分類＋下限の効果）
   "ru_none_auto|hint=none,region-evict=lru,$RA"
   "r256_none_auto|region-size=$PAPER_R256,hint=none,region-evict=lru,$RA"
-  # ru_auto から 1 か所だけ変えた変種（11-18。README §6.3）
+  # ru_auto から 1 か所だけ変えた変種（11-18。README §6.5.1）
   "ru_auto_ii|$AUTO,$RA/mode=ii"                          # 書き直した物を専用の書き込み口へ（CacheLib の priority と同じ形）
   "ru_dram_auto|hint=key:key=dram/k=2,region-evict=lru,region-params=auto=1/w=0.1,$RA"   # 分類の鍵 = DRAM でのヒット数（動的な 2 分割）
   "ru_dram1_auto|hint=key:key=dram/thr=1,region-evict=lru,region-params=auto=1/w=0.1,$RA" # 同（DRAM で 0 回 / 1 回以上）
@@ -165,7 +168,7 @@ PAPER_ROBUST_METHODS=${PAPER_ROBUST_METHODS:-"
   r256_base_s2 ru_auto_s2 r256_base_s3 ru_auto_s3
   ru_auto_w0_c0 ru_auto_w0_c0m ru_auto_w0_f1 ru_auto_w0_s2 ru_auto_w0_s3"}
 # 論文の本番用に絞った比較（./run.sh paper-final → 図と表は work/paper/final/。結果は paper・paper-ext と共有し、済んだ run は回さない）。
-# 選び方（README §6.3「本番用の比較」。数字は Meta nha 全量、CacheLib n=1 との差、書き込みは CacheLib = 1）:
+# 選び方（README §6.5.2「本番用の比較」。数字は Meta nha 全量、CacheLib n=1 との差、書き込みは CacheLib = 1）:
 #   r256_base          基準 = いまの CacheLib（n=1）
 #   r256_n0/n2/n3      CacheLib 自身のつまみ（書き直しの閾値）。「書き直しを減らしただけ」ではないことを示す
 #                      （nha: n=0 ΔBMR +0.13pt・0.89、n=3 +0.07・0.91 → 提案は BMR も書き込みも両方で上回る）

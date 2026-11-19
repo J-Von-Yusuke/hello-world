@@ -94,7 +94,7 @@ class Ax:
         s.f, (s.x0, s.y0, s.x1, s.y1) = f, box
         s.xlog, s.ylog, s.cats = xlog, ylog, cats
         s.xr, s.yr = xr, yr
-        if title: f.t((s.x0 + s.x1) / 2, s.y0 - 14, title, 26, "middle", weight="bold")
+        if title: s.title(title)
         # y 目盛と格子
         if ylog:
             ts = [10 ** e for e in range(math.floor(math.log10(yr[0])), math.ceil(math.log10(yr[1])) + 1) if yr[0] <= 10 ** e <= yr[1]]
@@ -125,6 +125,20 @@ class Ax:
         f.e.append(f'<rect x="{s.x0}" y="{s.y0}" width="{s.x1-s.x0}" height="{s.y1-s.y0}" fill="none" stroke="#999" stroke-width="1.5"/>')
         if xlabel: f.t((s.x0 + s.x1) / 2, f.H - 18, xlabel, 26, "middle")
         if ylabel: f.t(s.x0 - 92, (s.y0 + s.y1) / 2, ylabel, 26, "middle", rot=-90)
+
+    def title(s, txt, fs=26, fs_min=19):
+        """軸の幅（＋左右 20）に収まるよう字を小さくし、それでも入らなければ 2 行に折る（面を横に並べた図で隣の題と重ならない）"""
+        cx, W = (s.x0 + s.x1) / 2, s.x1 - s.x0 + 40
+        while fs > fs_min and tw(txt, fs) > W: fs -= 1
+        if tw(txt, fs) <= W:
+            s.f.t(cx, s.y0 - 14, txt, fs, "middle", weight="bold"); return
+        k = txt.find("（")                                     # 「題（補足）」は補足の前で折る
+        if k <= 0: k = min((i for i, c in enumerate(txt) if c == " "), key=lambda i: abs(i - len(txt) / 2), default=len(txt) // 2)
+        a, b = txt[:k].rstrip(), txt[k:].lstrip()
+        fs = 26 if fs_min < 26 else fs_min                     # 2 行なら大きい字から測り直す
+        while fs > 14 and max(tw(a, fs), tw(b, fs)) > W: fs -= 1
+        s.f.t(cx, s.y0 - 18 - fs, a, fs, "middle", weight="bold")
+        s.f.t(cx, s.y0 - 12, b, fs, "middle", weight="bold")
 
     def X(s, v):
         a, b = s.xr
