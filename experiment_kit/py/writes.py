@@ -13,6 +13,7 @@ C = 240 * 2**30 // 64; RS = {"256M": 4 * 2**20, "626M": 626 * 2**20 // 64}
 CFG = [("none", 0)] + [("split", ff) for ff in (0, 0.75, 0.85, 0.9, 0.95)]
 WL = {"r3to1": "1K:4194304:0.75:0.9 512K:25600:0.25:0.9", "r95to5": "1K:4194304:0.95:0.9 512K:25600:0.05:0.9"}  # scaled.py と同じ
 REC = 24   # synth_gen の 1 要求のバイト数
+CM = os.environ.get("CHUNK_MODE", "piece")   # 片の扱い（config.sh の CHUNK_MODE。scaled.py と同じ）
 
 
 def trace(w):  # scaled.py と同じ：sc_<w>.bin が NREQ 要求でなければ消して作り直す（前の SYNTH_SCALED_N の残り・書きかけ）
@@ -34,7 +35,7 @@ def run(w, r, kind, ff, re):
     tag = f"o/wr_{w}_{r}_{kind}_{ff}_{re}"
     hint = "hint=none" if kind == "none" else f"hint=fixed:tau=23170,region-params=fc=1/ff={ff}"
     e = (f"dram-size=0,region-size={RS[r]},region-evict=lru,seal-on-repartition=inactive,seed=1,chunk=16K,"
-         f"interval=1000000000,warmup-req={NREQ // 4},{hint}" + (",reinsert=hits:n=1" if re else "") + f",out={tag}")
+         + ("chunk-mode=piece," if CM == "piece" else "") + f"interval=1000000000,warmup-req={NREQ // 4},{hint}" + (",reinsert=hits:n=1" if re else "") + f",out={tag}")
     if os.path.exists(f"{H}/{tag}.json"): os.remove(f"{H}/{tag}.json")   # 前の結果を読まない
     cmd = f'{SIM} sc_{w}.bin oracleGeneral RegionFlash {C} -e "{e}"'
     p = subprocess.run(f"{cmd} > {tag}.log 2>&1", shell=True, cwd=H)       # 出力は <tag>.log に残す
@@ -43,7 +44,7 @@ def run(w, r, kind, ff, re):
         hint = "（強制終了: メモリ不足の可能性。SYNTH_P を下げる）" if p.returncode in (137, -9) else ""
         raise RuntimeError(f"cachesim が {tag}.json を書かなかった（終了コード {p.returncode}）{hint}\n{cmd}\n--- {tag}.log の末尾 ---\n{tail}")
     d = json.load(open(f"{H}/{tag}.json")); t = d["total"]
-    return dict(w=w, r=r, kind=kind, ff=ff, re=re, ohr=t["ohr"], bmr=t["bmr"], reqs=t["reqs"], req_bytes=t["req_bytes"],
+    return dict(w=w, r=r, kind=kind, ff=ff, re=re, chunk_mode=CM, ohr=t["ohr"], bmr=t["bmr"], reqs=t["reqs"], req_bytes=t["req_bytes"],
                 write=t["flash_region_write_bytes"], admit=t["ssd_admit_bytes"], reinsert=t["reinsert_bytes"],
                 pad=t["pad_bytes"], cls=[dict(admit=c["ssd_admit_bytes"], reinsert=c["reinsert_bytes"]) for c in d["class"]])
 

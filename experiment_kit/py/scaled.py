@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 H = os.environ.get("SYNTH_HOME", os.path.expanduser("~/synth")); SIM = os.environ.get("CACHESIM", f"{H}/b/bin/cachesim")
 NREQ = int(os.environ.get("SYNTH_SCALED_N", 200_000_000)); WARM = NREQ // 4
+CM = os.environ.get("CHUNK_MODE", "piece")   # 片の扱い（config.sh の CHUNK_MODE。512K の物は 16K の片 32 個）
+CMS = ",chunk-mode=piece" if CM == "piece" else ""
 C = 240 * 2**30 // 64
 RS = {"256M": 256 * 2**20 // 64, "626M": 626 * 2**20 // 64}
 WL = {"r3to1": "1K:4194304:0.75:0.9 512K:25600:0.25:0.9", "r95to5": "1K:4194304:0.95:0.9 512K:25600:0.05:0.9"}
@@ -56,7 +58,7 @@ def cachesim(tag, cmd):  # 出力を <tag>.log に残し、<tag>.json ができ�
 def rf(w, r, pol):
     tag = f"o/sc_{w}_{r}_{pol}"
     cachesim(tag, f'{SIM} sc_{w}.bin oracleGeneral RegionFlash {C} -e "dram-size=0,region-size={RS[r]},region-evict=lru,'
-                  f'seal-on-repartition=inactive,seed=1,chunk=16K,interval=1000000,warmup-req={WARM},{POL[pol]},out={tag}"')
+                  f'seal-on-repartition=inactive,seed=1,chunk=16K{CMS},interval=1000000,warmup-req={WARM},{POL[pol]},out={tag}"')
     d = json.load(open(f"{H}/{tag}.json")); t = d["total"]
     iv = [x for x in csv.DictReader(open(f"{H}/{tag}.interval.csv"))]
     keys = ("reqs", "misses", "req_bytes", "miss_bytes", "flash_region_write_bytes")
@@ -80,7 +82,7 @@ def model(w, r, h):
 
 
 for w in WL: trace(w)  # トレース（2 億要求、4.8 GB ずつ）
-res = {}
+res = {"chunk_mode": CM}   # run.sh はこれが今の CHUNK_MODE と違えば回し直す
 with ThreadPoolExecutor(int(os.environ.get("SYNTH_P", "10"))) as ex:
     jobs = {(w, r, p): ex.submit(rf, w, r, p) for w in WL for r in RS for p in POL}
     jobs.update({(w, "lru"): ex.submit(lru, w) for w in WL})

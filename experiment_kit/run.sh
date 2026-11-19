@@ -222,9 +222,12 @@ synth() {
     log "synth $line"; (cd "$S" && python3 synth_run.py "$@" --n "$SYNTH_N") | tee -a "$S/synth.log"
   done
   if [ "$SYNTH_SCALED" = 1 ]; then
-    export SYNTH_SCALED_N
-    [ -s "$S/scaled.json" ] || (cd "$S" && python3 scaled.py > scaled.json)
-    [ -s "$S/writes.json" ] || (cd "$S" && python3 writes.py > writes.json)
+    export SYNTH_SCALED_N CHUNK_MODE   # chunk=16K の構成：片の扱いが今の CHUNK_MODE と違う結果（11-19 以前 = object）は回し直す
+    local f; for f in scaled writes; do
+      grep -qs "\"chunk_mode\": \"$CHUNK_MODE\"" "$S/$f.json" && { log "synth $f: 済（消せばやり直す）"; continue; }
+      log "synth $f.py（chunk-mode=$CHUNK_MODE）"
+      (cd "$S" && python3 $f.py > $f.json.tmp) && mv "$S/$f.json.tmp" "$S/$f.json"
+    done
   fi
   log "synth 完了: $S/*.json"
 }
