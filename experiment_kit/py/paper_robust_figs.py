@@ -10,7 +10,9 @@
   上限なし    _f1：再挿入の上限なし（max_frac=1）
   種 2 / 種 3 _s2 / _s3：乱数の種
 出力: fig_robust.svg（提案 − CacheLib n=1）、fig_robust_n3.svg（提案 − CacheLib n=3。n=3 のある条件だけ）、
-      それぞれ左 = ΔBMR [pt]（0 = CacheLib、下が良い）、右 = 書き込みの比（CacheLib = 1、1 未満が良い）。table_robust.csv / .md。
+      _w0 = 目的を BHR だけにした提案、_rubase = R=RU にしただけ（ru_base）、fig_robust_vs_rubase.svg = 提案 − ru_base
+      （Region を RU にした効果を除いた、分類＋下限＋n=auto の効果。R の違いによる片の扱いの差が _c0m で消えるかを見る）。
+      それぞれ左 = ΔBMR [pt]（0 = 比べる相手、下が良い）、右 = 書き込みの比（比べる相手 = 1、1 未満が良い）。table_robust.csv / .md。
 どの条件でも棒が同じ側にあれば、結論は RegionFlash の作りや乱数に頼っていない。標準ライブラリだけ。"""
 import csv, glob, json, os, sys
 
@@ -29,7 +31,13 @@ for src in (P, f"{P}/ext", D):
     for f in sorted(glob.glob(f"{src}/*.json")):
         d = json.load(open(f))
         if isinstance(d, dict) and "runs" in d: runs.setdefault(d["name"], {}).update(d["runs"])
-names = sorted(n for n, R in runs.items() if any(f"{q}{s}" in R and f"r256_base{s}" in R for s, _, _ in COND[1:] for q in ("ru_auto", "ru_auto_w0")))
+# 比べる組：(構成, 比べる相手, 図の名前, 題の構成名)。構成と相手の両方の結果がある条件だけを描く
+PROPS = [("ru_auto", "", T("提案", "proposal")), ("ru_auto_w0", "_w0", T("提案・BHR のみ", "proposal, BHR only")),
+         ("ru_base", "_rubase", T("R=RU のみ", "R=RU only"))]
+PAIRS = [(p, b, f"{slug}{ps}", lab, ref) for p, ps, lab in PROPS
+         for b, slug, ref in (("r256_base", "fig_robust", T("CacheLib n=1", "CacheLib n=1")), ("r256_n3", "fig_robust_n3", T("CacheLib n=3", "CacheLib n=3")))]
+PAIRS.append(("ru_auto", "ru_base", "fig_robust_vs_rubase", T("提案", "proposal"), T("R=RU のみ", "R=RU only")))
+names = sorted(n for n, R in runs.items() if any(f"{p}{s}" in R and f"{b}{s}" in R for s, _, _ in COND[1:] for p, b, *_ in PAIRS))
 if not names: sys.exit(f"{D} に頑健性の結果が無い（./run.sh paper-robust がまだ）")
 
 BMR = lambda r: 100 * r["bmr"]
@@ -50,15 +58,14 @@ def diffs(base, prop):  # {条件: ([ΔBMR], [書込比])}（トレース順、2
     return out
 
 
-def fig(base, title_ref, prop):
+def fig(base, title_ref, prop, title_prop):
     dd = diffs(base, prop)
     if not dd: return None, dd
     cats = names + ([T("平均", "Mean")] if len(names) > 1 else [])
     f = Fig(); f.add_legend([(lab, col, "box") for suf, lab, col in COND if suf in dd])
     top = f.legend_h() + 50
     a1 = Ax(f, (130, top, 770, 760), yr=span([x for v in dd.values() for x in v[0] if x is not None]), cats=cats,
-            ylabel=T("ΔBMR [pt]（下 = 良い）", "ΔBMR [pt] (lower is better)"), title=T(f"ΔBMR（提案{'・BHR のみ' if prop.endswith('w0') else ''} − {title_ref}）",
-                                                                                f"ΔBMR (proposal{', BHR only' if prop.endswith('w0') else ''} − {title_ref})"))
+            ylabel=T("ΔBMR [pt]（下 = 良い）", "ΔBMR [pt] (lower is better)"), title=f"ΔBMR（{title_prop} − {title_ref}）")
     a1.bars([(lab, col, dd[suf][0], None) for suf, lab, col in COND if suf in dd], d=2)
     hi = max([x for v in dd.values() for x in v[1] if x is not None] + [1])
     a2 = Ax(f, (920, top, 1560, 760), yr=(0, hi * 1.1), cats=cats,
@@ -69,10 +76,8 @@ def fig(base, title_ref, prop):
 
 
 rows, made = [], []
-# 提案 2 通り：ru_auto（目的 BHR + 0.1·OHR）→ fig_robust*、ru_auto_w0（BHR だけ）→ fig_robust*_w0
-for prop, ps in (("ru_auto", ""), ("ru_auto_w0", "_w0")):
-  for base, ref, slug in (("r256_base", T("CacheLib n=1", "CacheLib n=1"), "fig_robust" + ps), ("r256_n3", T("CacheLib n=3", "CacheLib n=3"), "fig_robust_n3" + ps)):
-    svg, dd = fig(base, ref, prop)
+for prop, base, slug, tp, ref in PAIRS:   # 提案（BHR+0.1·OHR / BHR だけ）・R=RU のみ × CacheLib n=1 / n=3、提案 − R=RU のみ
+    svg, dd = fig(base, ref, prop, tp)
     if not svg: continue
     open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(svg); made.append(slug)
     for suf, lab, _ in COND:
@@ -81,16 +86,15 @@ for prop, ps in (("ru_auto", ""), ("ru_auto_w0", "_w0")):
             rows.append(dict(proposal=prop, reference=base, condition=lab, trace=n, d_bmr_pt=dd[suf][0][i], write_ratio=dd[suf][1][i]))
 with open(f"{D}/table_robust.csv", "w", newline="", encoding="utf-8") as f:
     w = csv.DictWriter(f, ["proposal", "reference", "condition", "trace", "d_bmr_pt", "write_ratio"]); w.writeheader(); w.writerows(rows)
-md = [f"| {T('提案', 'Proposal')} | {T('比べる相手', 'Reference')} | {T('条件', 'Condition')} | " + " | ".join(names) + " |", "|---|---|---|" + "---|" * len(names)]
-for prop in ("ru_auto", "ru_auto_w0"):
-  for base in ("r256_base", "r256_n3"):
+md = [f"| {T('構成', 'Config')} | {T('比べる相手', 'Reference')} | {T('条件', 'Condition')} | " + " | ".join(names) + " |", "|---|---|---|" + "---|" * len(names)]
+for prop, base, *_ in PAIRS:
     for _, lab, _ in COND:
         rs = {r["trace"]: r for r in rows if r["proposal"] == prop and r["reference"] == base and r["condition"] == lab}
         if rs:
             md.append(f"| {prop} | {base} | {lab} | " + " | ".join(
                 "–" if n not in rs or rs[n]["d_bmr_pt"] is None else f"{rs[n]['d_bmr_pt']:+.3f} / {rs[n]['write_ratio']:.3f}" for n in names) + " |")
 open(f"{D}/table_robust.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
-    "各セル = ΔBMR [pt]（提案 − 比べる相手、負 = 良い）/ 書き込みの比（提案 ÷ 比べる相手、1 未満 = 良い）。\n",
-    "Each cell: ΔBMR [pt] (proposal − reference; negative = better) / write ratio (proposal ÷ reference; < 1 = better).\n"))
+    "各セル = ΔBMR [pt]（構成 − 比べる相手、負 = 良い）/ 書き込みの比（構成 ÷ 比べる相手、1 未満 = 良い）。\n",
+    "Each cell: ΔBMR [pt] (config − reference; negative = better) / write ratio (config ÷ reference; < 1 = better).\n"))
 to_png(D, made)
 print(f"paper-robust: {len(names)} 本 → {D}/" + "、".join(f"{s}.svg" for s in made) + "、table_robust.(csv|md)")

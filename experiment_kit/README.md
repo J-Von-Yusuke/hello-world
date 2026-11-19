@@ -132,7 +132,7 @@ bash のファイル。どの項目も環境変数で上書きできる（例 `P
 | 本番用 | `PAPER_FINAL_METHODS` | `paper-final` | 10 方式（§6.5.2） |
 | 全部 | `PAPER_METHODS` | `paper` | 検討してきた 18 方式（§6.5.1） |
 | CacheLib の閾値違い | `PAPER_EXT_METHODS` | `paper-ext` | `r256_n0 r256_n2 r256_n3` |
-| 頑健性 | `PAPER_ROBUST_METHODS` | `paper-robust` | 18 方式（§6.5.4） |
+| 頑健性 | `PAPER_ROBUST_METHODS` | `paper-robust` | 19 方式（§6.5.4） |
 
 ```bash
 ./run.sh methods                                               # カタログの全部と、組ごとにどれが選ばれているか
@@ -414,7 +414,7 @@ nha 以外のトレースではまだ確かめていない（数字は選び方�
 
 #### 6.5.4 頑健性（`paper-robust`）
 
-結論が RegionFlash の作りや乱数に頼っていないかを見る（既定は 1 トレース 18 本）。背景は `../docs/regionflash_callgraph.html`。
+結論が RegionFlash の作りや乱数に頼っていないかを見る（既定は 1 トレース 19 本）。背景は `../docs/regionflash_callgraph.html`。
 
 | 条件 | 指定 | 確かめること |
 |---|---|---|
@@ -424,7 +424,8 @@ nha 以外のトレースではまだ確かめていない（数字は選び方�
 | `_s2`・`_s3` | 乱数の種 2・3 | 差がゆれより大きいか |
 
 - 条件ごとの一式（`work/paper/robust/<条件>/`）：paper と同じ図と表を、その条件で回した構成だけで作る（`r256_base_c0` → `r256_base` と読み替え）。カタログに `<構成名>_<条件>` の名前で足して `PAPER_ROBUST_METHODS` に並べれば、その構成も加わる。
-- 条件をまたいだ図（`work/paper/robust/` 直下）：`fig_robust.svg` = 提案 − CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3。左 = ΔBMR、右 = 書き込みの比、色 = 条件。数値は `table_robust.csv` / `.md`。
+- 条件をまたいだ図（`work/paper/robust/` 直下）：`fig_robust.svg` = 提案 − CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3（`_w0` = 目的を BHR だけにした提案）。`fig_robust_rubase.svg`（と `_n3_rubase`）= R=RU にしただけ（`ru_base`）− CacheLib、`fig_robust_vs_rubase.svg` = 提案 − `ru_base`（Region を RU にした効果を除いた、分類＋下限＋n=auto の効果）。左 = ΔBMR、右 = 書き込みの比、色 = 条件。数値は `table_robust.csv` / `.md`。
+- **`ru_base_c0m`（11-19 追加）**：nha 系で `ru_base`（R=RU のみ）が CacheLib より BMR −0.11pt と提案より良く出た。既定の `chunk=64K` は Region より大きい物を片に分けて置き、片を 1 つ失うと物全体を失うので、R が大きいほど大きい物を失いにくい（CacheLib は Region より大きい物を受け入れない）。`_c0m` で `ru_base` の得が消えれば、その得は片の扱いによるもの。残れば、大きい Region そのものの性質。`fig_robust_rubase.svg` と `fig_robust_vs_rubase.svg` の `_c0m` の棒で見る。
 - どの条件でも「提案の ΔBMR ≤ 0（または n=3 より小さい）」と「書き込みの比 < 1」の向きが既定と同じなら、結論は作りや乱数に頼っていない。
 
 #### 6.5.5 出力と確かめ方

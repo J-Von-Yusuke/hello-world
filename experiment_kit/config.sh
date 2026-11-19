@@ -152,6 +152,7 @@ PAPER_CATALOG=(
   "r256_base_c0|$B256,reinsert=hits:n=1,chunk=0"  "r256_n3_c0|$B256,reinsert=hits:n=3,chunk=0"  "ru_auto_c0|$AUTO,$RA,chunk=0"
   "r256_base_c0m|$B256,reinsert=hits:n=1,chunk=0,admit=sizemax:max=$PAPER_R256"  "r256_n3_c0m|$B256,reinsert=hits:n=3,chunk=0,admit=sizemax:max=$PAPER_R256"
   "ru_auto_c0m|$AUTO,$RA,chunk=0,admit=sizemax:max=$PAPER_R256"
+  "ru_base_c0m|hint=none,region-evict=lru,reinsert=hits:n=1,chunk=0,admit=sizemax:max=$PAPER_R256"   # R=RU にしただけ（ru_base）の得が、片の扱い（chunk）によるものかを見る
   "r256_base_f1|$B256,reinsert=hits:n=1/max_frac=1"  "r256_n3_f1|$B256,reinsert=hits:n=3/max_frac=1"  "ru_auto_f1|$AUTO,$RA/max_frac=1"
   "r256_base_s2|$B256,reinsert=hits:n=1,seed=2"  "ru_auto_s2|$AUTO,$RA,seed=2"
   "r256_base_s3|$B256,reinsert=hits:n=1,seed=3"  "ru_auto_s3|$AUTO,$RA,seed=3"
@@ -164,7 +165,7 @@ PAPER_METHODS=${PAPER_METHODS:-"
   ru_st_nauto ru_st_n0 ru_adm_none_auto ru_adm_auto r256_none_auto r256_ff90_h3 r256_auto r256_auto_w0"}
 PAPER_EXT_METHODS=${PAPER_EXT_METHODS:-"r256_n0 r256_n2 r256_n3"}
 PAPER_ROBUST_METHODS=${PAPER_ROBUST_METHODS:-"
-  r256_base_c0 r256_n3_c0 ru_auto_c0  r256_base_c0m r256_n3_c0m ru_auto_c0m  r256_base_f1 r256_n3_f1 ru_auto_f1
+  r256_base_c0 r256_n3_c0 ru_auto_c0  r256_base_c0m r256_n3_c0m ru_auto_c0m ru_base_c0m  r256_base_f1 r256_n3_f1 ru_auto_f1
   r256_base_s2 ru_auto_s2 r256_base_s3 ru_auto_s3
   ru_auto_w0_c0 ru_auto_w0_c0m ru_auto_w0_f1 ru_auto_w0_s2 ru_auto_w0_s3"}
 # 論文の本番用に絞った比較（./run.sh paper-final → 図と表は work/paper/final/。結果は paper・paper-ext と共有し、済んだ run は回さない）。
