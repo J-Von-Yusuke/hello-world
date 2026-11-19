@@ -279,6 +279,7 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU に収める
 | `work/results/synth_summary.csv` | 理論と実測（OHR/BHR）の一覧（aggregate が作る） |
 
 - モデルが 1 容量あたり Region LRU を 40 回ほど解くので、1 負荷 × 4 容量で 20〜30 分かかる。前の版の `<負荷>.json` があると飛ばすので、作り直すときは消してから回す。
+- **`SYNTH_SCALED=1`（`scaled.py`・`writes.py`）**：トレース `work/synth/sc_r3to1.bin`・`sc_r95to5.bin`（`SYNTH_SCALED_N` 要求、2 億要求で 4.8 GB ずつ）を作り、16＋48 本の cachesim を回す。トレースの長さが `SYNTH_SCALED_N` と合わなければ（前の回の残り・書きかけ）作り直す。cachesim の出力は `work/synth/o/<名前>.log` に残り、結果の JSON が書かれなければ、構成・終了コード・ログの末尾を出して止まる（強制終了ならメモリ不足の見込み。`SYNTH_P=4` などで並列を減らす）。結果をやり直すときは `work/synth/scaled.json`・`writes.json` を消す。
 - **DRAM あり**：行に `--dram <DRAM ÷ SSD>` を付ける（見本 `w1d`。CacheLib と同じ cachelib 方式、モデルは `synth_model -D`、`../docs/Che-sim/region_model_appendix.html` §P）。DRAM ありの行では物単位 LRU と部分トレースの静的分割は回さない。
 
 ### 6.3 tune：自動推定は手で選んだ最良に届くか
@@ -468,6 +469,7 @@ nha 以外のトレースではまだ確かめていない（数字は選び方�
 
 ## 付録：変更の履歴
 
+- **11-19 `SYNTH_SCALED=1` の FileNotFoundError**：`scaled.py`・`writes.py` が cachesim の出力を捨てていたため、cachesim が失敗すると「`o/sc_….json` が無い」とだけ出ていた。出力を `o/<名前>.log` に残し、失敗の理由を出して止まるようにした。前の回の結果の JSON を読まないよう実行前に消す。トレースは長さを確かめ、合わなければ作り直す（一時ファイルに書いてから置き換える）。温め期間がトレースより長いと、cachesim は NaN の結果を書いてエラーにならないので、これも防ぐ。
 - **11-19 受け入れの篩に ghost を足した**：初版（11-18）の `admit=dram:min=1` は ghost なしで、Flashield に近い厳しい篩だった。nha では OHR −5.7pt・BMR +0.09pt・書き込み 0.54 倍（CacheLib n=1 比）と S3-FIFO より不利に出た。ghost あり（`/ghost=0.9`）では OHR −2.9pt・BMR +0.02pt・書き込み 0.61 倍。置き場所の得は篩なし −0.14pt、ghost あり −0.10pt（7 割）、ghost なし −0.06pt。ghost なしと比べたいなら `/ghost=0.9` を外す。
 - **11-19 人気が移り変わる合成負荷（`tools/synth/drift_adm.sh`）**：W1 の形で一巡 τ = 2,000 万 / 500 万要求。篩の後も SSD は入れ替わり続けた（追い出し 5,000〜16,000 回）。CacheLib 相当（BMR 41.1 / 41.7%）に対し、篩だけで −2.1 / −3.4pt（書き込み 2.4% / 7.2%）、篩＋置き場所の良い方で −4.0 / −4.7pt。篩と同じ手がかり（DRAM ヒット）で置くと大半が重なり（篩なし −5.8 / −5.4pt → 篩あり −1.8 / −0.4pt）、サイズで置くと τ によって向きが変わった（篩あり +1.0 / −1.0pt）。
 - **11-18 受け入れの篩の合成負荷での注意**：W1 の形（2,000 万要求、DRAM = SSD/30）では、篩だけで SSD 書き込みが 0.4% に減り、BMR も 39.7% → 34.0%（篩なしでは追い出したバイトの 88% が一度も当たっていなかった）。篩の後は SSD がほとんど入れ替わらず（Region の追い出し 16 万回 → 740 回）、置き場所は何も変えなかった。**直交するかどうかは「篩を通った後も SSD があふれるか」で決まる**。実トレース（nha）では篩の後も入れ替わり、得は残った。
