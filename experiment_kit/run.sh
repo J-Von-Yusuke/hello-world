@@ -197,7 +197,13 @@ validity_one() {  # name path fmt params category source ssd
 }
 
 # ---------------------------------------------------------------- 合成負荷
+synth_tools() {  # 合成の道具を、キットの src/ の方が新しければコンパイルし直す（setup をやり直さなくても新しい版になる）
+  local S=$WORK/synth s=$KIT/src
+  [ "$S/synth_gen" -nt "$s/synth_gen.c" ] || { gcc -O3 -march=native -o "$S/synth_gen" "$s/synth_gen.c" -lm || die "synth_gen のコンパイル失敗"; log "synth_gen をコンパイルした"; }
+  [ "$S/synth_model" -nt "$s/synth_model.c" ] || { gcc -O3 -march=native -fopenmp -o "$S/synth_model" "$s/synth_model.c" -lm || die "synth_model のコンパイル失敗"; log "synth_model をコンパイルした"; }
+}
 synth() {
+  synth_tools
   local S=$WORK/synth; cp "$KIT"/py/synth_run.py "$KIT"/py/scaled.py "$KIT"/py/writes.py "$S/"
   export SYNTH_HOME=$S CACHESIM SYNTH_P
   mkdir -p "$S/o"
@@ -451,7 +457,7 @@ case $cmd in
   validity)     need_traces; need_build; each_trace validity_one "$@" ;;
   synth)        need_build; synth ;;
   tune)         need_traces; need_build; mkdir -p "$WORK/tune"; tune_pick; RUN_JOBS=PICKED each_trace tune_one "$@"; tune_figs ;;
-  tune-synth)   need_build; mkdir -p "$WORK/tune"; tune_pick; RUN_JOBS=PICKED tune_synth; tune_figs ;;
+  tune-synth)   need_build; synth_tools; mkdir -p "$WORK/tune"; tune_pick; RUN_JOBS=PICKED tune_synth; tune_figs ;;
   che)          need_traces; [ "$CHE_SIM" = 1 ] && need_build; [ -x "$B/og_che" ] || setup
                 mkdir -p "$WORK/che"; each_trace che_one "$@"; che_report ;;
   paper)        need_traces; need_build; paper_set "$PAPER_METHODS" "$WORK/paper" base "" "$@"; paper_figs ;;

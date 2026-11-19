@@ -93,6 +93,10 @@ class Ax:
                  yticks=True, ylab=True, rot=None):
         s.f, (s.x0, s.y0, s.x1, s.y1) = f, box
         s.xlog, s.ylog, s.cats = xlog, ylog, cats
+        if xlog and xr is not None:   # 対数軸の範囲は正に（0 以下が混ざると log10 が math domain error で止まる）
+            hi = xr[1] if xr[1] > 0 else 1.0; xr = (xr[0] if 0 < xr[0] < hi else hi * 1e-3, hi)
+        if ylog:
+            hi = yr[1] if yr[1] > 0 else 1.0; yr = (yr[0] if 0 < yr[0] < hi else hi * 1e-3, hi)
         s.xr, s.yr = xr, yr
         if title: s.title(title)
         # y 目盛と格子
@@ -142,7 +146,7 @@ class Ax:
 
     def X(s, v):
         a, b = s.xr
-        if s.xlog: v, a, b = math.log10(v), math.log10(a), math.log10(b)
+        if s.xlog: v, a, b = math.log10(max(v, a)), math.log10(a), math.log10(b)   # 0 以下の値は左端に描く
         return s.x0 + (s.x1 - s.x0) * (v - a) / ((b - a) or 1)
 
     def Y(s, v):
@@ -361,7 +365,8 @@ def build(R, rows, work, by_groups, spearman):
             j = r["_j"]; aw = j.get("at_writes", {})
             ms = [m for m in marks if aw.get(str(m))]
             if ms:
-                f = Fig(); xs = ms + [j["full_write_TB"]] + list(j.get("full_write_TB_by_key", {}).values())
+                f = Fig(); xs = [x for x in ms + [j["full_write_TB"]] + list(j.get("full_write_TB_by_key", {}).values()) if x and x > 0]
+                xs = xs or [1.0]   # 書き込みが 0 の構成（何も書かなかった run）は対数軸の範囲から外す
                 hs = [h for h in hints if any(key(c, h) for c in ctxs)]
                 f.add_legend([(c, PAL[i], "line") for i, c in enumerate(ctxs)])
                 W0, gap = 170, 50; pw = (1560 - W0 - gap * (len(hs) - 1)) / len(hs)

@@ -4,7 +4,7 @@
 書き込み = 受け入れ（BMR × 要求バイト）＋ 再挿入 なので、同じ BMR なら差は再挿入の量。
   python3 writes.py > results/writes.json
 """
-import json, os, subprocess
+import json, os, shutil, subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 H = os.environ.get("SYNTH_HOME", os.path.expanduser("~/synth")); SIM = os.environ.get("CACHESIM", f"{H}/b/bin/cachesim")
@@ -15,12 +15,18 @@ WL = {"r3to1": "1K:4194304:0.75:0.9 512K:25600:0.25:0.9", "r95to5": "1K:4194304:
 REC = 24   # synth_gen の 1 要求のバイト数
 
 
-def trace(w):  # scaled.py と同じ：sc_<w>.bin が NREQ 要求でなければ作り直す（前の SYNTH_SCALED_N の残り・書きかけ）
-    p = f"{H}/sc_{w}.bin"
-    if os.path.exists(p) and os.path.getsize(p) == REC * NREQ: return
+def trace(w):  # scaled.py と同じ：sc_<w>.bin が NREQ 要求でなければ消して作り直す（前の SYNTH_SCALED_N の残り・書きかけ）
+    p, need = f"{H}/sc_{w}.bin", REC * NREQ
+    if os.path.exists(p) and os.path.getsize(p) == need: return
+    for q in (p, f"{p}.tmp"):
+        if os.path.exists(q): os.remove(q)
+    free = shutil.disk_usage(H).free
+    if free < need * 1.02:
+        raise RuntimeError(f"ディスクが足りない: {p} に {need / 1e9:.1f} GB 要るが、空きは {free / 1e9:.1f} GB（{H}）")
     r = subprocess.run(f"./synth_gen {p}.tmp {NREQ} 1 {WL[w]}", shell=True, cwd=H, capture_output=True, text=True)
-    if r.returncode or not os.path.exists(f"{p}.tmp") or os.path.getsize(f"{p}.tmp") != REC * NREQ:
-        raise RuntimeError(f"synth_gen が {p} を作れなかった（ディスクの空きを確かめる）: {r.stderr[-500:]}")
+    if r.returncode or not os.path.exists(f"{p}.tmp") or os.path.getsize(f"{p}.tmp") != need:
+        raise RuntimeError(f"synth_gen が {p} を作れなかった（終了コード {r.returncode}）。"
+                           f"メモリ {8 * NREQ / 1e9:.1f} GB とディスク {need / 1e9:.1f} GB を使う。\n{(r.stderr or r.stdout)[-800:]}")
     os.replace(f"{p}.tmp", p)
 
 

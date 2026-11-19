@@ -5,7 +5,7 @@
 縮小：64 KiB → 1 KiB、32 MiB → 512 KiB、chunk 1 MiB → 16 KiB、R 256 MiB → 4 MiB、626 MiB → 9.78 MiB、容量 3.75 GiB。
 1 Region の物の数と Region の数はそのままなので、モデルの上では同じ負荷。
 """
-import csv, json, os, re, subprocess, sys
+import csv, json, os, re, shutil, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 
 H = os.environ.get("SYNTH_HOME", os.path.expanduser("~/synth")); SIM = os.environ.get("CACHESIM", f"{H}/b/bin/cachesim")
@@ -24,12 +24,22 @@ REC = 24   # synth_gen の 1 要求のバイト数（uint32 t, uint64 id, uint32
 
 
 def trace(w):  # sc_<w>.bin を NREQ 要求で用意する。長さが違えば（前の SYNTH_SCALED_N の残り・書きかけ）作り直す
-    p = f"{H}/sc_{w}.bin"
-    if os.path.exists(p) and os.path.getsize(p) == REC * NREQ: return
-    if os.path.exists(p): print(f"scaled: {p} は {os.path.getsize(p) // REC} 要求分（今回 {NREQ}）→ 作り直す", file=sys.stderr)
+    p, need = f"{H}/sc_{w}.bin", REC * NREQ
+    if os.path.exists(p) and os.path.getsize(p) == need: return
+    if os.path.exists(p):
+        print(f"scaled: {p} は {os.path.getsize(p) // REC} 要求分（今回 {NREQ}）→ 消して作り直す", file=sys.stderr); os.remove(p)
+    for q in (f"{p}.tmp",):
+        if os.path.exists(q): os.remove(q)
+    free = shutil.disk_usage(H).free
+    if free < need * 1.02:
+        raise RuntimeError(f"ディスクが足りない: {p} に {need / 1e9:.1f} GB 要るが、空きは {free / 1e9:.1f} GB（{H}）。"
+                           "SYNTH_SCALED_N を減らすか、work/synth の古いファイルを消す")
     r = subprocess.run(f"./synth_gen {p}.tmp {NREQ} 1 {WL[w]}", shell=True, cwd=H, capture_output=True, text=True)
-    if r.returncode or not os.path.exists(f"{p}.tmp") or os.path.getsize(f"{p}.tmp") != REC * NREQ:
-        raise RuntimeError(f"synth_gen が {p} を作れなかった（ディスクの空きを確かめる）: {r.stderr[-500:]}")
+    if r.returncode or not os.path.exists(f"{p}.tmp") or os.path.getsize(f"{p}.tmp") != need:
+        got = os.path.getsize(f"{p}.tmp") if os.path.exists(f"{p}.tmp") else 0
+        raise RuntimeError(f"synth_gen が {p} を作れなかった（終了コード {r.returncode}、{got / 1e9:.2f} / {need / 1e9:.2f} GB 書いた）。"
+                           f"synth_gen は 1 要求 8 B のメモリ（{8 * NREQ / 1e9:.1f} GB）と {need / 1e9:.1f} GB のディスクを使う。\n"
+                           f"--- synth_gen の出力 ---\n{(r.stderr or r.stdout)[-800:]}")
     os.replace(f"{p}.tmp", p)   # 書き終えてから置き換える（途中で止まっても書きかけを残さない）
 
 
