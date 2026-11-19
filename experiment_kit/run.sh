@@ -1,22 +1,27 @@
 #!/bin/bash
-# run.sh — 実験キットの入口。使い方は README.md
-#   ./run.sh setup              cachesim のビルド（パッチ適用）と C ツールのコンパイル
-#   ./run.sh check              traces.tsv の検査（パスがあるか、名前の重複）
-#   ./run.sh validity [name..]  トレース実験（CDN 妥当性検証と同じ）。name を省くと traces.tsv の全部
-#   ./run.sh synth              合成トレースの評価
-#   ./run.sh aggregate [--by category,source]   集計（CSV と report.html。tune の結果があれば tune_report.html と tune_*.csv も）
-#   ./run.sh tune [name..]      自動推定の実験（分類閾値 × 容量の配分 × 再挿入の閾値。TUNE_JOBS）→ work/tune/
-#   ./run.sh tune-synth         同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷での確認）
-#   ./run.sh tune-figs          tune の図だけ作り直す → work/tune/figs/
-#   ./run.sh che [name..]       Zipf の傾きと分類の利得（付録 §N.5：上限・静的分割の予測・容量の取り分・固定された Region）→ work/che/
-#   ./run.sh che-report         che の表と図だけ作り直す → work/che/report.html
-#   ./run.sh paper [name..]     論文用の比較（Region 256 MiB / RU × 方式 3 通り。PAPER_JOBS）→ work/paper/（図 1 枚・表 1 つ）
-#   ./run.sh paper-figs         paper の図と表を全部作り直す（paper、あれば ext と robust も）
-#   ./run.sh paper-ext [name..] CacheLib の n=0・n=3 を追加で回す（PAPER_EXT_JOBS）→ work/paper/ext/（図と表も）。既にある結果は回さない
-#   ./run.sh paper-figs --ext   paper-ext の図と表だけ作り直す
-#   ./run.sh paper-robust [..]  頑健性の確認（chunk=0・再挿入の上限なし・乱数の種。PAPER_ROBUST_JOBS）→ work/paper/robust/（表と図）
-#   ./run.sh paper-figs --robust 頑健性の図と表だけ作り直す
-#   ./run.sh all                setup → validity → synth → aggregate
+# run.sh — 実験キットの入口（./run.sh <コマンド> [name..]）。詳しくは README.md、RegionFlash の指定の意味は params.html。
+#   [name..] = traces.tsv の name（省くと全部）。結果は work/ の下で、済んだ run は回し直さない（消せばやり直す）。
+#
+# 準備
+#   setup                  libCacheSim の取得・パッチ・cachesim のビルドと C ツールのコンパイル
+#   check                  traces.tsv の検査（パスが読めるか、名前の重複）
+#   methods                paper の方式のカタログと、paper / paper-ext / paper-robust で選んだもの（config.sh）
+# 実験
+#   validity [name..]      トレース実験（分類方法 HINTS × 再挿入 × 書き込み予算）  → work/out/
+#   synth                  合成負荷                                              → work/synth/
+#   tune [name..]          自動推定の実験（TUNE_JOBS）                             → work/tune/
+#   tune-synth             同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷）    → work/tune/
+#   che [name..]           Zipf の傾きと分類の利得（付録 §N.5）                     → work/che/
+#   paper [name..]         論文用の比較（PAPER_METHODS）                           → work/paper/
+#   paper-ext [name..]     CacheLib の書き直しの閾値違い（PAPER_EXT_METHODS）        → work/paper/ext/
+#   paper-robust [name..]  頑健性の確認（PAPER_ROBUST_METHODS）                    → work/paper/robust/
+#   paper-final [name..]   論文の本番用に絞った比較（PAPER_FINAL_METHODS。結果は paper・ext と共有）→ work/paper/final/
+#   all                    setup → validity → synth → aggregate
+# 図と表だけ作り直す（回さない）
+#   aggregate [--by category,source]   validity・tune の集計（CSV と report.html）  → work/results/
+#   tune-figs              tune の図                                              → work/tune/figs/
+#   che-report             che の表と図                                            → work/che/report.html
+#   paper-figs [--ext | --robust | --final]  paper の図と表（引数なし = 結果のあるもの全部）
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
 . "$KIT/config.sh"
@@ -70,7 +75,7 @@ setup() {
   gcc -O3 -march=native -pthread -o "$B/og_trace_stats" "$s/og_trace_stats.c" -lzstd -lm &&
   gcc -O3 -march=native -o "$B/og_che" "$s/og_che.c" -lzstd -lm &&
   gcc -O3 -march=native -o "$WORK/synth/synth_gen" "$s/synth_gen.c" -lm &&
-  gcc -O3 -march=native -o "$WORK/synth/synth_model" "$s/synth_model.c" -lm || die "C ツールのコンパイル失敗（libzstd-dev が要る）"
+  gcc -O3 -march=native -fopenmp -o "$WORK/synth/synth_model" "$s/synth_model.c" -lm || die "C ツールのコンパイル失敗（libzstd-dev が要る）"
   log "setup OK: $CACHESIM"
 }
 
@@ -339,12 +344,80 @@ paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。
   if [ $# -eq 0 ]; then
     python3 "$KIT/py/paper_figs.py" "$WORK" || return
     ls "$WORK"/paper/ext/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_figs.py" "$WORK" --ext
+    [ -s "$WORK/paper/final/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final
     ls "$WORK"/paper/robust/*.json >/dev/null 2>&1 && robust_all=1
   fi
   if [ $robust_all = 1 ] || [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
     python3 "$KIT/py/paper_robust_figs.py" "$WORK"
-    local c; for c in c0 c0m f1 s2 s3; do python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
+    local c; for c in $(ids_of "$PAPER_ROBUST_METHODS" | grep -oE '_(c0m|c0|f1|s[0-9]+)$' | tr -d _ | sort -u); do   # 選んだ方式の条件ごと
+      python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
   elif [ $# -gt 0 ]; then python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
+}
+
+# ---------------------------------------------------------------- paper の方式（config.sh の PAPER_CATALOG と *_METHODS）
+BASE_ID=r256_base   # 差の基準（paper では必ず回す）
+cat_get() {  # cat_get <id> → "指定<TAB>図の名前"（カタログに無ければ失敗）
+  local s rest
+  for s in "${PAPER_CATALOG[@]}"; do
+    [ "${s%%|*}" = "$1" ] || continue
+    rest=${s#*|}
+    if [[ "$rest" == *"|"* ]]; then printf '%s\t%s\n' "${rest%%|*}" "${rest#*|}"; else printf '%s\t\n' "$rest"; fi
+    return 0
+  done
+  return 1
+}
+ids_of() {  # ids_of <選択>: all を展開し、重複を除いた id を並べた順に 1 行ずつ
+  local id s
+  for id in $1; do
+    if [ "$id" = all ]; then
+      for s in "${PAPER_CATALOG[@]}"; do s=${s%%|*}; [[ "$s" =~ _(c0|c0m|f1|s[0-9]+)$ ]] || echo "$s"; done
+    else echo "$id"; fi
+  done | awk '!seen[$0]++'
+}
+paper_pick() {  # paper_pick <選択> <出力先> <base|-> [methods.tsv の置き場]: PICKED（"id|指定"）を作り、methods.tsv（id・図の名前・指定）を残す
+  local root=$2 out=${4:-$2/methods.tsv} ids id sl bad=""
+  ids=$(ids_of "$1")
+  if [ "$3" = base ] && ! grep -qx "$BASE_ID" <<< "$ids"; then
+    log "基準 $BASE_ID を足した（差の基準なので必ず回す）"; ids=$(printf '%s\n%s' "$BASE_ID" "$ids")
+  fi
+  local tsv=""; PICKED=()
+  for id in $ids; do
+    sl=$(cat_get "$id") || { bad="$bad $id"; continue; }
+    PICKED+=("$id|${sl%%$'\t'*}")
+    tsv+=$(printf '%s\t%s\t%s' "$id" "${sl#*$'\t'}" "${sl%%$'\t'*}")$'\n'
+  done
+  [ -n "$bad" ] && die "PAPER_CATALOG に無い id:$bad（./run.sh methods で一覧）"   # 止まるときは前の methods.tsv を残す
+  [ ${#PICKED[@]} -gt 0 ] || die "回す方式が 1 つも選ばれていない"
+  mkdir -p "$root" "$(dirname "$out")"; printf '%s' "$tsv" > "$out"
+  log "${root#$WORK/}: ${#PICKED[@]} 方式（${PICKED[*]%%|*}）"
+}
+paper_set() {  # paper_set <選択> <出力先> <base|-> <methods.tsv の置き場|""> [name..]: 選んだ方式を traces.tsv のトレースで回す（tune と同じ仕組み）
+  local sel=$1 root=$2 b=$3 out=$4; shift 4
+  [ -n "$(ids_of "$sel")" ] || [ "$b" = base ] || return 0   # 回す方式が無い組は飛ばす（paper-final の ext 側など）
+  paper_pick "$sel" "$root" "$b" "$out"
+  RUN_JOBS=PICKED RUN_ROOT=$root each_trace tune_one "$@"
+}
+paper_final() {  # 論文の本番用（PAPER_FINAL_METHODS）。結果は paper / paper-ext と共有し（済んだ run は回さない）、図と表は work/paper/final/
+  local F=$WORK/paper/final all extset main ext id
+  paper_pick "$PAPER_FINAL_METHODS" "$F" base   # 先に全部を確かめ、final/methods.tsv = 図と表の並び
+  all=$(ids_of "$PAPER_FINAL_METHODS"); extset=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
+  main=$(for id in $all; do [[ $extset == *" $id "* ]] || echo "$id"; done)
+  ext=$(for id in $all; do [[ $extset == *" $id "* ]] && echo "$id"; done)
+  paper_set "$main" "$WORK/paper" base "$F/run_paper.tsv" "$@"        # paper の方式（work/paper/methods.tsv は変えない）
+  paper_set "$ext" "$WORK/paper/ext" - "$F/run_ext.tsv" "$@"          # CacheLib の n=0・2・3 は paper-ext の場所へ
+}
+methods() {  # カタログの全部と、どの組で選ばれているか（● = 選択）
+  local P E R s id sl lb bad
+  P=" $(ids_of "$PAPER_METHODS" | tr '\n' ' ') $BASE_ID "; E=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
+  R=" $(ids_of "$PAPER_ROBUST_METHODS" | tr '\n' ' ') "; local Fi=" $(ids_of "$PAPER_FINAL_METHODS" | tr '\n' ' ') $BASE_ID "
+  printf '%-18s %-6s %-4s %-7s %-6s %s\n' id paper ext robust final "RegionFlash の指定（| 図の名前）"
+  for s in "${PAPER_CATALOG[@]}"; do
+    id=${s%%|*}; sl=$(cat_get "$id"); lb=${sl#*$'\t'}
+    printf '%-18s %-6s %-4s %-7s %-6s %s\n' "$id" "$([[ $P == *" $id "* ]] && echo yes)" "$([[ $E == *" $id "* ]] && echo yes)" \
+      "$([[ $R == *" $id "* ]] && echo yes)" "$([[ $Fi == *" $id "* ]] && echo yes)" "${sl%%$'\t'*}${lb:+ | $lb}"
+  done
+  bad=$(for id in $(ids_of "$PAPER_METHODS $PAPER_EXT_METHODS $PAPER_ROBUST_METHODS $PAPER_FINAL_METHODS"); do cat_get "$id" >/dev/null || echo "$id"; done)
+  [ -z "$bad" ] || echo "注意: カタログに無い id が選ばれている（選択から外すか、カタログに足す）:" $bad
 }
 
 aggregate() { TUNE_W=$TUNE_W python3 "$KIT/py/aggregate.py" "$KIT" "$WORK" "$@"; }
@@ -354,22 +427,32 @@ need_build() {  # キットのパッチが当てたものと違う（キット�
 }
 
 # ---------------------------------------------------------------- main
+need_traces() { check >/dev/null || { check; die "traces.tsv を直す"; }; }
+usage() { awk 'NR > 1 && /^set -u/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; }
 cmd=${1:-help}; [ $# -gt 0 ] && shift
 case $cmd in
-  setup) setup ;;
-  check) check ;;
-  validity) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; each_trace validity_one "$@" ;;
-  synth) need_build; synth ;;
-  aggregate) aggregate "$@" ;;
-  tune) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/tune"; each_trace tune_one "$@"; tune_figs ;;
-  tune-synth) need_build; mkdir -p "$WORK/tune"; tune_synth; tune_figs ;;
-  tune-figs) tune_figs "$@" ;;
-  che) check >/dev/null || { check; die "traces.tsv を直す"; }; [ "$CHE_SIM" = 1 ] && need_build; [ -x "$B/og_che" ] || setup; mkdir -p "$WORK/che"; each_trace che_one "$@"; che_report ;;
-  che-report) che_report "$@" ;;
-  paper) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper"; RUN_JOBS=PAPER_JOBS RUN_ROOT=$WORK/paper each_trace tune_one "$@"; paper_figs ;;
-  paper-figs) paper_figs "$@" ;;
-  paper-robust) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/robust"; RUN_JOBS=PAPER_ROBUST_JOBS RUN_ROOT=$WORK/paper/robust each_trace tune_one "$@"; python3 "$KIT/py/paper_check.py" "$WORK" --robust; paper_figs --robust ;;
-  paper-ext) check >/dev/null || { check; die "traces.tsv を直す"; }; need_build; mkdir -p "$WORK/paper/ext"; RUN_JOBS=PAPER_EXT_JOBS RUN_ROOT=$WORK/paper/ext each_trace tune_one "$@"; paper_figs --ext ;;
-  all) setup && check && each_trace validity_one && synth && aggregate ;;
-  *) sed -n '2,19p' "$0" ;;
+  # 準備
+  setup)        setup ;;
+  check)        check ;;
+  methods)      methods ;;
+  # 実験
+  validity)     need_traces; need_build; each_trace validity_one "$@" ;;
+  synth)        need_build; synth ;;
+  tune)         need_traces; need_build; mkdir -p "$WORK/tune"; each_trace tune_one "$@"; tune_figs ;;
+  tune-synth)   need_build; mkdir -p "$WORK/tune"; tune_synth; tune_figs ;;
+  che)          need_traces; [ "$CHE_SIM" = 1 ] && need_build; [ -x "$B/og_che" ] || setup
+                mkdir -p "$WORK/che"; each_trace che_one "$@"; che_report ;;
+  paper)        need_traces; need_build; paper_set "$PAPER_METHODS" "$WORK/paper" base "" "$@"; paper_figs ;;
+  paper-ext)    need_traces; need_build; paper_set "$PAPER_EXT_METHODS" "$WORK/paper/ext" - "" "$@"; paper_figs --ext ;;
+  paper-final)  need_traces; need_build; paper_final "$@"; paper_figs --final ;;
+  paper-robust) need_traces; need_build; paper_set "$PAPER_ROBUST_METHODS" "$WORK/paper/robust" - "" "$@"
+                python3 "$KIT/py/paper_check.py" "$WORK" --robust; paper_figs --robust ;;
+  all)          setup && check && each_trace validity_one && synth && aggregate ;;
+  # 図と表だけ
+  aggregate)    aggregate "$@" ;;
+  tune-figs)    tune_figs "$@" ;;
+  che-report)   che_report "$@" ;;
+  paper-figs)   paper_figs "$@" ;;
+  help|-h|--help) usage ;;
+  *)            usage; die "知らないコマンド: $cmd" ;;
 esac

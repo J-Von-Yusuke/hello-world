@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ru_auto の自動設定</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1;--abg:#edf4fb;--gbg:#eef8f2;--bbg:#fdf4ec;--rbg:#fcf0f0;--pbg:#f4f0fc}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;--abg:#172230;--gbg:#17261e;--bbg:#2a2017;--rbg:#2b1a1c;--pbg:#211b2e}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;--abg:#172230;--gbg:#17261e;--bbg:#2a2017;--rbg:#2b1a1c;--pbg:#211b2e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.85 system-ui,"Hiragino Sans","Yu Gothic UI","Yu Gothic",sans-serif}
+main{max-width:940px;margin:0 auto;padding:24px 16px 96px}
+h1{font-size:24px;line-height:1.4;margin:0 0 6px}h2{font-size:20px;margin:52px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--line)}h3{font-size:16.5px;margin:28px 0 8px}
+a{color:var(--a)}.sub{color:var(--mut);margin:0 0 16px;font-size:14px}
+.key{border-left:5px solid var(--a);background:var(--abg);border-radius:8px;padding:10px 16px;margin:12px 0}
+.box{border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:14px 0;overflow-x:auto}
+.ok{border-left:5px solid var(--g);background:var(--gbg)}.warn{border-left:5px solid var(--b);background:var(--bbg)}.bad{border-left:5px solid var(--r);background:var(--rbg)}.prop{border-left:5px solid var(--p);background:var(--pbg)}
+.box>b:first-child{display:block;margin-bottom:2px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}.tbl{overflow-x:auto}
+code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px;word-break:break-all}
+pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;overflow-x:auto;font-size:13px;line-height:1.6}
+svg{max-width:100%;height:auto;display:block;margin:8px auto}svg text{fill:var(--fg);font-size:13px;font-family:inherit}
+.katex-display{overflow-x:auto;overflow-y:hidden}
+.mut{color:var(--mut)}.small{font-size:13.5px}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false})"></script>
+</head>
+<body>
+<main>
+<h1>ru_auto の自動設定<br><span style="font-size:17px;font-weight:600">3 つの自動の中身、paper に足した 5 構成、ST か BMR 重視かを自動で選ぶ案</span></h1>
+<p class="sub">2026-11-18。コードは <code>libCacheSim/cache/eviction/flash/</code>（<code>hint/split_threshold.c</code>・<code>util/sst.h</code>・<code>evict/region_basic.c</code>・<code>ssd/rf_ssd.c</code>・<code>ssd/rf_region.c</code>）。理論の番号は <a href="appendix_highschool.html">appendix_highschool.html</a>（付録の高校数学版）の章。</p>
+
+<div class="key"><b>一言</b>　<code>ru_auto</code> は「<b>何で分けるか</b>（サイズの閾値 τ）」「<b>どれだけ配るか</b>（大の分類の容量の下限 ff）」「<b>何を書き直すか</b>（再挿入の閾値 n）」の 3 つを、走りながら自分で決める。決め方はそれぞれ別で、τ はサイズの分布の形、ff は実測した目的 J の山登り、n は書き直した物が次にまた当たったかの成績、を見る。</div>
+
+<h2 id="s0">0. 設定の分解</h2>
+<div class="tbl"><table>
+<tr><th>指定（<code>config.sh</code> の <code>ru_auto</code>）</th><th>決めるもの</th><th>何を見て決めるか</th><th>決め直す間隔</th></tr>
+<tr><td><code>hint=split_threshold</code></td><td><b>自動 1</b>：サイズの閾値 τ（τ より大きい物 = 分類 1「大」）</td><td>書いた物のサイズの分布（個数とバイトの中央値）。ヒットは見ない</td><td>10 万受け入れごと</td></tr>
+<tr><td><code>region-evict=lru,region-params=auto=1/w=0.1</code></td><td><b>自動 2</b>：大の分類の Region 数の下限 ff（全 Region の割合）</td><td>窓ごとに測った目的 \(J=\mathrm{BHR}+0.1\cdot\mathrm{OHR}\) が上がったか</td><td>4N 回の追い出しごと（N = Region の数）</td></tr>
+<tr><td><code>reinsert=hits:n=auto/target=0.5</code></td><td><b>自動 3</b>：分類ごとの再挿入の閾値 n（その滞在で n 回以上当たった物を書き直す）</td><td>書き直した物が次の滞在でまた当たった割合（ヒット数 h ごと）</td><td>追い出しのたびに更新</td></tr>
+<tr><td class="mut">共通（validity と同じ）</td><td colspan="3" class="mut"><code>region-size</code> = RU（626.5 MiB）、<code>dram-algo=lru,inclusion=cachelib</code>（DRAM は CacheLib と同じ動き）、<code>seal-on-repartition=inactive</code>（τ が変わって使われなくなった分類の書き込み中の Region を封じる）、<code>chunk=64K</code>、<code>seed=1</code></td></tr>
+</table></div>
+
+<h2 id="s1">1. 全体図：どこで何が自動で決まるか</h2>
+<svg viewBox="0 0 900 330" role="img" aria-label="ru_auto の流れ">
+ <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+ <g fill="var(--card)" stroke="var(--line)">
+  <rect x="10" y="40" width="120" height="60" rx="8"/><rect x="170" y="40" width="150" height="60" rx="8"/>
+  <rect x="360" y="20" width="160" height="40" rx="6"/><rect x="360" y="80" width="160" height="40" rx="6"/>
+  <rect x="560" y="30" width="170" height="90" rx="8"/><rect x="760" y="30" width="130" height="90" rx="8"/>
+ </g>
+ <g text-anchor="middle"><text x="70" y="66">DRAM（LRU）</text><text x="70" y="86" font-size="11.5" class="mut">ミスはまず DRAM へ</text>
+ <text x="245" y="64">DRAM から出る物</text><text x="245" y="84" font-size="11.5">を SSD に書く</text>
+ <text x="440" y="45">分類 0（小）の Region</text><text x="440" y="105">分類 1（大）の Region</text>
+ <text x="645" y="60">封じた Region</text><text x="645" y="80">（1 本の Region LRU）</text><text x="645" y="100" font-size="11.5">捨てる箱を選ぶ</text>
+ <text x="825" y="60">捨てる箱の中身</text><text x="825" y="80" font-size="11.5">h ≥ n なら書き直し</text><text x="825" y="100" font-size="11.5">それ以外は消える</text></g>
+ <g stroke="var(--mut)" fill="none" marker-end="url(#ar)"><line x1="130" y1="70" x2="168" y2="70"/><line x1="320" y1="62" x2="358" y2="42"/><line x1="320" y1="78" x2="358" y2="98"/><line x1="520" y1="40" x2="558" y2="60"/><line x1="520" y1="100" x2="558" y2="90"/><line x1="730" y1="75" x2="758" y2="75"/><path d="M825,122 C825,200 440,200 440,122"/></g>
+ <text x="630" y="196" fill="var(--mut)" font-size="12">書き直し（pi：元の分類へ / ii：書き直し専用の分類へ）</text>
+ <g font-size="13" font-weight="700"><text x="300" y="150" fill="var(--a)">自動 1：τ（どちらの分類か）</text><text x="560" y="150" fill="var(--g)">自動 2：ff（大の箱を何個まで守るか）</text><text x="760" y="150" fill="var(--b)">自動 3：n（分類ごと）</text></g>
+ <g font-size="12.5"><text x="20" y="235">時計の速さ</text>
+ <text x="20" y="258" fill="var(--a)">τ：10 万受け入れごと（古い分は 15/16 ずつ減らす：実効およそ 160 万受け入れ）</text>
+ <text x="20" y="280" fill="var(--g)">ff：4N 回の追い出しごと = キャッシュ 4 杯分の書き込みごと（SSD 240 GB なら約 1 TB ごと）</text>
+ <text x="20" y="302" fill="var(--b)">n：追い出しのたび（成績は、書き直した物が次に追い出される時に 1 件増える）</text></g>
+</svg>
+
+<h2 id="s2">2. 自動 1：サイズの閾値 τ（SplitThreshold）</h2>
+<p><b>規則</b>（<code>util/sst.h</code> の <code>sst_recompute</code>、研究者の規則をそのまま）：書いた物のサイズを 2 のべき乗の桶（1 B〜128 TiB の 48 個）に入れ、「個数」と「バイト」の 2 つのヒストグラムを持つ。10 万受け入れごとに</p>
+<ol>
+<li>個数の中央値の桶 <code>cb</code> と、バイトの中央値の桶 <code>bb</code> を求める（例：小さい物が数では多く、バイトは大きい物が多い）。</li>
+<li><code>bb − cb</code> が 2 オクターブ未満なら分けない（分けるほど離れた裾がない）。</li>
+<li>τ = \(2^{\text{mid}}\)、mid = ⌊(cb + bb + 1)/2⌋（2 つの中央値の対数の真ん中 = 幾何平均）。</li>
+<li>τ より上のバイトが全体の 5% 未満なら分けない。</li>
+<li>候補はすぐ採用する（<code>hyst_hold=1</code>）。最後にヒストグラムを 15/16 倍して古い分を減らす。</li>
+</ol>
+<div class="box"><b>例</b>個数の中央値が 32 KiB（桶 15）、バイトの中央値が 1 MiB（桶 20）なら mid = ⌊36/2⌋ = 18、τ = 256 KiB。256 KiB より大きい物が分類 1（大）になる。</div>
+<div class="box warn"><b>この規則が見ていないもの</b><b></b>ヒット（どちらに分けると当たるか）は見ない。サイズの分布の形だけで決まる「数の多い小さい物と、バイトの多い大きい物を分ける」規則。だから最良の τ からずれることがある：Meta では τ = 1 MiB を選んだ（固定の最良は 32 KiB、BMR は分けない方が良かった）。w01 では 2K〜64K と「分けない」の間を 40 回以上行き来した（固定の最良は 256 KiB）。縮小シミュレーションで τ を選ぶ <code>hint=mini</code> が tune にある。<br>τ が変わると分類の意味が変わり、自動 2 の「分類 1」の中身も変わる。使われなくなった分類の書き込み中の Region は封じる（<code>seal-on-repartition=inactive</code>）。</div>
+
+<h2 id="s3">3. 自動 2：大の分類の容量の下限 ff（山登り）</h2>
+<p><b>下限とは</b>：Region LRU が捨てようとした一番古い箱が分類 1（大）で、しかも大の箱の数が ff × N 以下なら、代わりに別の分類の一番古い箱を捨てる。つまり「大の箱は ff × N 個までは LRU で押し出させない」。ff が自然な取り分（下限なしの 1 本の LRU で大が自然に持つ割合）より小さければ、下限は効かない。</p>
+<svg viewBox="0 0 900 230" role="img" aria-label="下限の動き">
+ <g fill="var(--a)" fill-opacity=".18" stroke="var(--a)"><rect x="40" y="40" width="60" height="40" rx="3"/><rect x="110" y="40" width="60" height="40" rx="3"/><rect x="180" y="40" width="60" height="40" rx="3"/></g>
+ <g fill="var(--b)" fill-opacity=".25" stroke="var(--b)"><rect x="250" y="40" width="60" height="40" rx="3"/><rect x="320" y="40" width="60" height="40" rx="3"/></g>
+ <g fill="var(--a)" fill-opacity=".18" stroke="var(--a)"><rect x="390" y="40" width="60" height="40" rx="3"/><rect x="460" y="40" width="60" height="40" rx="3"/></g>
+ <g fill="var(--b)" fill-opacity=".25" stroke="var(--b)"><rect x="530" y="40" width="60" height="40" rx="3"/></g>
+ <g font-size="12" text-anchor="middle"><text x="70" y="65">小</text><text x="140" y="65">小</text><text x="210" y="65">小</text><text x="280" y="65">大</text><text x="350" y="65">大</text><text x="420" y="65">小</text><text x="490" y="65">小</text><text x="560" y="65">大</text></g>
+ <text x="40" y="28" font-size="12" class="mut">新しい ←（最後の touch の順）→ 古い</text>
+ <text x="560" y="105" text-anchor="middle" fill="var(--r)" font-size="12.5">LRU の末尾は「大」</text>
+ <text x="40" y="140" font-size="13">大の箱の数 ≤ ff × N（下限に達している） → 末尾の大は飛ばし、次に古い「小」（右から 2 番目）を捨てる</text>
+ <text x="40" y="164" font-size="13">大の箱の数 &gt; ff × N → 普通の LRU と同じく末尾の大を捨てる</text>
+ <text x="40" y="196" font-size="13" fill="var(--g)">山登り：窓ごとに J を測り、上がれば同じ向きに、下がれば逆向きに ff を 0.02 動かす（0〜0.99 の範囲）</text>
+</svg>
+<div class="tbl"><table>
+<tr><th>項目</th><th>中身（<code>evict/region_basic.c</code> の <code>climb</code>）</th></tr>
+<tr><td>測る目的</td><td>窓の中の \(J=\dfrac{\text{ヒットしたバイト}}{\text{リクエストのバイト}}+w\cdot\dfrac{\text{ヒット数（DRAM＋SSD）}}{\text{リクエスト数}}\)、\(w=0.1\)（11-17 に OHR の項を DRAM＋SSD に直した）</td></tr>
+<tr><td>窓</td><td>4N 回の追い出し。Region 1 個 = R バイトなので、窓 = 4NR = <b>キャッシュ 4 杯分の書き込み</b>（SSD 240 GB なら約 1 TB）。短いと「下げた得（小のヒット）はすぐ見え、損（大の再リクエストのミス）は遅れて見える」ので、下げる側に偏る（N 回では 3:1 で 0.1 まで下がった）</td></tr>
+<tr><td>出発点</td><td>温め終わりの後、大が受け入れた<b>1 窓分</b>のバイトの割合（「大の取り分 ≥ 大のリクエストのバイトの割合」の経験則）。累積で数えると、τ が決まる前は全部が分類 0 なので低すぎる値から始まってしまう</td></tr>
+<tr><td>刻みと範囲</td><td>0.02、[0, 0.99]。温め終わりで数え直し、出発点から始め直す</td></tr>
+<tr><td>出力</td><td><code>P.json</code> の <code>region_policy</code>：<code>ff_end</code>（最後の値）、<code>ff_mean</code>（追い出しの選択ごとの平均）、<code>picks</code></td></tr>
+<tr><td>理論</td><td>コンテンツ単位の静的分割なら J は配分の凹関数（高校版 第 4・19 章）→ 山は 1 つ → 山登りは最良の格子点の ±0.02 を行き来し、本当の最適の 2 刻み以内に収まる。Region LRU の J が単峰であることは合成負荷の格子でしか確かめていない</td></tr>
+</table></div>
+<div class="box warn"><b>実トレースで効いてくる制約</b><b></b>窓 1 つでキャッシュ 4 杯分を書くので、<b>1 本の実行の窓の数 = SSD に書いた量 ÷ (4 × キャッシュ容量)</b>。たとえば全体で 30 TB 書くトレース（SSD 240 GB）なら窓は約 30 個で、ff は出発点から最大 30 × 0.02 = 0.6 しか動けない。出発点が遠いと最良に着く前にトレースが終わる。後で出す提案（§5）は、この「出発点の悪さ」を避けるためのもの。</div>
+
+<h2 id="s4">4. 自動 3：再挿入の閾値 n（分類ごと）</h2>
+<ol>
+<li><b>決め方</b>：分類 c、ヒット数 h（1〜8）ごとに「その h で書き直した物が、次の滞在で 1 回以上当たった」の試行数 try と当たり数 hit を数える。ラプラスの継起則 \((\text{hit}+1)/(\text{try}+2)\) が target（0.5）以上になる最小の h を、その分類の n にする（どの h も届かなければ n = 9 = 書き直さない）。</li>
+<li><b>使い方</b>：箱を捨てるとき、中の物の h（その滞在の SSD ヒット数）が n 以上なら書き直す。0 &lt; h &lt; n の物も確率 0.02 で書き直す（学び続けるための探索）。h = 0 は書き直さない。追い出す箱 1 つあたり R × 0.5 バイトまで（<code>max_frac</code>）。</li>
+<li><b>学び方</b>：書き直した物は「書き直した時の h（8 で頭打ち）」と（11-18 から）「書き直しを決めた分類」を覚えておき、次に追い出される時に、その滞在で当たったかを 1 件数える。出力は <code>P.reauto.json</code>（分類ごとの try・hit・各 n が使われた回数）。</li>
+<li><b>理論</b>：当たった回数の多い物ほど次も当たりやすい（ベイズ。高校版 第 20 章）ので「h ≥ n なら書き直す」という閾値の形が最適。target = 0.5 は「防げるミス 1 回あたりの追加の書き込みが物 1 個分まで」という方針の値で、導出した値ではない。</li>
+</ol>
+<div class="box bad"><b>11-18 に直した不具合（<code>mode=ii</code> と組み合わせたとき）</b>以前は成績を「物がいま居る分類」に数えていた。<code>mode=ii</code> では書き直した物が専用の分類に移るので、成績は専用の分類にだけ数えられ、元の分類（小・大）は何も学ばずに n = 1（何も知らないときの既定：(0+1)/(0+2) = 0.5 ≥ 0.5）のままだった。書き直しを決めた分類に数えるように直した（<code>ssd/rf_region.c</code>、物の情報に 1 バイト <code>re_c</code>。物の情報の大きさは 32 B のまま）。小さな合成負荷（W1 の形、300 万要求）での確認：
+<div class="tbl"><table>
+<tr><th>構成</th><th class="n">小の try</th><th class="n">大の try</th><th>主に使われた n（小 / 大）</th><th class="n">書き直し [GB]</th><th class="n">BMR [%]</th></tr>
+<tr><td>pi（<code>ru_auto</code>）：直す前 = 直した後（ビット単位で一致）</td><td class="n"></td><td class="n"></td><td></td><td class="n">12.3</td><td class="n">40.82</td></tr>
+<tr><td>ii・直す前</td><td class="n">0</td><td class="n">0</td><td>1 / 1（学ばない）</td><td class="n">43.8</td><td class="n">41.46</td></tr>
+<tr><td>ii・直した後</td><td class="n">25,593</td><td class="n">4,355</td><td>2 / 5</td><td class="n">5.8</td><td class="n">40.70</td></tr>
+</table></div></div>
+<div class="box warn"><b>保証されないこと</b>書き直しを増やすと容量を使い、\(T\) が縮み、また当たる確率が下がる。n を決め直し続けるとこの釣り合いに落ち着くが、そこが目的 J の最適である保証はない。下限の山登り（自動 2）とも同じ容量を取り合う。</div>
+
+<h3>3 つの自動の絡み方</h3>
+<div class="tbl"><table>
+<tr><th></th><th>τ（自動 1）</th><th>ff（自動 2）</th><th>n（自動 3）</th></tr>
+<tr><td>変えるもの</td><td>どの物がどの分類か</td><td>分類どうしの容量の取り分</td><td>どの物を書き直すか</td></tr>
+<tr><td>他への影響</td><td>τ が変わると「分類 1」の中身が変わり、ff の意味も変わる</td><td>大の寿命が変わり、大の物が「また当たる」確率（n の成績）が変わる</td><td>書き直しが容量と書き込みを使い、J と ff の山の位置を動かす</td></tr>
+<tr><td>見ている量</td><td>サイズの分布だけ</td><td>実測の J（全部の効果の合計）</td><td>書き直した物の次の成績</td></tr>
+</table></div>
+<p>J を直接測っているのは自動 2 だけなので、τ と n のずれは、ff がそれを含めた上で一番良い所を探す、という分担になっている。</p>
+
+<h2 id="s5a">5. paper に足した 5 構成</h2>
+<p><code>config.sh</code> の <code>PAPER_JOBS</code> に追加（どれも R = RU で、<code>ru_auto</code> から 1 か所だけ変える）。<code>./run.sh paper</code> は結果のある構成を飛ばすので、そのまま実行すれば足りない構成だけが走る。図と表（<code>py/paper_figs.py</code>）にも並ぶ。</p>
+<div class="tbl"><table>
+<tr><th>id</th><th>ru_auto から変えた所</th><th>ねらい</th></tr>
+<tr><td><code>ru_auto_ii</code></td><td><code>reinsert=…/mode=ii</code></td><td>書き直した物を専用の分類（専用の書き込み口）に集める。CacheLib の priority と同じ形（下の説明）</td></tr>
+<tr><td><code>ru_dram_auto</code></td><td><code>hint=key:key=dram/k=2</code></td><td>分類の鍵を DRAM でのヒット数に。境界は動的</td></tr>
+<tr><td><code>ru_dram1_auto</code></td><td><code>hint=key:key=dram/thr=1</code></td><td>同じく固定の境界：DRAM で 0 回 / 1 回以上</td></tr>
+<tr><td><code>ru_st_nauto</code></td><td>下限なし（<code>region-params</code> を外す）</td><td>OHR 寄り：サイズ分類だけで配分は 1 本の LRU に任せる。再挿入 n=auto</td></tr>
+<tr><td><code>ru_st_n0</code></td><td>下限なし、再挿入なし</td><td>同上で書き直しなし</td></tr>
+</table></div>
+
+<h3>(a) <code>mode=ii</code> と CacheLib の priority、PID</h3>
+<ul>
+<li><b>CacheLib</b>：書き直した物の priority は <code>min(前回の書き込みからのヒット数, numPriorities − 1)</code>、新しく入れる物は一番低い priority（<a href="https://github.com/facebook/CacheLib/blob/main/cachelib/navy/block_cache/BlockCache.cpp">navy/block_cache/BlockCache.cpp</a> の <code>reinsertOrRemoveItem</code> と <code>allocateForInsert</code>）。Allocator は priority ごとに別の RegionAllocator を持ち、別の Region に書く（<a href="https://github.com/facebook/CacheLib/blob/main/cachelib/navy/block_cache/Allocator.cpp">Allocator.cpp</a> の <code>allocate</code>、<code>allocateWith</code> の <code>region.setPriority</code>）。priority が 2 段なら「新しい物の Region」と「書き直した物の Region」に分かれる。</li>
+<li><b>RegionFlash の <code>mode=ii</code></b>：書き直した物を、元の分類ではなく 1 つの専用の分類（分類番号 = 分類の数）に入れる。分類 = 書き込み口 = 開いている Region なので、CacheLib の priority 2 段と同じ分かれ方になる（書き直しには h ≥ n ≥ 1 が要るので、priority が 1 になる物だけが専用に入る点も同じ）。</li>
+<li><b>PID</b>：R = RU では、別の Region = 別の RU なので、書き直した物は新しい物と同じ RU に混ざらない。FDP の PID（RUH）を分けるのと同じ。R = 256 MiB で FDP の模型（<code>ru-size</code>）を使うなら、分類 c は RUH c mod <code>ruh</code> に行く。</li>
+<li><b>違い</b>：CacheLib で priority を使うのは Segmented FIFO（priority の高い Region ほど後で捨てる）。<code>ru_auto_ii</code> の追い出しは Region LRU のままで、書き直した物の Region は touch が多ければ自然に長生きする。Segmented FIFO で比べるなら <code>region-evict=sfifo,region-params=ratio=1:1</code>（ii の分類は一番上の段に入る）。</li>
+</ul>
+
+<h3>(b) DRAM でのヒット数で 2 分割（動的か固定か）</h3>
+<ul>
+<li>CacheLib と同じ動き（<code>inclusion=cachelib</code>）では、SSD に書くのは DRAM から出た物で、その時「DRAM にいた間に何回当たったか」が分かる（物の情報の <code>dram_hits</code>）。サイズと違い、<b>人気そのもの</b>の手がかり。高校版 第 24 章の「DRAM は SSD と切り離せる」から、この回数は SSD 側の方式によらない。</li>
+<li><b>動的（<code>k=2</code>）</b>：DRAM ヒット数 + 1 の log2 の桶ごとに書いたバイトを数え（10 万受け入れごと、古い分は 15/16）、バイトが半々になる桶で切る。どちらの分類にも空でない桶を 1 つ以上残す。0 回の物がバイトの半分以上を占める負荷では、結果として「0 回 / 1 回以上」と同じになる。</li>
+<li><b>固定（<code>thr=1</code>）</b>：DRAM ヒット数 + 1 が 1 以下（0 回）と 2 以上（1 回以上）。</li>
+<li><b>「動的に二分割できないか」への答え</b>：動的にはすでになっているが、境界の決め方は「バイトが半々」で、目的（BMR・J）を見ていない。目的で決めるなら、<code>hint=mini</code> がサイズの τ でやっているのと同じく、候補の境界（0 / 1 / 3 / 7 回）ごとに縮小した影のキャッシュを回して J の良いものを選ぶ形になる。DRAM のヒット数は SSD の方式によらないので、影のキャッシュは本物の DRAM から出る列をそのまま使える。未実装。</li>
+</ul>
+
+<h3>(c) OHR 寄り：下限なし（「配分を決めない」と OHR 寄りになる理由）</h3>
+<p>下限なしの 1 本の Region LRU では、各分類の取り分は「1 バイトあたりの touch の率 ≈ \(\lambda/s\)」で決まる（高校版 第 12 章）。これは OHR の上限の詰め方（\(\lambda/s\) の順、第 4 章）に近く、BMR の詰め方（\(\lambda\) の順）とは逆向き。W1・容量 10% のモデル：小の取り分は自然な配分 61.5%、OHR 最適 80%、BMR 最適 5%。実測 OHR は自然な配分 64.0（混在 51.8）、BHR は 51.8（混在 56.6）。だから「配分を決めない」＝ OHR 寄り、という理解で合っている。再挿入の有無は、書き直しが OHR を上げつつ書き込みを増やすので、両方を並べた。</p>
+
+<h3>小さな合成負荷での動作確認（参考）</h3>
+<p class="small">W1 の形（36 KiB × 20 万個・75%、1 MiB × 2 万個・25%、Zipf 0.9）、300 万要求（先頭 75 万で温める）、SSD = 足跡の 10%、R = C/256（RU ではない）、DRAM = SSD/30。<b>構成が動くことの確認で、実トレースの結果の予想ではない</b>（窓の数も少ない）。</p>
+<div class="tbl"><table>
+<tr><th>構成</th><th class="n">OHR [%]</th><th class="n">BMR [%]</th><th class="n">書き込み（n=1・分類なし = 1）</th><th class="n">ff_end</th></tr>
+<tr><td>分類なし・n=1（CacheLib 相当）</td><td class="n">55.93</td><td class="n">39.75</td><td class="n">1.000</td><td class="n">—</td></tr>
+<tr><td><code>ru_auto</code></td><td class="n">52.77</td><td class="n">40.82</td><td class="n">0.923</td><td class="n">0.871</td></tr>
+<tr><td><code>ru_auto_ii</code></td><td class="n">55.10</td><td class="n">40.70</td><td class="n">0.899</td><td class="n">0.738</td></tr>
+<tr><td><code>ru_dram_auto</code></td><td class="n">55.44</td><td class="n">39.75</td><td class="n">0.875</td><td class="n">0.08</td></tr>
+<tr><td><code>ru_dram1_auto</code></td><td class="n">55.71</td><td class="n">39.47</td><td class="n">0.869</td><td class="n">0.06</td></tr>
+<tr><td><code>ru_st_nauto</code></td><td class="n">66.61</td><td class="n">44.80</td><td class="n">0.976</td><td class="n">—</td></tr>
+<tr><td><code>ru_st_n0</code></td><td class="n">64.80</td><td class="n">48.03</td><td class="n">1.039</td><td class="n">—</td></tr>
+</table></div>
+<p class="small">向きは理論どおり：下限なし（<code>ru_st_*</code>）は OHR が大きく上がって BMR が悪化する。DRAM ヒット数の分類では下限が下がり切り（ff_end 0.06〜0.08）、人気で分けた箱は下限なしで釣り合っている。</p>
+
+<h2 id="s5">6. 提案：ST だけか BMR 重視かを自動で選ぶ</h2>
+<div class="key"><b>一言</b>　選ぶべきは「大の分類に下限（容量）を足すと、目的 J が上がるか」。それは<b>自然な配分の点での限界値の比べ合い</b>（KKT の判定）で決まる。大の物が追い出された直後にほとんど再リクエストされないなら（w01 のような負荷）、足しても得はなく ST だけで最適。そうでなければ、指定の w で下限の山登りに移る。ユーザが決めるのは w だけになる。</div>
+
+<h3>6.1 理論：いつ ST だけで十分か</h3>
+<p>下限なしの自然な配分で、大の分類に容量を少し足したときの J の増え方 \(\nu_L\) と、小から少し減らしたときの J の減り方 \(\nu_S\) を比べる（高校版 第 19 章の限界値。大きさが 1 種類の分類では）：</p>
+\[ \nu_k=\Big(\frac{1}{\Lambda_B}+\frac{w}{s_k}\Big)\,\lambda^{\rm edge}_k,\qquad \text{ST だけで十分}\iff\nu_L\le\nu_S\ \ (\text{自然な配分の点で}). \]
+<p>\(\lambda^{\rm edge}_k\) は分類 k の「捨てられる寸前（端）のコンテンツ」の人気。ご質問の「λ/s か λ か」は w が決める：</p>
+<ul>
+<li>\(w=0\)（BMR だけ）：比べるのは \(\lambda^{\rm edge}\)（大きさで割らない）。</li>
+<li>\(w\to\infty\)（OHR だけ）：比べるのは \(\lambda^{\rm edge}/s\)。</li>
+<li>使うのは分類の<b>平均</b>の人気ではなく<b>端</b>の人気。大の分類に「いつも棚にいる少数の超人気」と「二度と来ない大多数」がいる場合、平均の λ は高いが、容量を足して救えるのは端（二度と来ない側）なので価値は 0。</li>
+</ul>
+<p>自然な配分は \(\lambda/s\) をそろえる（OHR 寄り）ので、大の物が再リクエストされる負荷では、BMR の目で見ると大の端の価値が小より高い（W1 で大のヒット 1 回は小の 28 倍の価値）→ 下限が効く（W1 のモデルで BHR +5pt）。大の物がほとんど再リクエストされない負荷では \(\lambda^{\rm edge}_L\approx0\) なので \(\nu_L\approx0\) → ST だけで最適。ご提案の「大サイズに本当にリクエストがないなら ST で十分」は、この判定の特別な場合にあたる。</p>
+<svg viewBox="0 0 900 240" role="img" aria-label="下限と J の関係">
+ <line x1="60" y1="200" x2="860" y2="200" stroke="var(--mut)"/><line x1="60" y1="200" x2="60" y2="30" stroke="var(--mut)"/>
+ <line x1="330" y1="40" x2="330" y2="200" stroke="var(--mut)" stroke-dasharray="4 4"/>
+ <text x="330" y="222" text-anchor="middle" font-size="12.5">自然な取り分（ここより下の ff は効かない）</text>
+ <text x="840" y="222" text-anchor="end" font-size="12.5">ff（大の下限）→</text><text x="66" y="40" font-size="12.5">J</text>
+ <polyline fill="none" stroke="var(--g)" stroke-width="2.5" points="60,140 330,140 400,118 470,100 540,88 610,82 680,84 750,94 820,110"/>
+ <polyline fill="none" stroke="var(--r)" stroke-width="2.5" points="60,150 330,150 400,160 470,172 540,182 610,190 680,196"/>
+ <text x="600" y="72" fill="var(--g)" font-size="13">大がまた来る負荷（W1 型）：上り坂 → 山登りへ</text>
+ <text x="430" y="186" fill="var(--r)" font-size="13">大がほぼ来ない負荷（w01 型）：下り坂 → ST のまま</text>
+ <text x="90" y="128" fill="var(--mut)" font-size="12">下限が効かない平らな所（= ST）</text>
+</svg>
+<p>判定は「自然な取り分の点での坂の向き」だけ見ればよい。坂は ff を少しだけ上げて J を測れば分かる。</p>
+
+<h3>6.2 アルゴリズム（試しの下限で坂を測る）<span class="mut small">— 11-18 に実装：<code>region-params=auto=1/w=0.1/gate=1</code></span></h3>
+<pre>状態 ST（ff = 0：下限なし）で始める。分類（τ）と n=auto はどちらの状態でも今と同じに動かす。
+窓（4N 回の追い出し）ごとに J を測る。
+ST のとき:
+  a ← 大の箱の数 ÷ N（自然な取り分。窓の平均）
+  b ← 大が受け入れたバイトの割合（山登りの出発点）
+  K 窓ごとに 1 窓だけ「試し」: ff = a + max(0.05, 0.5 × (b − a))       … 出発点までの中間。0.05 だけでは差がゆれに埋もれた
+  ΔJ = J(試し) − ( J(試しの前の ST 窓) + J(試しの後の ST 窓) ) / 2      … 前後の平均で負荷の変化を打ち消す
+  ε = 2 × ΔJ のゆれの標準偏差 = 2 × √(E[s²]) / 2                        … s = 続いた 3 つの ST 窓の J の 2 階差分
+                                                                          （1 階差分では温め直後の J の上昇まで「ゆれ」に数えた）
+  ΔJ &gt; ε が 2 回続いたら → 山登りへ（出発点 = max(a + Δ, 大が受け入れたバイトの割合)、向き = 上）
+  そうでなければ ST のまま（試しの間隔を K ← 2K に延ばす。上限あり）
+山登りのとき:
+  今の perturb and observe（刻み 0.02）
+  ff ≤ a（下限が効いていない）が M 窓続いたら → ST に戻る</pre>
+<ul>
+<li><b>コスト</b>：ST のときの追加の損は試しの 1 窓だけ。山登りの出発点の悪さ（§3 の「窓の数が足りない」）は、w01 型では起きない（山登りに入らない）。W1 型では今と同じ出発点（受け入れバイトの割合）から始める。</li>
+<li><b>w の効き方</b>：OHR を重く見る（w が大きい）ほど小のヒットの価値が上がり、試しで J が上がりにくいので、ST のままになりやすい。BMR 重視（w = 0）では、大が再リクエストされる限り山登りに入る。</li>
+<li><b>実装</b>：<code>evict/region_basic.c</code> の <code>gate_step</code>（状態 4 つ：s 下限なし・p 試し・a 試しの次の窓・c 山登り）。引数 <code>gd</code>（0.05）・<code>gm</code>（0.5）・<code>gz</code>（2）・<code>gneed</code>（2）・<code>gk</code>（2）・<code>gkmax</code>（32）・<code>gback</code>（8）。新しい記憶は要らない。経過は <code>P.json</code> の <code>region_policy.gate</code>（試しの ΔJ と ε、窓ごとの状態の列）。<code>gate</code> を付けない構成はビット単位で前と同じ（確認済み）。</li>
+</ul>
+<div class="box prop"><b>別案：名簿で限界値を直接測る（試しをしない）</b>追い出した物の名簿（ID・大きさ・追い出した時刻・分類）を分類ごとに持ち、ミスした物が名簿にあれば「追い出してから何リクエスト後か」を数える。分類 k に容量を δC 足すと、その分類の物は \(G_k=\delta C/(\text{分類 } k \text{ の追い出しバイトの率})\) だけ長くいられるので、「追い出してから \(G_k\) 以内に来たリクエスト」の J の価値の合計が、δC を足したときの J の増え方の見積りになる。大と小で比べれば KKT の判定がそのまま測れる。ただし Region LRU では、そのリクエストが箱を touch して延命させ、さらにヒットを生む（高校版 第 21 章）。この連鎖は 1 箱の数の多い小で大きく、名簿の見積りは小の価値を低く見て下限を選びやすい。山登りに入った後は実測の J で直るので致命的ではないが、試しの案より実装（名簿の記憶と、ミスでの照合）が重い。</div>
+
+<h3>6.3 合成負荷での結果（11-18）</h3>
+<p class="small">小 36 KiB × 20 万個（要求 75%、Zipf 0.9）に、大 1 MiB（要求 25%）を 3 通り：<b>W1</b>（2 万個、Zipf 0.9。大もまた来る）、<b>一度きり</b>（400 万個を一様に。各大は全体で約 1.25 回しか来ない）、<b>中間</b>（5 万個、Zipf 0.5）。SSD 2.83 GB、R = C/256、DRAM = SSD/30、w = 0.1、n=auto。長い実行 = 2,000 万要求（温め 500 万、窓 160〜350 個）、短い実行 = 先頭 400 万要求（温め 100 万、窓 35〜70 個。実トレースの窓は 10〜50 個ほど）。値は J = BHR + 0.1·OHR [%]。</p>
+<div class="tbl"><table>
+<tr><th>負荷</th><th class="n">ST（下限なし）</th><th class="n">ru_auto</th><th class="n">gate</th><th>gate の判断</th><th class="n">固定の下限の最良</th></tr>
+<tr><td>W1・長い</td><td class="n">60.66</td><td class="n"><b>64.82</b></td><td class="n">64.43</td><td>2 回の試し（ΔJ 0.020・0.028、ε 0.007）で窓 10 から山登り</td><td class="n">65.09（ff 0.9）</td></tr>
+<tr><td>一度きり・長い</td><td class="n">11.43</td><td class="n">11.40</td><td class="n"><b>11.43</b></td><td>13 回の試しすべて負け → 最後まで ST</td><td class="n">（ff 0.9 は 8.90）</td></tr>
+<tr><td>中間・長い</td><td class="n">18.79</td><td class="n"><b>18.89</b></td><td class="n">18.60</td><td>12 回とも ε 未満 → ST（試しの分だけ損）</td><td class="n">19.25（ff 0.7）</td></tr>
+<tr><td>W1・短い</td><td class="n">61.58</td><td class="n"><b>64.58</b></td><td class="n">62.74</td><td>試しは毎回プラス（0.015〜0.029）でも、温め直後の ε（0.018〜0.037）に届かず、山登りは窓 26 から</td><td class="n"></td></tr>
+<tr><td>一度きり・短い</td><td class="n">11.48</td><td class="n"><b>11.58</b></td><td class="n">11.45</td><td>ST のまま（この長さでは下限 0.3 前後が少し効いていた）</td><td class="n"></td></tr>
+<tr><td>中間・短い</td><td class="n">18.84</td><td class="n"><b>19.22</b></td><td class="n">18.97</td><td>ST のまま</td><td class="n"></td></tr>
+</table></div>
+<div class="box warn"><b>結論：合成負荷では、gate は ru_auto より良くならなかった</b>gate の判断そのものは設計どおり（下限の要らない負荷では ST に留まり、効く負荷では山登りへ移る）。それでも 6 つのうち ru_auto に勝ったのは「一度きり・長い」の +0.03pt だけ。理由は、<b>ru_auto の山登りが、下限の要らない負荷では自分で下限を下げ、自然な取り分より下（下限が効かない所）に入って ST と同じになる</b>から。下限が要らない場合の損は山登りが下るまでの間だけで、この負荷では小さかった（一度きり・長いで −0.03pt）。一方 gate は、下限が効く負荷で「ST で様子を見る」窓の分だけ確実に損をする（W1 で −0.4〜−1.8pt）。ゆっくり戻ってくる大の得（中間）は 1 窓の試しでは見えなかった。<br>つまり、ご提案の「ST か BMR 重視かを選ぶ」は、ru_auto の山登りがすでに暗に行っている。gate が役に立つのは「下限が強く害になり、しかも窓が少なくて山登りが下がり切れない」負荷に限られる。そういう実トレースがあるかは未確認なので、gate はオプション（<code>PAPER_GATE=1</code> で paper に足す）として残した。</div>
+<p class="small">途中の改良：最初の版（試しの幅 0.05、1 階差分のゆれ）は W1・長いで切り替えに 30 窓かかり 63.86 だった。試しの幅を出発点までの中間にし（64.30）、ゆれを 2 階差分で見積もった（64.43）。</p>
+<div class="box warn"><b>この案が決めないこと</b><b></b>(1) そもそも分けるか（Meta では ST が分けない方より BMR で悪かった）。(2) τ の値（自動 1 のずれ）。どちらも「下限を足すか」とは別の問題で、<code>hint=mini</code>（縮小した影のキャッシュで τ と「分けない」を比べる）と組み合わせる必要がある。(3) 試しの窓では、上げた得（大の再リクエスト）は遅れて見えるので、試しの直後の窓も J に含めるなどの工夫が要るかもしれない。</div>
+
+<h3>6.4 この先</h3>
+<ol>
+<li><b>実トレースで</b>（別の PC）：<code>PAPER_GATE=1 ./run.sh paper</code> で <code>ru_gate</code> を足し、<code>ru_auto</code>・<code>ru_st_nauto</code> と比べる。w01 のように大がほぼ一度きりで、しかも窓の少ないトレースで gate が勝つかどうかが見どころ。</li>
+<li><b>ru_auto の弱点の方を直す案</b>：結果から見ると、ru_auto の損は「出発点（受け入れバイトの割合）から下るのに窓が足りない」ときだけ。出発点を、試しの代わりに最初の数窓の J の傾きから決める、刻みを最初だけ大きくする、などの方が効くかもしれない（未実装）。</li>
+</ol>
+<p class="small">確認に使ったスクリプト：<code>tools/synth/gate_check.sh</code>（ビット一致と長い実行）、<code>gate_check2.sh</code>（試しの幅）、<code>gate_check3.sh</code>（短い実行）、<code>gate_check4.sh</code>（2 階差分のゆれ）。</p>
+</main>
+</body>
+</html>

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """synth_run.py — 合成トレースを作り、理論（synth_model）と実測（cachesim）を並べた JSON を書く。
 
-  python3 synth_run.py <name> <spec...> [--f 0.05,0.1,0.2,0.3] [--g 0,0,1] [--n 20000000]
+  python3 synth_run.py <name> <spec...> [--f 0.05,0.1,0.2,0.3] [--g 0,0,1] [--n 20000000] [--dram 0.1] [--P 20]
+  --dram  DRAM の容量 ÷ SSD の容量（既定 0 = DRAM なし）。DRAM ありでは物単位 LRU（lru・part）と、部分トレースの
+          静的分割（rpartO・rpartB）は回さない（DRAM を区画で共有できないため）。モデルは synth_model -D
+  --P     モデルの Region 静的分割の刻み（0 = 解かない）
   spec = size:nobj:share:alpha（synth_gen と同じ）
 
 実測（容量ごと）:
@@ -14,7 +17,7 @@
              容量はモデルの OHR 最適 / BHR 最適な配分（synth_model の rpartO / rpartB）
   rfloorB[1] 全体のトレースで、BHR 最適な配分を容量の下限（region-params=fc/ff）で与える
   rautoB[1]  全体のトレースで、下限を山登りで決める（auto=1、目的 BHR だけ：w=0）
-いずれも DRAM なし、全受け入れ、先頭 25% の要求で温める。
+--dram が無ければ DRAM なし。全受け入れ、先頭 25% の要求で温める。
 """
 import json, os, re, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
@@ -41,15 +44,19 @@ def lcs(trace, cap, warm):  # 物単位 LRU → (要求数, OHR, BHR)
 def rf(trace, cap, R, evict, hint, warm_req, tag, extra=""):
     if cap < R: return 0.0, 0.0  # 静的分割で容量 0 の区画
     out = f"{HOME}/o/{tag}"
-    sh(f'{SIM} {trace} oracleGeneral RegionFlash {int(cap)} -e "dram-size=0,region-size={int(R)},'
+    sh(f'{SIM} {trace} oracleGeneral RegionFlash {int(cap)} -e "dram-size={int(cap * DR)},region-size={int(R)},'
        f'region-evict={evict},seal-on-repartition=inactive,seed=1,interval=1000000000,'
        f'warmup-req={warm_req},hint={hint}{extra},out={out}" > /dev/null 2>&1')
     t = json.load(open(out + ".json"))["total"]
     return t["ohr"], 1 - t["bmr"]
 
 
+DR, PSTEP = 0.0, None  # --dram、--P
+
+
 def model(spec, f, g):
-    out = sh(f"./synth_model -f {f} {'-g ' + g if g else ''} {' '.join(spec)}")
+    out = sh(f"./synth_model -f {f} {'-g ' + g if g else ''} {f'-D {DR}' if DR else ''} "
+             f"{f'-P {PSTEP}' if PSTEP else ''} {' '.join(spec)}")
     res, cur = {}, None
     for ln in out.splitlines():
         if ln.startswith("f="):
@@ -74,6 +81,8 @@ def main():
         if a[i].startswith("--"): opt[a[i][2:]] = a[i + 1]; i += 2
         else: spec.append(a[i]); i += 1
     n = int(opt.get("n", 20_000_000)); f = opt.get("f", "0.05,0.1,0.2,0.3"); g = opt.get("g")
+    global DR, PSTEP
+    DR = float(opt.get("dram", 0)); PSTEP = opt.get("P")
     sizes = [size(s.split(":")[0]) for s in spec]
     share = [float(s.split(":")[2]) for s in spec]; share = [x / sum(share) for x in share]  # クラスの要求の割合
     tr = f"{name}.bin"
@@ -85,8 +94,9 @@ def main():
     with ThreadPoolExecutor(int(os.environ.get("SYNTH_P", "12"))) as ex:
         for fk, m in M.items():
             C, R = m["C"], m["R"]
-            jobs[fk, "lru"] = ex.submit(lcs, tr, C, warm_sec)
-            for k, ck in enumerate(m["part[1]"]["Cg"].split(",")):
+            if not DR:  # 物単位 LRU（libCacheSim の lru）には DRAM が無い
+                jobs[fk, "lru"] = ex.submit(lcs, tr, C, warm_sec)
+            for k, ck in enumerate(m["part[1]"]["Cg"].split(",") if not DR else []):
                 jobs[fk, f"part{k}"] = ex.submit(lcs, f"{tr}.c{k}", float(ck), warm_sec)
             hints = [("0", "none"), ("1", taus(sizes, list(range(len(sizes)))))]
             if g: hints.append(("2", taus(sizes, [int(x) for x in g.split(",")])))
@@ -96,7 +106,7 @@ def main():
                     jobs[fk, f"{nm}[{v}]"] = ex.submit(rf, tr, C, R, ev, h, warm_req, f"{name}_{fk}_{nm}{v}")
             h1 = hints[1][1]
             for p in ("rpartO", "rpartB"):  # Region LRU の静的分割：クラスごとの部分トレース
-                if f"{p}[1]" not in m: continue
+                if f"{p}[1]" not in m or DR: continue
                 for k, ck in enumerate(m[f"{p}[1]"]["Cg"].split(",")):
                     jobs[fk, f"{p}{k}"] = ex.submit(rf, f"{tr}.c{k}", float(ck), R, "lru", "none",
                                                     int(warm_req * share[k]), f"{name}_{fk}_{p}{k}")
@@ -111,12 +121,16 @@ def main():
     S = {}
     for (fk, nm), j in jobs.items():
         S.setdefault(fk, {})[nm] = j.result()
+    if not os.environ.get("SYNTH_KEEP"):  # トレース（全体と分類ごと）は結果を出したら消す（1 負荷で約 1 GB）。SYNTH_KEEP=1 で残す
+        for p in [tr] + [f"{tr}.c{k}" for k in range(len(spec))]:
+            if os.path.exists(f"{HOME}/{p}"): os.remove(f"{HOME}/{p}")
     for fk, s in S.items():  # 静的分割：部分トレースの結果を要求数・バイトで足し合わせる
         parts = [s.pop(k) for k in sorted(x for x in list(s) if x.startswith("part"))]
-        req = sum(p[0] for p in parts); byt = sum(p[0] * sz for p, sz in zip(parts, sizes))
-        s["part[1]"] = (sum(p[0] * p[1] for p in parts) / req,
-                        sum(p[0] * sz * p[2] for p, sz in zip(parts, sizes)) / byt)
-        s["lru"] = s["lru"][1:]
+        if parts:
+            req = sum(p[0] for p in parts); byt = sum(p[0] * sz for p, sz in zip(parts, sizes))
+            s["part[1]"] = (sum(p[0] * p[1] for p in parts) / req,
+                            sum(p[0] * sz * p[2] for p, sz in zip(parts, sizes)) / byt)
+        if "lru" in s: s["lru"] = s["lru"][1:]
         bw = [a * b for a, b in zip(share, sizes)]
         for p in ("rpartO", "rpartB"):  # 区画の結果を要求の割合・バイトの割合で足し合わせる
             ks = sorted(x for x in list(s) if x.startswith(p) and x[len(p):].isdigit())

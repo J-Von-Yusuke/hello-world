@@ -38,7 +38,7 @@ che = load(f"{O}/che.json")
 cfg = load(f"{O}/config.json") or load(f"{T}/config.json") or {}
 out = dict(name=name, category=cat, source=src, variant=var, w=w, config=cfg)
 runs = {}
-for id in ("none", "st_lru"):
+for id in ("none", "st_lru", "st_hc0"):   # st_hc0 = tune の分類＋下限の山登り、目的 BHR だけ（w=0）
     d, r = run(id)
     if r: runs[id] = r
 try:  # 素の LRU（cachesim lru、SSD と同じ容量）："..., miss ratio 0.1118, byte miss ratio 0.0835, ..."
@@ -115,7 +115,7 @@ if os.path.exists(f"{d}/evlog"):
 
 # ---- まとめの数（report の表の列）
 m = out.get("model") or {}; s = m.get("split") or {}
-none, st, obj = runs.get("none"), runs.get("st_lru"), runs.get("lru")
+none, st, obj, h0 = runs.get("none"), runs.get("st_lru"), runs.get("lru"), runs.get("st_hc0")
 out["summary"] = dict(
     alpha_all=(m.get("zipf_all") or {}).get("alpha"),
     alpha_cls=[c["alpha"] for c in s.get("classes", [])],
@@ -125,11 +125,14 @@ out["summary"] = dict(
     model_lru_err=(m["lru"]["ohr"] - obj["ohr"]) if (m and obj) else None,   # IRM の当てはまり（負 = 時間局所性で実測の方が当たる）
     pred_gain_ohr=s.get("gain_ohr"), pred_gain_bhr=s.get("gain_bhr"), pred_gain_j=s.get("gain_j"),
     opt_small_share_ohr=s["ohr_opt"]["share"][0] if s else None,
+    opt_small_share_bhr=s["bhr_opt"]["share"][0] if s else None,
     opt_small_share_j=(s.get("j_opt") or {}).get("share", [None])[0] if s else None,
     lru_small_share=s["classes"][0]["lru_share"] if s else None,
     nat_small_share=(out.get("share_mean_2nd_half") or [None])[0],
     meas_gain_ohr=(st["ohr"] - none["ohr"]) if (st and none) else None,
     meas_gain_bmr=(st["bmr"] - none["bmr"]) if (st and none) else None,   # 正 = 分類で BMR が悪化
+    meas_gain_ohr_w0=(h0["ohr"] - none["ohr"]) if (h0 and none) else None,   # 分類＋BHR 基準の下限（st_hc0）− 混在
+    meas_gain_bmr_w0=(h0["bmr"] - none["bmr"]) if (h0 and none) else None,
     pinned_first10=sum(v["sealed_first10"] for v in (out.get("pinned") or {}).values()) if out.get("pinned") else None,
     st_taus=(st or {}).get("taus"), st_tau_changes=out.get("st_tau_changes"), model_taus=s.get("taus"))
 json.dump(out, sys.stdout)

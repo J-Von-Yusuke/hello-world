@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>実績で分ける箱の検証</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--sh:#2b6cb0;--sc:#90b4dd;--lh:#c05621;--lc:#f0b27a}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--sh:#4f8fd6;--sc:#2c4f78;--lh:#e07b39;--lc:#7a4a26}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.8 system-ui,"Hiragino Sans","Yu Gothic",sans-serif}
+main{max-width:860px;margin:0 auto;padding:28px 16px 72px}
+h1{font-size:23px;line-height:1.4;margin:0 0 6px}h2{font-size:19px;margin:28px 0 6px}
+.mut{color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:12px 0}
+.ok{border-left:4px solid var(--g)}.warn{border-left:4px solid var(--r)}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:4px 7px;text-align:left}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto}code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13.5px}
+svg{max-width:100%;height:auto;display:block;margin:8px 0}svg text{fill:var(--fg);font-size:13px}
+ul{margin:4px 0;padding-left:24px}li{margin:3px 0}
+.key{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;margin-right:4px}
+</style>
+</head>
+<body><main>
+<h1>「すぐ戻ってきたコンテンツ」を別の箱に入れると、便乗が消えるか：モデルとシミュレーションでの確認</h1>
+<p class="mut">2026-11-16。例題は <a href="model_story_undergrad.html">学部生向けの資料</a> と同じ 4 グループ（S熱・S冷・L熱・L冷、容量 128 MiB、箱 512 KiB × 256 個）。言葉の意味もそちらに合わせた。</p>
+
+<div class="card ok"><b>結論</b>
+<ul>
+<li>名簿を使って分けるだけ（サイズでは分けない）で、OHR 57.7% → <b>77.0%</b>、BHR 67.6% → <b>80.0%</b>（シミュレーション、名簿の長さ 5,000 リクエスト）。サイズで分ける今の方法（73.3% / 62.1%）より、BHR が 18pt 高い。</li>
+<li>名簿とサイズの両方で分けると OHR <b>80.9%</b> / BHR <b>78.9%</b>。人気を前もって知っている理想の 4 分類（81.2% / 81.3%）にほぼ届く。</li>
+<li>箱を書く回数（追い出した箱の数）が、混ぜるときの 38 万回から <b>23 万回</b>に減る（−38%）。書き直しを増やさずに分けられる。</li>
+<li>名簿に要るのは、最近消したコンテンツの ID 約 1,000 個（全コンテンツ 88,000 個の約 1%）。</li>
+<li><b>Zipf の負荷でも効く（第 5 節）</b>：名簿で分けると、α = 0.5〜1.6 のどこでも、混ぜるより OHR・BHR とも高い。BMR は混ぜるときの 7〜15% 減（α = 0.7〜1.4、容量 10%）、箱を書く回数は 7〜15% 減。サイズで分けると BMR が混ぜるより悪くなるのとは逆。ただし利得は例題より小さい。</li>
+<li>実トレースではまだ試していない。</li>
+</ul></div>
+
+<h2>1. 仕組み</h2>
+<svg viewBox="0 0 800 210" role="img" aria-label="名簿で分ける仕組み">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker></defs>
+<g font-size="13">
+<rect x="10" y="80" width="150" height="50" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="85" y="102" text-anchor="middle">ミスした</text><text x="85" y="120" text-anchor="middle">コンテンツ</text>
+<polygon points="250,105 320,70 390,105 320,140" fill="var(--card)" stroke="var(--a)"/><text x="320" y="101" text-anchor="middle">名簿に</text><text x="320" y="118" text-anchor="middle">載っている？</text>
+<path d="M160,105H246" stroke="var(--mut)" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="470" y="20" width="200" height="56" rx="8" fill="var(--card)" stroke="var(--g)" stroke-width="2"/><text x="570" y="44" text-anchor="middle" font-weight="700">実績ありの箱</text><text x="570" y="64" text-anchor="middle">人気が多い → 長生き</text>
+<rect x="470" y="134" width="200" height="56" rx="8" fill="var(--card)" stroke="var(--b)" stroke-width="2"/><text x="570" y="158" text-anchor="middle" font-weight="700">新入りの箱</text><text x="570" y="178" text-anchor="middle">不人気が多い → すぐ消える</text>
+<path d="M370,92 C420,60 430,48 466,48" fill="none" stroke="var(--g)" stroke-width="2" marker-end="url(#ar)"/><text x="410" y="56" fill="var(--g)">はい</text>
+<path d="M370,118 C420,150 430,162 466,162" fill="none" stroke="var(--b)" stroke-width="2" marker-end="url(#ar)"/><text x="400" y="168" fill="var(--b)">いいえ</text>
+<path d="M670,162 C740,162 740,105 700,105 L180,105" fill="none" stroke="var(--line)" stroke-dasharray="4 3"/>
+<text x="700" y="122" text-anchor="end" fill="var(--mut)" font-size="12">箱を消すとき、中身の ID を名簿に書く（中身は捨てる）</text>
+</g></svg>
+<ul>
+<li><b>名簿</b>：最近消したコンテンツの ID と消した時刻だけを持つ。消してから G リクエスト以内にまた呼ばれたら「すぐ戻ってきた」とみなす。</li>
+<li>どちらの箱に入れても、書くのはミスしたときの 1 回だけ。書き直し（再挿入）は使っていない。</li>
+<li>どの箱を消すかは、今までどおり Region LRU（箱の種類をまたいで、いちばん長く呼ばれていない箱）。</li>
+</ul>
+
+<h2>2. なぜ効くか（モデルの筋）</h2>
+<p>消されてから G 以内にまた呼ばれる見込みは 1 − e<sup>−(人気 × G)</sup>。G = 5,000 なら：</p>
+<div class="tbl"><table>
+<tr><th></th><th class="n">S熱</th><th class="n">S冷</th><th class="n">L熱</th><th class="n">L冷</th></tr>
+<tr><td>すぐ戻ってくる見込み</td><td class="n">31%</td><td class="n">1%</td><td class="n">71%</td><td class="n">3%</td></tr>
+</table></div>
+<p>人気のコンテンツは名簿に引っかかり、不人気なコンテンツはほとんど引っかからない。だから実績ありの箱には人気のコンテンツが集まって長生きし、不人気なコンテンツは新入りの箱に集まってすぐ消える。<b>不人気なコンテンツが長生きの箱に便乗できなくなる</b>。</p>
+<div class="tbl"><table>
+<tr><th>容量の内訳（シミュレーション）</th><th class="n"><span class="key" style="background:var(--sh)"></span>S熱</th><th class="n"><span class="key" style="background:var(--sc)"></span>S冷</th><th class="n"><span class="key" style="background:var(--lh)"></span>L熱</th><th class="n"><span class="key" style="background:var(--lc)"></span>L冷</th><th class="n">不人気の合計</th></tr>
+<tr><td>サイズで分ける（今の方法）</td><td class="n">23%</td><td class="n" style="color:var(--r)">31%</td><td class="n">28%</td><td class="n">18%</td><td class="n" style="color:var(--r)"><b>48%</b></td></tr>
+<tr><td>名簿で分ける（G = 5,000）</td><td class="n">23%</td><td class="n">5%</td><td class="n" style="color:var(--g)"><b>39%</b></td><td class="n">30%</td><td class="n"><b>34%</b></td></tr>
+<tr><td>名簿とサイズで分ける</td><td class="n">24%</td><td class="n">21%</td><td class="n" style="color:var(--g)"><b>38%</b></td><td class="n">17%</td><td class="n"><b>37%</b></td></tr>
+<tr><td class="mut">理想の 4 分類（人気を知っている）</td><td class="n mut">25%</td><td class="n mut">13%</td><td class="n mut">39%</td><td class="n mut">24%</td><td class="n mut">36%</td></tr>
+</table></div>
+<p>BHR を稼ぐのは L熱（バイトで数えたリクエストの 67%）。名簿で分けると、L熱 の容量が 28% → 39% に増え、理想の 4 分類と同じになる。S冷 の便乗が消えた分が、L熱 に回った。</p>
+
+<h2>3. 結果</h2>
+<div class="tbl"><table>
+<tr><th>方式</th><th class="n">モデル OHR / BHR</th><th class="n">シミュレーション OHR / BHR</th><th class="n">箱を書いた回数</th></tr>
+<tr><td>混ぜる</td><td class="n">57.7 / 67.6</td><td class="n">57.7 / 67.6</td><td class="n">37.7 万</td></tr>
+<tr><td>サイズで分ける（今の方法）</td><td class="n">69.7 / 55.7 *</td><td class="n">73.3 / 62.1</td><td class="n">41.4 万</td></tr>
+<tr><td><b>名簿で分ける</b>（G = 5,000）</td><td class="n">76.9 / 79.9</td><td class="n"><b>77.0 / 80.0</b></td><td class="n"><b>23.4 万</b></td></tr>
+<tr><td><b>名簿とサイズで分ける</b>（G = 5,000）</td><td class="n">79.8 / 73.8 **</td><td class="n"><b>80.9 / 78.9</b></td><td class="n"><b>23.5 万</b></td></tr>
+<tr><td class="mut">理想の 4 分類</td><td class="n mut">81.2 / 81.3</td><td class="n mut">81.2 / 81.3</td><td class="n mut">20.8 万</td></tr>
+</table></div>
+<p class="mut">シミュレーションは <code>tools/synth/ghost_sim.c</code>（3,000 万リクエスト、先頭 750 万で温める）。混ぜる・サイズで分けるは RegionFlash の実測（57.7/67.6、73.7/62.9）とほぼ同じ値になることを確かめた。モデルは <code>tools/synth/ghost_model.py</code>（結果 <code>results/ghost_model.json</code>）。* は立ち上がり補正なし（補正ありで 73.8 / 63.4）。** は 11-18 に解き直した値（旧 77.4 / 63.7 は反復が収束していなかった。第 4 節）。</p>
+<div class="tbl"><table>
+<tr><th>名簿の長さ G（リクエスト）</th><th class="n">2,000</th><th class="n">5,000</th><th class="n">10,000</th><th class="n">20,000</th><th class="n">50,000</th><th class="n">100,000</th></tr>
+<tr><td>名簿で分ける：シミュレーション OHR / BHR</td><td class="n">76.9 / 80.0</td><td class="n">77.0 / 80.0</td><td class="n">76.3 / 79.5</td><td class="n">75.1 / 78.6</td><td class="n">71.4 / 76.2</td><td class="n">67.0 / 73.5</td></tr>
+<tr><td>　同：モデル</td><td class="n">77.1 / 80.0</td><td class="n">76.9 / 79.9</td><td class="n">76.3 / 79.5</td><td class="n">75.0 / 78.5</td><td class="n">71.3 / 76.1</td><td class="n">66.9 / 73.5</td></tr>
+<tr><td>名簿とサイズ：シミュレーション</td><td class="n">80.9 / 78.8</td><td class="n">80.9 / 78.9</td><td class="n">80.8 / 78.4</td><td class="n">80.3 / 77.1</td><td class="n">79.3 / 73.8</td><td class="n">78.0 / 70.3</td></tr>
+<tr><td>　同：モデル（11-18 に解き直し）</td><td class="n">79.3 / 72.6</td><td class="n">79.8 / 73.8</td><td class="n">79.7 / 73.3</td><td class="n">79.1 / 71.3</td><td class="n">77.5 / 67.1</td><td class="n">75.9 / 63.4</td></tr>
+<tr><td>名簿に載っている ID の数（平均）</td><td class="n">460</td><td class="n">1,150</td><td class="n">2,370</td><td class="n">4,990</td><td class="n">14,300</td><td class="n">33,000</td></tr>
+</table></div>
+<ul>
+<li>G = 2,000〜20,000 の広い範囲で効く。普通の LRU の猶予（16,125）より短めがよい。</li>
+<li>G を長くし過ぎると、不人気なコンテンツも名簿に引っかかり（G = 100,000 で S冷 の 19%）、実績ありの箱に混ざって効果が薄れる。</li>
+</ul>
+
+<h2>4. 気をつける所</h2>
+<div class="card warn">
+<ul>
+<li><b>名簿とサイズで両方分けたとき、モデルが外れた</b>（G ≥ 5,000）。モデルは「S熱 の大半が実績あり・小の箱に住む」解に落ちる（容量 62%）。シミュレーションでは S熱 の 86% が新入り・小の箱にいた。立ち上がりで固定された箱が原因かを調べたが、最初の 10% の時期に封じて最後まで残った箱は 0 個で、この仮説は外れた。モデルの答えが 2 つ以上ある（付録 §N.4 と同じ型の）可能性があり、原因は未解決。名簿だけで分ける場合は、すべての G で 1.3pt 以内に合う。<br><b>11-18 追記</b>：§N.4 の「答えが 2 つ」は、実は反復が振動して収束していなかっただけだった（<a href="model_fix_1117.html">model_fix_1117.html</a> §1）。<code>ghost_model.py</code> も同じ減衰 0.5 の固定で、名簿とサイズの全部の G と名簿だけの G = 2,000 で、300 回の上限まで収束していなかった（残差 3〜4）。減衰の自動調整を入れると全部 70 回以内に収束する。名簿だけは全部の G で 0.2pt 以内に合うようになった。名簿とサイズは OHR 1〜2pt・BHR 5〜7pt 低いまま（旧の 6〜15pt よりは小さい）。収束した解でも S冷 の容量をモデル 31%・実測 21% と多く見積もっており、「答えが 2 つ」ではない別の原因が残る（未解決）。</li>
+<li><b>例題は名簿に有利</b>：人気が「熱か冷か」の 2 段にはっきり分かれている。Zipf では利得が小さくなった（第 5 節）。</li>
+<li><b>名簿は理想化</b>：シミュレーションの名簿は時刻で G 以内かを判定した。実装では、決まった数の ID を入れる表（古いものから捨てる）になる。</li>
+<li><b>人気が時間で変わる負荷、実トレースでは未確認</b>。CDN トレースでは、短い間に束になって来るリクエストが名簿に引っかかりやすく、効き方が変わるはず。</li>
+<li>考え方は S3-FIFO や 2Q の「名簿（ghost）」と同じ系統。新しいのは、箱単位で消す SSD キャッシュでの効き方（便乗が消えること）をモデルで説明できる点。</li>
+</ul></div>
+
+<h2>5. Zipf の負荷での確認</h2>
+<p>負荷は付録 §N と同じ W1 の形：小さいコンテンツ 36 KiB × 20 万個（リクエストの 75%）、大きいコンテンツ 1 MiB × 2 万個（25%）。両方とも人気は順位の α 乗に反比例。容量は全コンテンツの 5% / 10%、箱は容量の 256 分の 1（小さいコンテンツなら 300 個入る）。3,000 万リクエスト、名簿の長さは全部 G = 10,000 にそろえた（後で長さを振った結果も示す）。</p>
+<div class="tbl"><table>
+<tr><th>容量 10%：BMR（%、低いほど良い）</th><th class="n">α = 0.5</th><th class="n">0.7</th><th class="n">0.9</th><th class="n">1.0</th><th class="n">1.2</th><th class="n">1.4</th><th class="n">1.6</th></tr>
+<tr><td>混ぜる</td><td class="n">81.4</td><td class="n">66.9</td><td class="n">43.6</td><td class="n">30.8</td><td class="n">11.75</td><td class="n">3.31</td><td class="n">0.80</td></tr>
+<tr><td>サイズで分ける</td><td class="n" style="color:var(--r)">87.3</td><td class="n" style="color:var(--r)">73.3</td><td class="n" style="color:var(--r)">48.2</td><td class="n" style="color:var(--r)">34.2</td><td class="n" style="color:var(--r)">13.04</td><td class="n" style="color:var(--r)">3.66</td><td class="n" style="color:var(--r)">0.87</td></tr>
+<tr><td><b>名簿で分ける</b></td><td class="n" style="color:var(--g)"><b>80.0</b></td><td class="n" style="color:var(--g)"><b>62.4</b></td><td class="n" style="color:var(--g)"><b>38.4</b></td><td class="n" style="color:var(--g)"><b>26.8</b></td><td class="n" style="color:var(--g)"><b>9.97</b></td><td class="n" style="color:var(--g)"><b>2.90</b></td><td class="n" style="color:var(--g)"><b>0.77</b></td></tr>
+<tr><td>名簿とサイズで分ける</td><td class="n">85.8</td><td class="n">69.3</td><td class="n">43.6</td><td class="n">30.4</td><td class="n">11.42</td><td class="n">3.35</td><td class="n">0.85</td></tr>
+<tr><td class="mut">名簿：混ぜるとの差（BMR の何 % 減）</td><td class="n mut">−2%</td><td class="n mut">−7%</td><td class="n mut">−12%</td><td class="n mut">−13%</td><td class="n mut">−15%</td><td class="n mut">−12%</td><td class="n mut">−4%</td></tr>
+<tr><td class="mut">名簿：箱を書く回数（混ぜるとの差）</td><td class="n mut">−2%</td><td class="n mut">−7%</td><td class="n mut">−12%</td><td class="n mut">−13%</td><td class="n mut">−15%</td><td class="n mut">−11%</td><td class="n mut">−3%</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>容量 10%：OHR（%）</th><th class="n">α = 0.5</th><th class="n">0.7</th><th class="n">0.9</th><th class="n">1.0</th><th class="n">1.2</th><th class="n">1.4</th><th class="n">1.6</th></tr>
+<tr><td>混ぜる</td><td class="n">11.6</td><td class="n">25.6</td><td class="n">51.7</td><td class="n">66.5</td><td class="n">88.4</td><td class="n">97.06</td><td class="n">99.36</td></tr>
+<tr><td>サイズで分ける</td><td class="n">27.1</td><td class="n">41.7</td><td class="n">64.0</td><td class="n">75.7</td><td class="n">91.8</td><td class="n">98.00</td><td class="n">99.58</td></tr>
+<tr><td>名簿で分ける</td><td class="n">12.1</td><td class="n">28.7</td><td class="n">56.1</td><td class="n">70.1</td><td class="n">89.9</td><td class="n">97.38</td><td class="n">99.38</td></tr>
+<tr><td>名簿とサイズで分ける</td><td class="n"><b>28.9</b></td><td class="n"><b>45.5</b></td><td class="n"><b>67.6</b></td><td class="n"><b>78.3</b></td><td class="n"><b>92.7</b></td><td class="n"><b>98.13</b></td><td class="n"><b>99.59</b></td></tr>
+</table></div>
+<p class="mut">容量 5% でも同じ並び（例：α = 1.0 の BMR は 混ぜる 39.4、サイズ 41.2、名簿 35.3、名簿とサイズ 37.7）。全結果は <code>tools/synth/results/ghost_zipf.txt</code>。</p>
+<ul>
+<li><b>名簿で分けると、どの α でも BMR が混ぜるより下がり、OHR も上がる</b>。サイズで分けると、どの α でも BMR が混ぜるより悪い（CDN トレースで見た傾向と同じ向き）。</li>
+<li><b>名簿とサイズを両方使うと OHR は一番高い</b>が、BMR はほぼ混ぜると同じ（α ≤ 0.7 では悪い）。BMR を重く見るなら、名簿だけで分ける方がよい。</li>
+<li><b>利得は α = 1.0〜1.2 が最大で、両端で小さい</b>。</li>
+</ul>
+<p><b>例題より利得が小さい理由</b>：名簿が分けられるのは「消されてすぐ戻ってくるか」だけ。例題では熱と冷の人気が 36 倍違い、すぐ戻ってくる見込みが 31% 対 1% とはっきり分かれた。Zipf では人気がなだらかにつながっているので、境目のあたりのコンテンツはどちらの箱にも入る。</p>
+<ul>
+<li>α が小さい（0.5）と、人気の差そのものが小さく、すぐ戻ってくるかどうかでほとんど区別できない。</li>
+<li>α が大きい（1.4 以上）と、人気のコンテンツはほとんど消されないので名簿に載る機会がなく、取り返せるミスもそもそも少ない（付録 §N の (a)）。</li>
+</ul>
+<div class="tbl"><table>
+<tr><th>名簿の長さ G：名簿で分けたときの BMR（容量 10%）</th><th class="n">1,000</th><th class="n">3,000</th><th class="n">10,000</th><th class="n">30,000</th><th class="n">100,000</th><th class="n">300,000</th></tr>
+<tr><td>α = 0.7</td><td class="n">63.6</td><td class="n">63.0</td><td class="n"><b>62.4</b></td><td class="n">62.8</td><td class="n">64.6</td><td class="n">66.2</td></tr>
+<tr><td>α = 1.0</td><td class="n">27.7</td><td class="n">27.2</td><td class="n"><b>26.8</b></td><td class="n">26.8</td><td class="n">27.8</td><td class="n">29.3</td></tr>
+<tr><td>α = 1.2</td><td class="n">10.47</td><td class="n">10.26</td><td class="n">9.97</td><td class="n"><b>9.84</b></td><td class="n">10.00</td><td class="n">10.53</td></tr>
+<tr><td>α = 1.4</td><td class="n">3.14</td><td class="n">3.01</td><td class="n">2.90</td><td class="n">2.82</td><td class="n"><b>2.77</b></td><td class="n">2.81</td></tr>
+</table></div>
+<p>G = 3,000〜30,000 なら、どの α でも最良との差は 0.6pt 以内。α が大きいほど最良の G は長い（箱が消されるペースが遅く、名簿に載るまでの時間が長いため）。実装では G を「名簿に入れる ID の数」で決めることになるので、最良の G が α によらず決まるかは、ID の数で振り直して確かめる必要がある。</p>
+
+<h2>6. RegionFlash に実装して、実トレースで確認</h2>
+<p><code>hint=ghost</code>（<code>libCacheSim/.../flash/hint/ghost.c</code>）。名簿は ID の数が決まった表で、長さは「SSD にいるコンテンツの数 × frac」（実行中に数える）。追い出した ID を順に入れ、古いものから捨てる。<code>tau=</code> を付けると大きさでも分ける。</p>
+<p><b>合成トレースで ghost_sim と照合</b>：例題 OHR/BHR 76.8 / 79.9（ghost_sim 77.0 / 80.0）、Zipf α = 1.0 で 70.3 / 73.5（同 70.1 / 73.2）、α = 0.7 で 28.5 / 37.3（同 28.7 / 37.6）。分けない・サイズで分けるも RegionFlash の既存の値と一致した。</p>
+<p><b>実トレース</b>（全量。設定は以前の閾値の評価と同じ：Meta は SSD 240 GiB・DRAM 8 GiB・Region 626.5 MiB、w01 は SSD 30%・Region 500 MiB、Tencent（ブロックトレース tencentBlock_11784。Tencent CDN ではない）は SSD 30%・DRAM SSD/60・Region SSD/256。DRAM あり・再挿入なし・Region LRU）：</p>
+<div class="tbl"><table>
+<tr><th>BMR の差（分けない − ）、pt。( ) は書き込み量の差</th><th class="n">Meta</th><th class="n">Tencent</th><th class="n">w01</th></tr>
+<tr><td>分けない（BMR）</td><td class="n">5.02%</td><td class="n">54.34%</td><td class="n">69.00%</td></tr>
+<tr><td>SplitThreshold（今の方法）</td><td class="n" style="color:var(--r)">+0.81（+17.0%）</td><td class="n">−1.23（−2.5%）</td><td class="n">−0.59（−0.9%）</td></tr>
+<tr><td>一番良い固定 τ（後から総当たりで選んだもの）</td><td class="n">−0.01（−0.4%）<br><span class="mut">τ = 4 KiB</span></td><td class="n">−0.92（−1.9%）<br><span class="mut">τ = 64 KiB</span></td><td class="n">−3.71（−5.3%）<br><span class="mut">τ = 256 KiB</span></td></tr>
+<tr><td><b>名簿で分ける</b>（frac = 0.1 / 0.3 / 1）</td><td class="n" style="color:var(--g)"><b>−0.12 / −0.18 / −0.23</b><br>（−2.6 / −3.8 / −4.7%）</td><td class="n" style="color:var(--g)"><b>−1.81 / −1.69 / −1.51</b><br>（−3.7 / −3.5 / −3.1%）</td><td class="n" style="color:var(--g)"><b>−0.27 / −0.42 / −0.39</b><br>（−0.3 / −0.6 / −0.6%）</td></tr>
+<tr><td><b>名簿 + 一番良い固定 τ</b></td><td class="n">−0.22（−4.4%）<br><span class="mut">frac 0.3</span></td><td class="n" style="color:var(--g)"><b>−2.26（−4.6%）</b><br><span class="mut">frac 0.1</span></td><td class="n" style="color:var(--g)"><b>−3.99（−5.7%）</b><br><span class="mut">frac 1（0.3 で −3.98）</span></td></tr>
+</table></div>
+<ul>
+<li><b>名簿だけで、3 本とも分けないより BMR が下がり、書き込みも減る</b>。サイズの分類（SplitThreshold）は Meta で BMR を悪くし、書き込みを 17% 増やした。</li>
+<li>Meta と Tencent では、名簿だけで<b>一番良い固定 τ より良い</b>（固定 τ は後から総当たりで選んだ値で、実行中には分からない）。</li>
+<li>w01（α ≈ 0.46）では大きさで分ける効き目が大きく（−3.7pt）、名簿はそれに −0.28pt を上乗せする。</li>
+<li>BMR の差は Meta では小さく見えるが、Meta の BMR は 5.02% と小さいので、−0.23pt は BMR の 4.6% 減。</li>
+</ul>
+<div class="card warn"><b>まだ言えないこと</b>
+<ul>
+<li><b>一番良い frac がトレースで違う</b>（Meta 1、Tencent 0.1、w01 0.3〜1）。決め方は未定。差は Meta 0.11pt、Tencent 0.31pt、w01 0.15pt。</li>
+<li><b>名簿の大きさ</b>：w01 で frac = 1 だと名簿は平均 4,100 万件（ハッシュと輪で約 1.6 GB）。frac = 0.3 で 1,200 万件。実機ならハッシュの代わりに小さな確率的な表（Bloom フィルタなど）で足りるかは未確認。</li>
+<li><b>名簿 + τ の τ は後から選んだ値</b>。実行中に τ を決める方法（SplitThreshold・mini）と名簿の組み合わせは未実装。</li>
+<li>再挿入・容量の下限との組み合わせ、FDP のデバイス側の書き込み増幅は未確認。</li>
+</ul></div>
+
+<h2>次にやること</h2>
+<ol>
+<li>frac の決め方：容量の下限と同じく、目的（BMR）を測って山登りで動かすか、名簿の「当たり」の割合から決める。</li>
+<li>名簿 + 実行中の τ（<code>hint=mini</code> と組み合わせる）。</li>
+<li>キットの tune に ghost0.1 / ghost0.3 / ghost1 を足した（<code>./run.sh tune</code>）。手元の CDN トレースで確かめる。</li>
+</ol>
+</main></body></html>

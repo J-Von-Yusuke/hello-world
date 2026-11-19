@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自動推定の実験計画</title>
+<style>
+:root{--bg:#f6f5f2;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9;--card:#fff;--a:#3b7dbf;--b:#c9683a;--g:#3f9a64;--r:#c0504a;--soft:#eef3f9}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732;--card:#24221f;--soft:#23303d}}
+:root[data-theme="dark"]{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732;--card:#24221f;--soft:#23303d}
+body{background:var(--bg);color:var(--fg);font:15.5px/1.8 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}
+main{max-width:1040px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:1.55rem;margin:.2em 0}h2{font-size:1.2rem;margin:2em 0 .5em;border-bottom:2px solid var(--line);padding-bottom:.2em}h3{font-size:1.02rem;margin:1.4em 0 .3em}
+.sub{color:var(--mut)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:14px 0}
+.key{background:var(--soft);border-left:4px solid var(--a);padding:10px 14px;border-radius:6px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{background:var(--soft)}
+td.n{text-align:right;font-variant-numeric:tabular-nums}.ok{color:var(--g);font-weight:700}.ng{color:var(--r);font-weight:700}
+code{font-size:13.5px;background:var(--soft);padding:1px 4px;border-radius:3px}pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-x:auto;font-size:13.5px}
+svg{max-width:100%;height:auto}svg text{fill:var(--fg);font-family:system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif}
+.wrap{overflow-x:auto}
+</style>
+</head>
+<body><main>
+<h1>分類・容量の配分・再挿入を実行中に決める：実験計画</h1>
+<p class="sub">2026-11-12。実装（RegionFlash）と実験キット（<code>experiment_kit</code> の <code>tune</code>）の説明と、何をどの順に測れば目標を言えるか。</p>
+
+<div class="key"><b>結論（現時点）</b>
+<ul>
+<li><b>分類閾値</b>：既に実行中に決まる（SplitThreshold）。閾値は多くて 3 個（分類 4 つ）に絞る。</li>
+<li><b>再挿入の閾値</b>：<b>自動化できた</b>（<code>reinsert=hits:n=auto</code>）。合成 95:5 で、手で探した最良（大物 n=3）と同じ閾値を自分で見つけ、書き込みは n=1 より 16% 少ない。</li>
+<li><b>容量の配分</b>：<b>自動化できた</b>（<code>region-evict=lru,region-params=auto=1/w=…</code>＝下限 ff の山登り）。BMR 重視（w ≤ 0.1）では、合成 95:5・3:1 とも、固定の下限を後から選んだ最良との差は 0.1pt 以内。最初に作った「末尾のヒット密度で配分する」mv は −2.6pt で、その原因は §3.1 で確定した（1 Region に物が多い分類では、末尾のヒットが限界値を表さない）。</li>
+<li><b>全部自動の構成</b>（<code>st_hc0.1_auto</code>：SplitThreshold ＋ 下限の山登り w=0.1 ＋ n=auto）の、基準（分類なし＋n=1）との差：3:1 で OHR +6.5pt・BMR −0.21pt・書き込み −13.4%（<span class="ok">3 つとも達成</span>）。95:5 で BMR −1.0pt・書き込み −10.5% だが OHR −3.8pt（<span class="ng">OHR は未達</span>。w=0.1 は BMR を重く見る設定なので、OHR も上げるなら w を上げる。そのとき §3.1 の弱点に当たる）。</li>
+<li>MetaCDN での検算は、キットの <code>./run.sh tune meta_nha</code> で、合成で確かめた手順をそのまま流す。</li>
+</ul></div>
+
+<h2>1. 目標と、何を自動で決めるか</h2>
+<p>目標は、基準（分類なし＋再挿入 n=1、CacheLib 型の既存構成）に対して、次の 3 つを同時に満たすこと。</p>
+<table><tr><th>指標</th><th>向き</th><th>意味</th></tr>
+<tr><td>OHR（物のヒット率）</td><td>上げる</td><td>小物の要求に速く応える</td></tr>
+<tr><td>BMR（バイトのミス率）</td><td>下げる</td><td>元のサーバへの転送量。ミスした物は SSD に書かれるので書き込みにも効く</td></tr>
+<tr><td>SSD 書き込み ÷ 要求バイト</td><td>下げる</td><td>受け入れ（≒ BMR）＋ 再挿入（追い出しの際の書き直し＝アプリ層の GC）</td></tr></table>
+
+<div class="card wrap">
+<svg viewBox="0 0 960 300" role="img" aria-label="自動で決める 3 つの値と、その位置">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#888"/></marker></defs>
+<rect x="10" y="110" width="120" height="60" rx="8" fill="none" stroke="#888"/><text x="70" y="145" text-anchor="middle" font-size="15">ミスした物</text>
+<line x1="130" y1="140" x2="185" y2="140" stroke="#888" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="190" y="95" width="190" height="90" rx="8" fill="none" stroke="#3b7dbf" stroke-width="2.5"/>
+<text x="285" y="125" text-anchor="middle" font-size="15" font-weight="700">① 分類閾値 τ</text><text x="285" y="148" text-anchor="middle" font-size="13">大きさの分布から</text><text x="285" y="168" text-anchor="middle" font-size="13">SplitThreshold（既存）</text>
+<line x1="380" y1="125" x2="440" y2="90" stroke="#888" stroke-width="2" marker-end="url(#ar)"/><line x1="380" y1="155" x2="440" y2="200" stroke="#888" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="445" y="55" width="200" height="60" rx="8" fill="none" stroke="#888"/><text x="545" y="80" text-anchor="middle" font-size="14">小物の Region 列（LRU）</text><text x="545" y="100" text-anchor="middle" font-size="12">開いた Region 1 つ</text>
+<rect x="445" y="175" width="200" height="60" rx="8" fill="none" stroke="#888"/><text x="545" y="200" text-anchor="middle" font-size="14">大物の Region 列（LRU）</text><text x="545" y="220" text-anchor="middle" font-size="12">開いた Region 1 つ</text>
+<rect x="690" y="95" width="250" height="90" rx="8" fill="none" stroke="#c9683a" stroke-width="2.5"/>
+<text x="815" y="122" text-anchor="middle" font-size="15" font-weight="700">② 容量の配分（mv）</text><text x="815" y="145" text-anchor="middle" font-size="13">末尾のヒット密度 × 1 ヒットの価値が</text><text x="815" y="165" text-anchor="middle" font-size="13">最も低い列から 1 Region 追い出す</text>
+<line x1="645" y1="85" x2="688" y2="120" stroke="#888" stroke-width="2"/><line x1="645" y1="205" x2="688" y2="160" stroke="#888" stroke-width="2"/>
+<rect x="690" y="215" width="250" height="75" rx="8" fill="none" stroke="#3f9a64" stroke-width="2.5"/>
+<text x="815" y="240" text-anchor="middle" font-size="15" font-weight="700">③ 再挿入の閾値 n（auto）</text><text x="815" y="262" text-anchor="middle" font-size="13">追い出す Region の物のうち、h ≥ n なら</text><text x="815" y="280" text-anchor="middle" font-size="13">書き直す（n は分類ごとに学ぶ）</text>
+<line x1="815" y1="185" x2="815" y2="213" stroke="#888" stroke-width="2" marker-end="url(#ar)"/>
+<path d="M690,255 C600,280 520,270 545,237" fill="none" stroke="#3f9a64" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ar)"/><text x="600" y="292" font-size="12" fill="#3f9a64">書き直し（アプリ層の GC）</text>
+<text x="20" y="30" font-size="14">各 Region 列の中は LRU。① で書き込み先が分かれ、② が列の間の容量を、③ が列の中で残す物を決める。</text>
+</svg>
+</div>
+
+<h2>2. それぞれの決め方と、なぜそれでよいか</h2>
+<h3>① 分類閾値（既存）と、分類の数の上限</h3>
+<p>SplitThreshold が、書いた物の大きさのヒストグラムから τ を決め直す（<code>hint=split_threshold</code>）。閾値を増やす方法は 2 つある（<code>st_hr_refine:k_max=3</code>＝閾値 2 個、<code>st_recursive:depth=2</code>＝最大 3 個）。
+<b>分類は 4 つまで</b>に絞る。分類ごとに書き込み中の Region（FDP なら RU）が 1 つ要り、書き込み先が散るほど各 Region への書き込み速度が落ちて開いたままの時間が延び、空き（書きかけの Region の未使用分）も増えるため。分類を増やすのは、OHR・BMR の改善がこの損を上回るときだけ（実験 E3）。</p>
+
+<h3>② 容量の配分（region-evict=mv）</h3>
+<p>静的な分割では、各分類のヒット率は容量について凹（付録 B：<i>dμ/dT = −Var<sub>w</sub>(λ)</i>）なので、「各分類の限界値（容量 1 バイトあたりのヒットの増え方）が等しい」配分が唯一の最適になる（KKT）。
+LRU では、末尾の Region へのヒット（＝その Region が 1 つ少なければミスになっていたヒット）の密度が限界値の推定になる。mv はそれを分類ごとに数え（半減期 <code>half</code> 回の追い出しで減衰）、
+<b>(末尾のヒット密度) × (1 ヒットの価値)</b> が最も低い分類から追い出す。1 ヒットの価値は目的 <b>BHR + w·OHR</b> から <i>s<sub>c</sub> / s̄<sub>req</sub> + w</i>（s<sub>c</sub> = その分類の平均の大きさ、s̄<sub>req</sub> = 要求の平均の大きさ）。</p>
+<p>w を明示したのは、1 つの指標だけを最大にすると振り切れるため（測定：BHR だけなら容量の 99.9% が大物に行き、OHR は 0.62 → 0.30。BMR は大物の取り分 0.9〜0.999 でほぼ平らで、得るものが無い）。</p>
+
+<h3>③ 再挿入の閾値（reinsert=hits:n=auto）</h3>
+<p>追い出す Region の物に、その滞在で h 回当たった物を書き直したとする。書き直しは s バイトの書き込み。書き直さなければ、その物が次に要求されたときミスになり、受け入れでやはり s バイト書く。
+次の滞在で当たる確率を p とすると、<b>書き直し 1 回で防げるミスは p 回、増える書き込みは高々 s(1 − p)</b>。そこで分類ごと・h ごとに「書き直した物が次の滞在で 1 回以上当たった割合」を数え（Laplace の推定 (当たり+1)/(試行+2)）、
+<b>target（既定 0.5）を越える最小の h を閾値 n</b> にする。閾値より下の物も確率 eps（既定 0.02）で書き直し、数え続ける。λ が 1 つなら、付録の再挿入モデルでは 1 滞在のヒット数が幾何分布 <i>P(N ≥ n) = a<sup>n</sup></i> になり、次に当たる確率は h によらない。実測で p が h とともに上がるのは、λ の違う物が混ざっていて、h が大きいほど λ の大きい物に絞られるため。閾値 n が効くのはこの混ざり方のおかげで、n=auto はそれを分類ごとに測っている。</p>
+
+<h2>3. 最小の試運転で分かったこと（合成 95:5、6,000 万要求、1/64 縮小 SSD）</h2>
+<table>
+<tr><th>構成</th><th>OHR</th><th>BMR</th><th>書き込み ÷ 要求バイト</th><th>うち再挿入</th></tr>
+<tr><td>基準：分類なし ＋ n=1</td><td class="n">0.623</td><td class="n">0.272</td><td class="n">0.313</td><td class="n">0.040</td></tr>
+<tr><td>分類 ＋ 固定の下限 0.9 ＋ n=1</td><td class="n">0.659</td><td class="n">0.256</td><td class="n">0.335</td><td class="n">0.079</td></tr>
+<tr><td>分類 ＋ 固定の下限 0.9 ＋ n=3</td><td class="n">0.653</td><td class="n">0.261</td><td class="n">0.279</td><td class="n">0.018</td></tr>
+<tr><td>分類 ＋ mv（BHR のみ）＋ <b>n=auto</b></td><td class="n">0.302</td><td class="n">0.257</td><td class="n">0.277</td><td class="n">0.020</td></tr>
+<tr><td>分類 ＋ mv w=0.1 ＋ n=3</td><td class="n">0.525</td><td class="n">0.260</td><td class="n">0.279</td><td class="n">—</td></tr>
+<tr><td>分類 ＋ mv w=0.3 ＋ n=3</td><td class="n">0.712</td><td class="n">0.279</td><td class="n">0.298</td><td class="n">—</td></tr>
+<tr><td>分類 ＋ 固定の下限 0.8 ＋ n=3</td><td class="n">0.732</td><td class="n">0.277</td><td class="n">0.295</td><td class="n">—</td></tr>
+</table>
+<ul>
+<li class="ok">n=auto は、大物で「h=1 → 0.34、h=2 → 0.49、h=3 → 0.55」と学び、n=3 を選んだ（小物は n=2）。手で探した最良と一致。</li>
+<li class="ng">mv は w を変えると交換曲線を描くが、固定の下限の曲線より内側。BMR 0.26 で OHR 0.525 対 0.653、BMR 0.28 で 0.712 対 0.732。小物に多く容量を渡しているのに（取り分 0.18 対 ≤0.1）、小物のヒットは少ない（2,195 万対 2,771 万）。</li>
+<li>仮説「推定の揺れで、熱い小物 Region を誤って追い出す」は、推定を滑らかにしても（末尾 8 Region、半減期 4N）OHR 0.525 → 0.529 で変わらず、<b>否定</b>。</li>
+</ul>
+
+<h2>3.1 E1a の結果：mv が負けた根本原因と、山登りへの切り替え</h2>
+<p><b>計測</b>：既存の追い出しログ（<code>RF_EVLOG</code>：時刻・分類・最後に触れてからの年齢・寿命・ヒット数）を、固定の下限 0.9 と mv（w=0.1）で 1 本ずつ取り、分類ごとの Region 数をリトルの法則（追い出しの頻度 × 平均の寿命）で出した。</p>
+<table>
+<tr><th>小物の分類</th><th>固定の下限 0.9</th><th>mv w=0.1</th></tr>
+<tr><td>Region 数（リトル）／ 取り分</td><td class="n">56 ／ 0.068</td><td class="n">193 ／ 0.201</td></tr>
+<tr><td>追い出した Region の「最後に触れてからの年齢」中央値 ／ 下位 10%</td><td class="n">3,291 ／ 2,322 要求</td><td class="n">802 ／ <b>3</b> 要求</td></tr>
+<tr><td>小物の SSD ヒット</td><td class="n">2,771 万</td><td class="n">2,195 万</td></tr>
+<tr><td>小物の受け入れ（ミスして書いたバイト）</td><td class="n">15.4 GB</td><td class="n">21.1 GB</td></tr>
+<tr><td>目的 BHR + 0.1·OHR</td><td class="n">0.8048</td><td class="n">0.7783（−2.6pt）</td></tr>
+</table>
+<div class="card wrap">
+<svg viewBox="0 0 940 250" role="img" aria-label="小物の Region は全部が頻繁に触れられ、末尾が冷えない">
+<text x="10" y="22" font-size="14" font-weight="700">小物の Region（4 MiB に 1 KiB が 4,096 個）</text>
+<g font-size="12">
+<rect x="10" y="35" width="420" height="34" fill="none" stroke="#888"/>
+<g fill="#c9683a"><rect x="40" y="42" width="6" height="20"/><rect x="150" y="42" width="6" height="20"/><rect x="300" y="42" width="6" height="20"/></g>
+<text x="440" y="57">← どの Region にも熱い物が数個ある</text>
+<text x="10" y="92">→ どの Region も数百要求ごとに当たり、LRU の末尾（最も冷えた Region）でも「最後に触れてから 800 要求」。</text>
+<text x="10" y="112">→ 末尾へのヒットは「Region が救われた回数」で、追い出したときに失うもの（中の熱い物の今後のヒット）を表さない。</text>
+<text x="10" y="148" font-size="14" font-weight="700" fill="#c0504a">mv が熱い小物の Region を追い出す</text>
+<text x="10" y="170">→ 中の熱い物のうち、まだ n=3 回当たっていない物は書き直されずに消え、次の要求でミス → 受け入れ直し（+5.7 GB、ヒット −580 万）。</text>
+<text x="10" y="190">→ 小物に多く容量を渡しているのに（取り分 0.20）、小物のヒットは減る。mv は自分の目的でも −2.6pt 負けている＝限界値の推定が誤り。</text>
+<text x="10" y="226" font-size="14" font-weight="700" fill="#3f9a64">直し方：限界値を推定しない。下限 ff を、測った目的が上がる向きへ動かす（山登り）。</text>
+<text x="10" y="246">目的は配分について凹（付録 B）なので、山登りは最適に近づく。Region の中の物の混ざり方に左右されない。</text>
+</g></svg></div>
+<p>仮説の判定：H0（推定の揺れ）は否定。<b>H1（道連れ）が根本原因</b>で、H2（過去の末尾ヒット ≠ 将来の限界値）はその表れ。<b>H3（山登り）で解決</b>。</p>
+<p>キット（<code>./run.sh tune-synth</code>：分類は SplitThreshold が実行中に決める、6,000 万要求、再挿入なし）での、山登り hc と固定の下限の格子の最良との差（目的 (1−BMR) + w·OHR、pt）：</p>
+<table>
+<tr><th>w</th><th>95:5 の最良（ff）</th><th>95:5 hc の差</th><th>3:1 の最良（ff）</th><th>3:1 hc の差</th></tr>
+<tr><td>0.03</td><td class="n">0.7435（0.95）</td><td class="n ok">−0.02</td><td class="n">0.7514（0.95）</td><td class="n ok">−0.02</td></tr>
+<tr><td>0.1</td><td class="n">0.7828（0.9）</td><td class="n ok">−0.08</td><td class="n">0.7918（0.95）</td><td class="n ok">−0.08</td></tr>
+<tr><td>0.3</td><td class="n">0.9158（0.7）</td><td class="n ng">−1.1</td><td class="n">0.9200（0.8）</td><td class="n ok">−0.05</td></tr>
+<tr><td>1</td><td class="n">1.4747（0.5）</td><td class="n ng">−9.8</td><td class="n">1.4471（lru）</td><td class="n">−0.7</td></tr>
+</table>
+<p>山登りの決め方：<b>4N 回</b>の追い出しを 1 窓とし、窓ごとに J = ヒットバイト ÷ 要求バイト + w × ヒット数 ÷ 要求数 を測り、上がれば同じ向きへ、下がれば逆向きへ ff を 0.02 動かす。出発点は、大物が受け入れ始めた最初の窓で大物が占めた受け入れバイトの割合（理論の条件 C<sub>L</sub>/C ≥ B<sub>L</sub>/B）。</p>
+<p>途中で直した 2 つの不具合（どちらも計測で見つけた）：</p>
+<ul>
+<li><b>出発点の誤り</b>：受け入れバイトを実行の最初から累積で数えると、SplitThreshold が閾値を決めるまで全部が小物に数えられ、大物の割合が小さく出て ff が 0.1〜0.3 から始まった。窓 1 つ分の受け入れで数えるようにした。</li>
+<li><b>窓が短すぎる</b>：窓を N 回の追い出しにすると、3:1 では ff が 0.1 まで下がり続けた（差 −5〜−7pt）。下限を下げると小物のヒットの増加はすぐ見えるが、追い出した大物がミスとして戻ってくるのは窓の後なので、「下げるほど良い」と誤って見える。窓を 4N にして解消（3:1 で −0.08pt）。</li>
+</ul>
+<p><b>残る弱点</b>：窓が長いぶん、山登りの回数が少ない。95:5 の 6,000 万要求では 28 回しかなく、OHR を重く見る w ≥ 0.3 で最適（ff 0.5〜0.7）まで降りきれない。BMR を重く見る使い方（w ≤ 0.1、本研究の目標）では問題にならない。長いトレースでは回数が増える。</p>
+
+<h2>3.2 小物の Region をアプリ層の GC で詰め直すと、ヒット率は上がるか</h2>
+<p><b>仮説</b>：小物の Region は長く残り（寿命 約 68 万要求）、追い出した中身の 90.6% は一度も当たらない冷たい物。熱い物だけを書き直して詰め直せば（GC）、同じ容量でずっと多くの熱い物を持て、小物は書き込み全体の約 5% しかないので書き込みの悪化も小さいはず。</p>
+<p><b>計測</b>（合成 95:5、6,000 万要求、分類は固定 τ）：再挿入を小物だけに限り（<code>reinsert=hits:n=1/max_size=32768</code>）、大物の下限 ff と 1 Region の書き直し上限 max_frac を振った 6 本。小物の Region 数は追い出しログからリトルの法則で出した。</p>
+<table>
+<tr><th>構成</th><th>OHR</th><th>BMR</th><th>書き込み ÷ 要求B</th><th>小物 Region 数</th><th>小物のヒット率</th><th>小物の書き直し</th><th>追い出した中身の死に率</th></tr>
+<tr><td>下限 0.9 ＋ 全体 n=3（現行）</td><td class="n">0.653</td><td class="n">0.2605</td><td class="n">0.279</td><td class="n">56</td><td class="n">0.648</td><td class="n">0.24 GB</td><td class="n">0.906</td></tr>
+<tr><td>下限 0.9 ＋ 小物だけ n=1</td><td class="n">0.658</td><td class="n">0.2737</td><td class="n">0.275</td><td class="n">73</td><td class="n">0.655</td><td class="n">2.0 GB</td><td class="n">0.989</td></tr>
+<tr><td>下限 0.95 ＋ 小物だけ n=1、上限 0.9</td><td class="n">0.595</td><td class="n">0.2666</td><td class="n">0.268</td><td class="n">31</td><td class="n">0.587</td><td class="n">1.5 GB</td><td class="n">1.000</td></tr>
+<tr><td>下限 0.97 ＋ 小物だけ n=1、上限 0.9</td><td class="n">0.553</td><td class="n">0.2648</td><td class="n">0.266</td><td class="n">22</td><td class="n">0.543</td><td class="n">1.2 GB</td><td class="n">1.000</td></tr>
+<tr><td>下限 0.98 ＋ 小物だけ n=1、上限 0.9</td><td class="n">0.513</td><td class="n">0.2645</td><td class="n">0.266</td><td class="n">16</td><td class="n">0.501</td><td class="n">1.6 GB</td><td class="n">1.000</td></tr>
+</table>
+<div class="card wrap">
+<svg viewBox="0 0 800 350" role="img" aria-label="小物の分類のヒット率と、同じ容量での物単位 LRU と静的な最適">
+<g stroke="#999" stroke-width="1" opacity=".45"><line x1="60" x2="760" y1="271.1" y2="271.1"/><line x1="60" x2="760" y1="213.3" y2="213.3"/><line x1="60" x2="760" y1="155.6" y2="155.6"/><line x1="60" x2="760" y1="97.8" y2="97.8"/><line x1="60" x2="760" y1="40" y2="40"/></g>
+<g font-size="12" text-anchor="end"><text x="54" y="275">0.4</text><text x="54" y="217">0.5</text><text x="54" y="160">0.6</text><text x="54" y="102">0.7</text><text x="54" y="44">0.8</text></g>
+<g font-size="12" text-anchor="middle"><text x="60" y="318">0</text><text x="160" y="318">20</text><text x="260" y="318">40</text><text x="360" y="318">60</text><text x="460" y="318">80</text><text x="560" y="318">100</text><text x="660" y="318">120</text><text x="760" y="318">140</text>
+<text x="410" y="342">小物に割り当てた Region の数（1 Region = 4,096 個）</text></g>
+<text x="16" y="170" font-size="12" transform="rotate(-90 16 170)" text-anchor="middle">小物のヒット率</text>
+<polyline fill="none" stroke="#3f9a64" stroke-width="3" points="100,204 120,185.4 140,171.8 170,156.3 210,140.7 260,125.8 340,107.8 425,93.2 510,81.4 610,69.8 760,55.6"/>
+<polyline fill="none" stroke="#3b7dbf" stroke-width="3" points="100,271.9 120,252.4 140,237.9 170,221 210,203.7 260,186.9 340,166.2 425,149 510,134.9 610,120.8 760,103.2"/>
+<g fill="#c9683a"><circle cx="341" cy="127.8" r="6"/><circle cx="424" cy="123.8" r="6"/><circle cx="248.5" cy="166" r="6"/><circle cx="184.5" cy="195.4" r="6"/><circle cx="217" cy="163.1" r="6"/><circle cx="168.5" cy="188.5" r="6"/><circle cx="140" cy="212.8" r="6"/></g>
+<g font-size="13"><text x="600" y="58" fill="#3f9a64" font-weight="700">静的な最適（熱い順に上位 C 個）</text><text x="600" y="140" fill="#3b7dbf" font-weight="700">物単位 LRU（Che）</text><text x="350" y="118" fill="#c9683a" font-weight="700">実測（Region ＋ 再挿入 / GC）</text></g>
+</svg></div>
+<p><b>分かったこと</b></p>
+<ul>
+<li><b>詰め直しそのものは効いている</b>：小物だけ n=1 にすると、追い出す Region に残る中身は 99〜100% が冷たい物になる（熱い物は全部救い出せている）。書き直しは +1〜2 GB で、書き込み全体の 1% 未満。</li>
+<li><b>それでもヒットはほとんど増えない</b>（27.7M → 28.0M）。根本原因は「いまの構成が既に上限の近くにいる」こと。実測（橙）は物単位 LRU（青）より 5〜7pt 上にあり（何度も当たる物を選んで残すので LFU に近い）、静的な最適（緑：熱い順に上位 C 個をずっと置く、どの方式もこれを超えない）まで残り約 3.5pt しかない。詰め直しで「熱い物のための容量」が増えても、増えた分に入るのは Zipf の裾の、あまり当たらない物だけ。</li>
+<li><b>小物の容量を絞ると</b>、ヒット率は緑と青の曲線に沿って下がる。GC で取り分を減らしても同じヒット率を保つことはできない（上限が同じ容量で決まっているため）。</li>
+<li>BMR が悪くなったのは、大物の再挿入（n=3）を外したため。小物の GC のせいではない。分類ごとに n を変えれば（小物 n=1、大物 n=3）、現行に対して OHR +0.5pt 程度・BMR はそのまま・書き込み +1% 未満と見込めるが、得るものは小さい。</li>
+</ul>
+<p><b>結論</b>：小物の GC は「安い」が「伸びしろが無い」。この負荷（Zipf 0.9、小物 420 万種類）では、小物のヒット率を大きく上げるには容量を増やすしかない。熱い物の集中度がもっと高い負荷（α が大きい、熱い物の入れ替わりが速い）では、LRU と最適の差が開き、GC の価値が上がる可能性がある。実トレース（E4）で、同じ図（実測と LRU・最適の差）を描いて確かめる。</p>
+
+<h2>3.3 分割閾値 τ の決め方：SplitThreshold は良いか、時間で揺れる分布にどう対処するか</h2>
+<p><b>いまの決め方</b>（<code>util/sst.h</code>）：受け入れた物の大きさを 1 オクターブ幅の桶で数え、「個数の中央値」「バイトの中央値」「一度も当たらなかったバイトの中央値」から τ を決める（既定は後 2 つの小さい方）。ヒストグラムは 10 万件ごとに 15/16 倍して古い分を減らし、候補が変わればすぐ τ を変える。<b>目的（OHR・BMR）は一度も見ていない。</b></p>
+<p><b>計測</b>：実トレース 2 本の全量で、τ を 1 オクターブずつ固定したもの（13 本）と SplitThreshold を比べた（Region LRU、下限なし、再挿入なし。Meta は SSD 240 GiB、w01 はフットプリントの 30%）。さらに区間ごとの出力から、窓ごとに最良の τ を出した（<code>tools/tau_window.py</code>）。</p>
+<table>
+<tr><th></th><th>Meta（nha）</th><th>w01</th></tr>
+<tr><td>分類なし：OHR / BMR</td><td class="n">0.379 / 0.0502</td><td class="n">0.276 / 0.690</td></tr>
+<tr><td>SplitThreshold の τ</td><td class="n">1 MiB（ずっと一定）</td><td class="n">2 K〜64 K と「分割なし」を 40 回以上行き来（Region の封じ直し 33 回）</td></tr>
+<tr><td>SplitThreshold：OHR / BMR</td><td class="n">0.447 / <b>0.0583</b>（BMR は分類なしより悪い）</td><td class="n">0.287 / 0.684</td></tr>
+<tr><td>固定 τ の最良（w=0.1）</td><td class="n"><b>32 KiB</b>：0.486 / 0.0527</td><td class="n"><b>256 KiB</b>：0.363 / 0.653</td></tr>
+<tr><td>目的 (1−BMR)+0.1·OHR の損：SplitThreshold − 最良</td><td class="n ng">−0.96pt</td><td class="n ng">−3.9pt</td></tr>
+<tr><td>窓ごとに後知恵で τ を選び直したときの得（最良の固定 τ に対して）</td><td class="n">+0.02pt（窓の最良はほぼ 32 KiB）</td><td class="n">+0.2〜0.3pt（13 窓中 7 窓で 256 K か 512 K）</td></tr>
+</table>
+<div class="card wrap">
+<svg viewBox="0 0 920 230" role="img" aria-label="SplitThreshold が外れる理由">
+<g font-size="13">
+<text x="10" y="22" font-size="15" font-weight="700">なぜ外れるか</text>
+<text x="10" y="48">① 分けて得をするのは「1 バイトあたりの当たりやすさ（λ/s）が変わる所」で、物の量の中央値とは関係しない。</text>
+<text x="28" y="68">バイトの中央値は大きい物の重みで上に引っ張られる（Meta：1 MiB、最良は 32 KiB）。</text>
+<text x="10" y="96">② 見ているのは「受け入れた物（＝ミスした物）」の分布。τ を変えるとミスの中身が変わり、それがまた τ を動かす（自分の出力に引きずられる）。</text>
+<text x="10" y="124">③ 山が複数あるサイズ分布では、山の間で量が少し移るだけで中央値が谷をまたいで大きく飛ぶ。</text>
+<text x="28" y="144">しかし目的 J(τ) は谷の付近では平らなので、最良の τ はほとんど動かない（w01：分布が揺れても最良は 256 K 前後）。</text>
+<text x="10" y="178" font-size="15" font-weight="700" fill="#3f9a64">→ 分布の形を追うのをやめ、目的で τ を選ぶ。長い窓で選び、得が切り替えの損を上回るときだけ変える。</text>
+<text x="10" y="204">揺れているのは推定であって、最良の τ ではない。窓ごとに追いかけても得は 0.3pt 以下で、切り替えのたびに Region の封じ直しと分類の入れ替わりの損が出る。</text>
+</g></svg></div>
+
+<h3>提案：縮小シミュレーションで τ を目的から選ぶ</h3>
+<p>物の ID のハッシュで 1/M の物だけを残した要求列（SHARDS と同じ空間サンプリング）で、容量・Region・chunk も 1/M にした小さなキャッシュを、τ の候補ごとに回す（Waldspurger らの miniature simulation）。目的 J の最大の候補を採る。サイズ分布の形に依存せず、目的そのもので選ぶので、①〜③が起きない。</p>
+<table>
+<tr><th>トレース</th><th>w</th><th>縮小（1/16）が選んだ τ</th><th>全量の最良</th><th>全量での損</th></tr>
+<tr><td rowspan="3">Meta</td><td>0.03</td><td>8 KiB</td><td>8 KiB</td><td class="n ok">0</td></tr>
+<tr><td>0.1</td><td>32 KiB</td><td>32 KiB</td><td class="n ok">0</td></tr>
+<tr><td>0.3</td><td>32 KiB</td><td>64 KiB</td><td class="n">−0.13pt</td></tr>
+<tr><td rowspan="3">w01</td><td>0.03</td><td>256 KiB</td><td>256 KiB</td><td class="n ok">0</td></tr>
+<tr><td>0.1</td><td>256 KiB</td><td>256 KiB</td><td class="n ok">0</td></tr>
+<tr><td>0.3</td><td>256 KiB</td><td>256 KiB</td><td class="n ok">0</td></tr>
+</table>
+<p>縮小版の OHR・BMR の絶対値は数 pt ずれる（Meta で OHR +7pt）が、τ の順位はほぼ保たれる。間引きの道具は <code>experiment_kit/src/og_sample.c</code>（<code>og_sample in.zst out.bin M</code>）。</p>
+<h3>実装：hint=mini と、その結果</h3>
+<p><code>hint/mini.c</code>：物の 1/M（既定 64）を、τ の候補（2<sup>10</sup>〜2<sup>24</sup> の各オクターブと「分割なし」）ごとの影の Region LRU（N 個 × R/M バイト、DRAM なし）に流し、500 万要求ごとに J を比べる。数えた量は窓ごとに 0.9 倍（約 5,000 万要求を覚える）、最初の判断は影が埋まる 2,000 万要求まで待つ、0.3pt 以上の差が 2 窓続いたら切り替える。影の Region に入らない大きな物は J から外す。</p>
+<table>
+<tr><th>w=0.1、全量</th><th>mini</th><th>固定 τ の最良</th><th>SplitThreshold</th><th>分類なし</th></tr>
+<tr><td>Meta</td><td class="n">0.9941（32 K → 8 K）</td><td class="n">0.9960（32 K）</td><td class="n">0.9864</td><td class="n">0.9877</td></tr>
+<tr><td>w01（M=64）</td><td class="n">0.3472</td><td class="n" rowspan="2">0.3833（256 K）</td><td class="n" rowspan="2">0.3446</td><td class="n" rowspan="2">0.3376</td></tr>
+<tr><td>w01（M=16）</td><td class="n">0.3415（8 K → 256 K → 512 K）</td></tr>
+</table>
+<ul>
+<li class="ok">Meta：SplitThreshold の損 −0.96pt を −0.19pt に縮めた。</li>
+<li class="ng">w01：影は最後には正しい τ（256〜512 K）を選ぶが、目的は SplitThreshold と同じ程度。</li>
+</ul>
+<p><b>w01 で負けた理由の切り分け</b>（各 1 本）</p>
+<table>
+<tr><th>実験</th><th>J</th><th>分かったこと</th></tr>
+<tr><td>候補を 256 K だけにした mini（最初から 256 K）</td><td class="n">0.3833</td><td>固定 256 K と完全一致。mini の実装は正しい</td></tr>
+<tr><td>候補を「分割なし」と 256 K にした mini（6,500 万要求で 256 K に移り、最後まで維持）</td><td class="n">0.3506</td><td><b>途中で切り替えると、同じ τ でも最初からの効果に届かない</b>。区間ごとに見ると、切り替え後も 1 億要求以上「分類なし」に近いまま</td></tr>
+<tr><td>同上 ＋ 切り替え前の Region を当たっても先頭に戻さない（早く抜く）</td><td class="n">0.3222</td><td>悪化。「混ざった古い Region が居座るのが原因」という仮説は否定（古い Region には価値のある中身がある）。この仕組みは取り除いた</td></tr>
+</table>
+<p>w01 は最初の約 4,800 万要求には分けて得をする大きさの物がほとんど無く（全ての τ で J が同じ）、影はその間「分割なし」と区別できない。その間の書き方が、なぜ 1 億要求以上も後まで効くのかはまだ分からない。<b>次の切り分け</b>：切り替えの時刻を 0・2,000 万・4,800 万・6,500 万要求と変えて、損が「切り替えの遅れ」に比例するかを見る（固定 τ を途中から使えるようにする 1 行の変更で測れる）。</p>
+<p><b>現時点の使い方の提案</b>：τ は実行の初めの短い期間（または前日のトレースの縮小シミュレーション）で決めて固定し、途中では大きく変えない。Meta・w01 とも「全体で最良の固定 τ」は窓ごとの最良にほぼ届く（損 0.02〜0.3pt）ので、固定で失うものは小さい。</p>
+
+<p><b>実行中に使う形（当初の設計）</b></p>
+<ul>
+<li><b>候補を絞る</b>：J(τ) は両トレースとも山が 1 つに近いので、全オクターブではなく「いまの τ の半分・同じ・倍」の 3 つの影だけを回す（費用は 3/M。M = 16〜64 で本体の 5〜20%）。最良が端なら、そちらへ 1 オクターブ移す。</li>
+<li><b>切り替えの規則</b>：影どうしの J の差を長い窓（数千万要求）で平均し、差が 0.3pt（w01 で窓ごとに追いかけて得られる量の上限）を 2 窓続けて超えたときだけ τ を変える。τ を変えるときは既存の物を書き直さない（<code>seal-on-repartition=inactive</code>）。</li>
+<li><b>2 つの時間の速さに分ける</b>：τ は遅く（上の規則）、容量の下限 ff は速く（§3.1 の山登り）。分布の速い揺れで生じる配分のずれは ff が吸収する。</li>
+<li><b>閾値が複数のとき</b>（多くて 3 個）：1 つずつ同じ 3 影の探索を順に回す（座標ごとの山登り）。分類を増やした得が、開いた Region が増える損を上回るかも、影の比較で決める。</li>
+</ul>
+<p class="sub">確かめていないこと：影を実行中に回す実装、M を 64 に下げたときの順位の保たれ方、w01 以外の分布が揺れるトレース、下限 ff・再挿入と組み合わせたときの最良の τ（今回は下限なし・再挿入なしで比べた）。</p>
+
+<h2>4. 実験の計画（少ない回数で結論を出す順）</h2>
+<p>1 回の <code>tune</code> は 1 トレースあたり 25 構成（<code>config.sh</code> の <code>TUNE_JOBS</code>）で、E1〜E3 を同じ実行で測る。合成は 2 負荷 × 25 構成が 32 コアで数分、MetaCDN nha の全量は 1 構成 約 70 秒 × 25 ÷ P=4 ≒ 8 分。</p>
+<table>
+<tr><th>実験</th><th>問い</th><th>構成（id）</th><th>判定</th><th>図</th></tr>
+<tr><td><b>E0</b> 合成で確認</td><td>答え（固定の格子の最良）が分かっている負荷で、自動が届くか</td><td><code>./run.sh tune-synth</code>（95:5、3:1）</td><td>E1〜E3 の判定を合成で先に通す</td><td>全部</td></tr>
+<tr><td><b>E1</b> 容量の配分</td><td>山登り hc は固定の下限の最良に届くか（mv は比較用）</td><td>st_lru, st_ff50〜95, st_hc0.03〜1, st_mv0.03〜1</td><td>目的 BHR+w·OHR の差が −0.5pt 以内</td><td>交換曲線、自動と最良の差</td></tr>
+<tr><td><b>E1a</b> mv の原因の切り分け</td><td>なぜ曲線の内側か</td><td><b>済</b>（§3.1）</td><td>H1 道連れ。H3 山登りで解決</td><td>—</td></tr>
+<tr><td><b>E2</b> 再挿入の閾値</td><td>n=auto は固定 n の最良に届くか、書き込みは減るか</td><td>st_ff90_h1, _h3, _auto、st_mv0.3_h1, _auto、none_auto</td><td>BMR は n=1 から +0.5pt 以内、書き込みは n=1 より少ない</td><td>書き込みの内訳、n=auto の学習</td></tr>
+<tr><td><b>E3</b> 分類の数</td><td>閾値 2〜3 個にする価値はあるか</td><td>st_lru_auto, k3_lru_auto, k4_lru_auto（mv 版も）</td><td>K を増やした改善が、開いた Region の損を上回るか</td><td>分類の数の比較</td></tr>
+<tr><td><b>E4</b> MetaCDN で検算</td><td>合成で見た傾向が実トレースでも出るか</td><td><code>traces.tsv</code> に meta_nha（size=2<sup>32</sup>−1 は drop）を書き <code>./run.sh tune meta_nha</code></td><td>目標の達成（3 つとも基準より良い）</td><td>目標の達成</td></tr>
+<tr><td><b>E5</b> 他の出典</td><td>CDN 以外（KV・Block）でも成り立つか</td><td><code>./run.sh tune</code>（traces.tsv の全部）</td><td>出典ごとの目標の達成</td><td>目標の達成</td></tr>
+</table>
+
+<h3>E1a：mv が固定の下限に負ける理由の仮説と、確かめ方</h3>
+<table>
+<tr><th>仮説</th><th>内容</th><th>確かめ方（追加の実行は 2〜3 本）</th></tr>
+<tr><td>H1 道連れ</td><td>小物の Region は 4,096 個の物を持ち、1 つの熱い物へのヒットで Region ごと生き延びる。末尾へのヒットは「その Region の残りの物の将来の価値」を表さないので、限界値の推定として過大・過小になる</td><td>分類ごとに、追い出した Region の「一度も当たらなかった物の割合」（dead_evict_bytes）を mv と ff で比べる</td></tr>
+<tr><td>H2 比べる量の違い</td><td>KKT が等しくすべきは「容量 1 バイトを足したときの将来のヒット」。過去の末尾ヒットは、LRU が Region 単位で並べ替わるため、その推定として偏る</td><td>ゴースト（追い出した Region の物の ID だけを覚え、その後のヒットを数える）で限界値を直接測る版と比べる</td></tr>
+<tr><td>H3 方式そのもの</td><td>末尾の比較で選ぶ（どちらかから 1 つ追い出す）規則は、取り分が揺れ続け、平均では最適でも時間平均の性能が落ちる</td><td>代わりに、固定の下限 ff を実行中に山登りで動かす（測った目的が上がる向きへ ff を ± 0.02）。凹なので最適に収束するはず</td></tr>
+</table>
+<p class="sub">（否定済み）H0 推定の揺れ：末尾 8 Region・半減期 4N でも結果は同じ。</p>
+
+<h2>5. 図（<code>work/tune/figs/</code>）と、それで言えること</h2>
+<table>
+<tr><th>図</th><th>言えること</th></tr>
+<tr><td>OHR–BMR の交換曲線（トレースごと）</td><td>自動の配分（橙）が、固定の下限（青）より左上にあるか。基準（灰）より左上の点があるか</td></tr>
+<tr><td>SSD 書き込みの内訳（トレースごと）</td><td>同じ BMR で再挿入（アプリ層の GC）がどれだけ減ったか。受け入れは BMR に比例</td></tr>
+<tr><td>n=auto が学んだこと（トレースごと）</td><td>分類ごとの「h 回当たった物は次も当たるか」と、選ばれた n。大物ほど高い n が要ることが見える</td></tr>
+<tr><td>目標の達成（全トレース）</td><td>基準に対する OHR↑・BMR↓・書き込み↓ を色で。3 つとも青なら目標を満たす</td></tr>
+<tr><td>自動と固定の最良の差（全トレース）</td><td>実行中に決めた配分が、結果を見てから選んだ最良にどれだけ届くか</td></tr>
+<tr><td>分類の数の比較（全トレース）</td><td>閾値 1〜3 個で OHR・BMR・書き込みがどう変わるか。実際に使われた分類の数</td></tr>
+</table>
+<p>見本（400 万要求の試運転。配線の確認用で、数値は結論に使えない）：<code>docs/kit_tune_figs_sample/index.html</code>。</p>
+
+<h2>6. 実装したもの</h2>
+<table>
+<tr><th>場所</th><th>内容</th></tr>
+<tr><td><code>evict/region_basic.c</code></td><td><b>容量の配分の自動化（本命）</b>。<code>region-evict=lru,region-params=auto=1/w=…/win=N/step=0.02</code>（ff を省くと受け入れバイトの割合から出発）。P.json の region_policy に ff の終わりの値と時間平均</td></tr>
+<tr><td><code>evict/region_mv.c</code>（新規）</td><td>末尾のヒット密度で配分する比較用。<code>region-evict=mv,region-params=w=…/tail=2/half=N/min=1</code>。P.json の region_policy に時間平均の取り分</td></tr>
+<tr><td><code>ssd/rf_ssd.c</code>, <code>ssd/rf_region.c</code>, <code>core/rf_params.c</code>, <code>core/rf_report.c</code>, <code>cacheObj.h</code>（1 バイト追加）</td><td>再挿入の閾値の自動化 <code>reinsert=hits:n=auto/target=0.5/eps=0.02</code>。結果は <code>P.reauto.json</code></td></tr>
+<tr><td><code>evict/region_policy.h</code></td><td>追い出し方式から要求数・要求バイト・SSD ヒット数・ヒットバイトを見られるようにした</td></tr>
+<tr><td><code>experiment_kit/</code></td><td><code>run.sh tune | tune-synth | tune-figs</code>、<code>config.sh</code> の <code>TUNE_JOBS</code>、<code>py/tune_one.py</code>（要約）、<code>py/tune_figs.py</code>（図）、<code>regionflash.patch</code> を作り直し（91 ファイル。きれいな土台に当てて一致を確認）</td></tr>
+</table>
+
+<h2>7. 制約と、まだ測っていないこと</h2>
+<ul>
+<li>書き込みは<b>アプリ層</b>（RegionFlash が SSD に書いたバイト）。SSD 内部の GC（デバイスの WAF）は、FDP の設定（<code>fdp-op</code> など）を足した構成で別に測る必要がある。</li>
+<li>開いた Region の損は、今は詰め物（pad）と分類の数でしか見ていない。書き込み中の Region の平均の開いている時間・空きを直接数える指標はまだ無い。</li>
+<li>提案構成（すべて自動）は「SplitThreshold の分類 ＋ 下限の山登り hc ＋ n=auto」（<code>st_hc0.1_auto</code>）。下限は分類 1 つ（大物）だけに掛かるので、分類 3〜4 では山登りは 1 つの値しか動かさない。</li>
+<li>山登りは w=1（OHR 重視）で遅い（−2.2pt）。窓の長さ・刻み・出発点は 1 負荷でしか調べていない。</li>
+<li>試運転は合成 95:5 の 1 負荷だけ。実トレース・全長での所要時間と結果は未確認。</li>
+</ul>
+</main></body></html>

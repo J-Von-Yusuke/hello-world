@@ -25,9 +25,10 @@ COLS = [("name", "トレース"), ("category", "種類"), ("source", "出典"),
         ("alpha_all", "α（全体）"), ("alpha_cls", "α（分類ごと）"), ("req_share_small", "小物の要求の割合"),
         ("ceiling_sim", "上限：物 LRU のミス率（実測）"), ("ceiling_model", "同（Che）"), ("model_lru_err", "Che − 実測の OHR"),
         ("pred_gain_ohr", "予測：静的分割の OHR 利得"), ("pred_gain_bhr", "予測：BHR 最適分割の BHR 利得"), ("pred_gain_j", "予測：J 最適の J 利得"),
-        ("opt_small_share_ohr", "最適な小物の取り分（OHR）"), ("opt_small_share_j", "同（J）"), ("lru_small_share", "共有 LRU の小物の取り分"),
+        ("opt_small_share_ohr", "最適な小物の取り分（OHR）"), ("opt_small_share_bhr", "同（BHR）"), ("opt_small_share_j", "同（J）"), ("lru_small_share", "共有 LRU の小物の取り分"),
         ("nat_small_share", "Region LRU 分類の小物の取り分（実測、後半平均）"),
         ("meas_gain_ohr", "実測：分類 − 混在の OHR"), ("meas_gain_bmr", "実測：分類 − 混在の BMR"),
+        ("meas_gain_ohr_w0", "実測：分類＋下限（BHR 基準、st_hc0）− 混在の OHR"), ("meas_gain_bmr_w0", "同 BMR"),
         ("pinned_first10", "先頭 10% に封じて残った Region の割合"), ("st_taus", "split_threshold の τ（終了時）"),
         ("st_tau_changes", "τ が変わった回数"), ("model_taus", "予測に使った τ")]
 

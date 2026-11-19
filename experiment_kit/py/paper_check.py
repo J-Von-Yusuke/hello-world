@@ -87,11 +87,12 @@ for n in traces:
         print(line + f"{n_auto(d):7s} {ff}")
     if "--robust" in sys.argv:   # 条件ごとに 提案（ru_auto）と 基準（r256_base）・CacheLib n=3 の差
         print(f"  頑健性: {'条件':22s} {'ΔBMR(提案−基準)':>15s} {'書込比(提案/基準)':>17s} {'ΔBMR(提案−n3)':>14s} {'書込比(提案/n3)':>15s}")
-        for suf, lab in (("", "既定"), ("_c0", "chunk=0（R 違いは不公平）"), ("_c0m", "chunk=0・受入上限 256MiB"), ("_f1", "再挿入の上限なし"), ("_s2", "乱数の種 2"), ("_s3", "乱数の種 3")):
-            P_, B_, N_ = load(n, "ru_auto" + suf), load(n, "r256_base" + suf), load(n, "r256_n3" + suf)
+        for prop in ("ru_auto", "ru_auto_w0"):   # 提案 2 通り（w0 = 目的 BHR だけ）
+          for suf, lab in (("", "既定"), ("_c0", "chunk=0（R 違いは不公平）"), ("_c0m", "chunk=0・受入上限 256MiB"), ("_f1", "再挿入の上限なし"), ("_s2", "乱数の種 2"), ("_s3", "乱数の種 3")):
+            P_, B_, N_ = load(n, prop + suf), load(n, "r256_base" + suf), load(n, "r256_n3" + suf)
             if not (P_ and B_): continue
             pt, bt = P_["total"], B_["total"]
-            row = f"  {'':6s} {lab:22s} {100 * (pt['bmr'] - bt['bmr']):+15.3f} {pt['flash_region_write_bytes'] / bt['flash_region_write_bytes']:17.3f}"
+            row = f"  {prop[3:]:6s} {lab:22s} {100 * (pt['bmr'] - bt['bmr']):+15.3f} {pt['flash_region_write_bytes'] / bt['flash_region_write_bytes']:17.3f}"
             if N_:
                 nt = N_["total"]; row += f" {100 * (pt['bmr'] - nt['bmr']):+14.3f} {pt['flash_region_write_bytes'] / nt['flash_region_write_bytes']:15.3f}"
             print(row)

@@ -23,6 +23,10 @@ def hcol(h):
     return HINT_COL.setdefault(h, PAL[(len(HINT_COL) + 3) % len(PAL)])
 
 
+def dash_attr(pat):  # ' stroke-dasharray="…"'（f-string の式の中に \" を書くと Python 3.11 以前で構文エラーになるので関数に）
+    return f' stroke-dasharray="{pat}"'
+
+
 def tw(s, fs):  # 文字列の幅の目安（全角 1 em、半角 0.58 em）
     return sum(fs if ord(c) > 0x2E7F else fs * 0.58 for c in str(s))
 
@@ -69,7 +73,7 @@ class Fig:
             if x + w > s.W - 30: x, y = 40, y + 38
             if kind == "box": L.append(f'<rect x="{x}" y="{y-18}" width="30" height="22" fill="{col}"/>')
             elif kind in ("dot", "hollow"): L.append(f'<circle cx="{x+15}" cy="{y-7}" r="10" fill="{col if kind == "dot" else "#fff"}" stroke="{col}" stroke-width="3"/>')
-            else: L.append(f'<line x1="{x}" x2="{x+34}" y1="{y-7}" y2="{y-7}" stroke="{col}" stroke-width="5"{" stroke-dasharray=\"9 6\"" if kind == "dash" else ""}/>')
+            else: L.append(f'<line x1="{x}" x2="{x+34}" y1="{y-7}" y2="{y-7}" stroke="{col}" stroke-width="5"{dash_attr("9 6") if kind == "dash" else ""}/>')
             L.append(f'<text x="{x+44}" y="{y}" font-size="{fs}" fill="{INK}">{esc(name)}</text>'); x += w
         return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {s.W} {s.H}" width="{s.W}" height="{s.H}" font-family="{FONT}">'
                 f'<rect width="{s.W}" height="{s.H}" fill="#ffffff"/>' + "".join(L) + "".join(s.e) + "</svg>")
@@ -137,7 +141,7 @@ class Ax:
         pts = [(s.X(x), s.Y(y)) for x, y in zip(xs, ys) if x is not None and y is not None]
         if len(pts) > 1:
             s.f.e.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in pts)}" fill="none" stroke="{col}" stroke-width="{w}" '
-                         f'stroke-linejoin="round" opacity="{op}"{" stroke-dasharray=\"12 8\"" if dash else ""}/>')
+                         f'stroke-linejoin="round" opacity="{op}"{dash_attr("12 8") if dash else ""}/>')
         if marker:
             for a, b in pts:
                 s.f.e.append(f'<circle cx="{a:.1f}" cy="{b:.1f}" r="8" fill="{"#fff" if hollow else col}" stroke="{col}" stroke-width="3"/>')
@@ -155,7 +159,7 @@ class Ax:
 
     def hline(s, y, col="#c0504a", label=None, dash=True):
         Y = s.Y(y)
-        s.f.e.append(f'<line x1="{s.x0}" x2="{s.x1}" y1="{Y:.1f}" y2="{Y:.1f}" stroke="{col}" stroke-width="3"{" stroke-dasharray=\"10 7\"" if dash else ""}/>')
+        s.f.e.append(f'<line x1="{s.x0}" x2="{s.x1}" y1="{Y:.1f}" y2="{Y:.1f}" stroke="{col}" stroke-width="3"{dash_attr("10 7") if dash else ""}/>')
         if label: s.f.t(s.x1 - 8, Y - 10, label, 22, "end", col, "bold")
 
     def bars(s, groups, labels=True, d=2, sign=True):
@@ -396,7 +400,7 @@ def build(R, rows, work, by_groups, spearman):
                 g = [("0.1", "#8fb3d9", [None if cv[k]["0.1"]["frac"] is None else 100 * cv[k]["0.1"]["frac"] for k in ks], None),
                      ("0.02", "#2f5f8f", [None if cv[k]["0.02"]["frac"] is None else 100 * cv[k]["0.02"]["frac"] for k in ks], None)]
                 a = Ax(f, (170, f.legend_h() + 30, 1560, 720), cats=ks, yr=(0, 105), ylabel="必要な先頭の要求の割合 [%]", rot=-35)
-                a.bars(g, labels=len(ks) <= 14, d=0, sign=False)
+                a.bars(g, d=0, sign=False)   # 幅が足りなければ bars が縦書き・省略を決める
                 m01 = [100 * cv[k]["0.1"]["frac"] for k in ks if cv[k]["0.1"]["frac"] is not None]
                 add(f"conv_{r['name']}", f"{r['name']}: BMR の低下が全量の値に収まるまでに要る要求の割合", f,
                     f"±0.1 pt に収まるには先頭 {min(m01):.0f}〜{max(m01):.0f}% の要求が要る（構成による）。" if m01 else "",
@@ -446,7 +450,7 @@ def build(R, rows, work, by_groups, spearman):
             g = [(x, PAL[i], [v[x]["effect"][k] for k in ks], None) for i, x in enumerate(vn)]
             f = Fig(); f.add_legend([(x, PAL[i], "box") for i, x in enumerate(vn)])
             a = Ax(f, (170, f.legend_h() + 30, 1560, 720), cats=ks, yr=span([y for _, _, ys, _ in g for y in ys], 0.15), ylabel="BMR の低下 [pt]（分類なし − 分類あり、全量）", rot=-35)
-            a.bars(g, labels=len(ks) * len(vn) <= 30, d=3)
+            a.bars(g, d=3)
             dmax = max(abs(v[vn[0]]["effect"][k] - v[x]["effect"][k]) for k in ks for x in vn[1:])
             same = all((v[vn[0]]["effect"][k] > 0) == (v[x]["effect"][k] > 0) for k in ks for x in vn[1:])
             add(f"variants_{r['name']}", f"{r['name']}: size = 2^32−1 の扱いで結論は変わるか", f,
@@ -501,8 +505,11 @@ def build(R, rows, work, by_groups, spearman):
 
 # ---------------------------------------------------------------- 合成トレース
 POL_NAME = {"lru": "物単位 LRU", "part[1]": "静的分割（サイズ）", "rfifo[0]": "Region FIFO", "rfifo[1]": "Region FIFO＋サイズ分類",
-            "rlru[0]": "Region LRU", "rlru[1]": "Region LRU＋サイズ分類", "rlru[2]": "Region LRU＋グループ分類"}
-POL_COL = {"lru": "#222222", "part[1]": "#8a5fb5", "rfifo[0]": "#b8a02a", "rfifo[1]": "#2aa0a8", "rlru[0]": "#7d7d7d", "rlru[1]": "#3f9a64", "rlru[2]": "#c9683a"}
+            "rlru[0]": "Region LRU", "rlru[1]": "Region LRU＋サイズ分類", "rlru[2]": "Region LRU＋グループ分類",
+            "rpartO[1]": "Region LRU 静的分割（OHR 最適）", "rpartB[1]": "Region LRU 静的分割（BMR 最適）",
+            "rfloorB[1]": "Region LRU＋分類＋下限（BMR 最適）", "rautoB[1]": "Region LRU＋分類＋山登り（BMR）"}
+POL_COL = {"lru": "#222222", "part[1]": "#8a5fb5", "rfifo[0]": "#b8a02a", "rfifo[1]": "#2aa0a8", "rlru[0]": "#7d7d7d", "rlru[1]": "#3f9a64", "rlru[2]": "#c9683a",
+           "rpartO[1]": "#9fd0b0", "rpartB[1]": "#1f4e8c", "rfloorB[1]": "#5b8fd0", "rautoB[1]": "#c0397b"}
 
 
 def synth_figs(work, add):
@@ -517,7 +524,7 @@ def synth_figs(work, add):
             for fk, s in j["sim"].items():
                 m = j["model"].get(fk, {})
                 for nm, (so, sb) in s.items():
-                    mk = "rfifo" if nm.startswith("rfifo") else nm
+                    mk = "rfifo" if nm.startswith("rfifo") else "rpartB[1]" if nm == "rfloorB[1]" else nm
                     if mk in m: pts.setdefault(nm, []).append((float(m[mk]["ohr"]), so, float(m[mk]["bhr"]), sb))
         f.add_legend([(POL_NAME.get(n, n), POL_COL.get(n, MUT), "dot") for n in pts])
         err = {}
@@ -545,7 +552,7 @@ def synth_figs(work, add):
                 for n in nms:
                     xs = [float(k) for k in fks if n in j["sim"][k]]
                     a.line(xs, [j["sim"][k][n][ii] for k in fks if n in j["sim"][k]], POL_COL[n], 4, marker=True)
-                    mk = "rfifo" if n.startswith("rfifo") else n
+                    mk = "rfifo" if n.startswith("rfifo") else "rpartB[1]" if n == "rfloorB[1]" else n
                     mv = [(float(k), float(j["model"][k][mk]["ohr" if ii == 0 else "bhr"])) for k in fks if mk in j["model"].get(k, {})]
                     if mv: a.line([x for x, _ in mv], [y for _, y in mv], POL_COL[n], 3, dash=True, op=0.8)
             k0 = fks[-1]; s = j["sim"][k0]

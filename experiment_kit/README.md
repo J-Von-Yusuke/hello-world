@@ -41,6 +41,8 @@ rm -rf work/out work/results   # 試運転の結果を消す
 ```
 
 一部だけ: `./run.sh validity meta_nha wiki_cdn`。全部まとめて: `./run.sh all`。
+コマンドの一覧は `./run.sh`（引数なし）で出る。「準備」（setup・check・methods）、「実験」（validity・synth・tune・che・paper など）、「図と表だけ作り直す」（aggregate・*-figs・che-report）の 3 群。
+RegionFlash の指定（`hint=`・`region-params=` など）の意味は [`params.html`](params.html)。
 clone 済みの libCacheSim を使うには、`config.sh` の `LCS_SRC` にそのパスを書きます。clone は省かれます。
 
 - **未パッチの clone**: `setup` がそこへ `regionflash.patch` を当てます。当たるかを `git apply --check` で先に確かめ、当たらなければ何も変えずに止まります。
@@ -94,6 +96,29 @@ git -C <clone> worktree add ../lcs-rf 93529a1   # 元の作業を残したまま
 | `MEM_FRAC` | `0.8` | `auto` で使ってよい空きメモリ（`MemAvailable`）の割合 |
 | `NREQ` | 空 | 数字を入れると各 run を先頭 NREQ 要求で打ち切る（試運転） |
 | `SYNTH_N` / `SYNTH_SCALED` | 2000 万 / `0` | 合成トレースの長さ / 縮小 SSD 想定の重い負荷（2 億要求 × 多数、数時間）を走らせるか |
+| `PAPER_METHODS` / `PAPER_EXT_METHODS` / `PAPER_ROBUST_METHODS` | 下の §4.2 | paper / paper-ext / paper-robust で回す方式（`PAPER_CATALOG` の id を並べる） |
+
+### 4.2 論文用の比較で回す方式を選ぶ（`PAPER_CATALOG` と `PAPER_METHODS`）
+
+方式はすべて `config.sh` の `PAPER_CATALOG` に 1 行ずつ置いてあり、回すものを id で選ぶ。並べた順が図と表の順になる。
+
+```bash
+./run.sh methods                                   # カタログの全部と、paper / ext / robust でどれが選ばれているか
+PAPER_METHODS="r256_base ru_auto ru_adm_auto" ./run.sh paper   # その場で選ぶ（config.sh を書き換えてもよい）
+```
+
+自分の方式を足すには、`config.sh` の末尾などに 1 行足して、その id を `PAPER_METHODS` に並べる。3 つ目の欄は図と表に出す名前（省くと id がそのまま出る）。
+
+```bash
+PAPER_CATALOG+=("ru_fifo|hint=none,region-evict=fifo,reinsert=hits:n=1|R=RU＋Region FIFO")
+PAPER_METHODS="$PAPER_METHODS ru_fifo"
+```
+
+- 指定の書き方は validity・tune と同じ（`params.html`）。SSD・DRAM・chunk はトレースごとに validity と同じ値が入り、`region-size` を書かなければ R = RU（`REGION_BYTES`）。
+- 基準 `r256_base` は差の基準なので、`PAPER_METHODS` に無くても必ず回す。`all` と書くとカタログの全部（頑健性用の `_c0` などで終わる id は除く）。
+- 既に結果（`P.json`）がある方式は回さない。選択から外した方式は、結果が残っていても図と表には出ない。
+- 実際に回した id・名前・指定は `work/paper/methods.tsv`（ext・robust はそれぞれのフォルダ）に残る。
+- カタログに無い id を選ぶと、何も回さずに止まる。
 
 ### 4.1 メモリと同時実行数（`P=auto`）
 
@@ -177,7 +202,7 @@ P    = floor( MemAvailable × MEM_FRAC ÷ 1 本 )   を 1〜NCPU（既定 = CPU 
 | `work/results/by_category.csv` ほか | グループごとの統計（長い形式: group, metric, n, mean, median, min, max, n_positive, n_negative, traces） |
 | `work/results/<name>.<変種>.json` | 1 本の詳細（先頭 N の曲線を含む） |
 | `work/results/synth_summary.csv` | 合成負荷の理論と実測（OHR/BHR） |
-| `work/synth/<負荷>.json` | 1 負荷の理論（`model`）と実測（`sim`）。11-17 から Region LRU の静的分割も入る：`rpartO[1]` / `rpartB[1]`（クラスごとの部分トレースを RegionFlash で、容量はモデルの OHR 最適 / BMR 最適な配分）、`rfloorB[1]`（同じ BMR 最適な配分を全体のトレースで下限として与える）、`rautoB[1]`（下限の山登り、目的 BMR だけ）。モデルが 1 容量あたり Region LRU を 40 回ほど解くので、1 負荷 × 4 容量で 20〜30 分かかる。前の版の `<負荷>.json` があると飛ばすので、消してから `./run.sh synth` |
+| `work/synth/<負荷>.json` | 1 負荷の理論（`model`）と実測（`sim`）。11-17 から Region LRU の静的分割も入る：`rpartO[1]` / `rpartB[1]`（クラスごとの部分トレースを RegionFlash で、容量はモデルの OHR 最適 / BMR 最適な配分）、`rfloorB[1]`（同じ BMR 最適な配分を全体のトレースで下限として与える）、`rautoB[1]`（下限の山登り、目的 BMR だけ）。モデルが 1 容量あたり Region LRU を 40 回ほど解くので、1 負荷 × 4 容量で 20〜30 分かかる。前の版の `<負荷>.json` があると飛ばすので、消してから `./run.sh synth`。**DRAM あり**：`synth_workloads.txt` の行に `--dram <DRAM ÷ SSD>` を付ける（見本 `w1d`。CacheLib と同じ cachelib 方式、モデルは `synth_model -D`、`../docs/Che-sim/region_model_appendix.html` §P）。DRAM ありの行では物単位 LRU と部分トレースの静的分割は回さない |
 | `work/out/<name>/<変種>/<id>/` | cachesim の生の出力（`P.json` `P.interval.csv` `P.class.csv` `P.sizebin.csv`） |
 | `work/results/figs/` | **スライド用の図と説明**（§6.1） |
 
@@ -307,7 +332,7 @@ CHE_SIM=0 ./run.sh che       # RegionFlash を回さず、Che の予測だけ（
 
 ## 6.3 論文用の比較（paper）：Region を CacheLib の上限と RU で比べる
 
-FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限（256 MiB）より大きい。Region を RU に合わせると DLWA = 1 になるが、Region が大きいぶん道連れと書き直し（アプリ層の GC）が増える。書き込み時のサイズ分類がその増加を抑えるかを、6 構成（`config.sh` の `PAPER_JOBS`）で測る。DLWA は実機と CacheLib で測るので、ここでは測らない。
+FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限（256 MiB）より大きい。Region を RU に合わせると DLWA = 1 になるが、Region が大きいぶん道連れと書き直し（アプリ層の GC）が増える。書き込み時の分類がその増加を抑えるかを、`config.sh` の `PAPER_METHODS` で選んだ構成（既定は下の表。選び方は §4.2）で測る。DLWA は実機と CacheLib で測るので、ここでは測らない。
 
 | id | Region | 方式 |
 |---|---|---|
@@ -318,11 +343,45 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 | `ru_none_auto` / `r256_none_auto`（切り分け） | RU / 256 MiB | 分類なしで再挿入の閾値の自動化（n=auto）だけ。`*_auto` との差が「分類＋下限」の効果、`*_base` との差が n=auto の効果 |
 | `ru_auto_w0` / `r256_auto_w0`（11-17 追加） | RU / 256 MiB | `*_auto` と同じで、下限の山登りの目的を BMR だけにする（`w=0`。`*_auto` は BHR + 0.1·OHR）。Region 単位の静的分割のモデルでは BMR 最適な配分が大物に寄り、サイズ分類が混在より BMR で勝つ（`../docs/Che-sim/region_model_appendix.html` §O）。実トレースでも差が出るかを見る |
 
-**11-17 に足した 2 構成だけ回す**：`./run.sh paper` は `P.json` のある構成を飛ばすので、そのまま実行すれば `*_auto_w0` だけが走り、図と表は全構成で作り直される。
+| `ru_auto_ii`（11-18 追加） | RU | `ru_auto` の再挿入を `mode=ii` に：書き直した物を、元の分類ではなく書き直し専用の分類（専用の書き込み口・専用の Region）に集める。CacheLib の priority（書き直した物を priority の高い Region に書く）と同じ形。R = RU なので専用の Region = 専用の RU で、FDP の PID を分けるのと同じ |
+| `ru_dram_auto` / `ru_dram1_auto`（11-18 追加） | RU | 分類の鍵をサイズから **DRAM でのヒット数**に変えて 2 分割（`hint=key:key=dram`）。`dram` は動的（DRAM ヒット数 + 1 の log2 の桶で、書いたバイトが半々になる境界を 10 万受け入れごとに決め直す。古い分は 15/16 ずつ減らす）、`dram1` は固定（DRAM で 0 回 / 1 回以上、`thr=1`）。下限の山登りは分類 1（DRAM でよく当たった側）に掛かる。他は `ru_auto` と同じ |
+| `ru_st_nauto` / `ru_st_n0`（11-18 追加） | RU | **OHR 寄り**：サイズ分類（SplitThreshold）だけで、容量の配分は決めない（下限なし）。1 本の Region LRU に任せた自然な配分は「1 バイトあたりの touch（≈ λ/s）」で決まり、OHR 最適の側に寄る（`../docs/Che-sim/region_model_appendix.html` §E.8・§O）。再挿入の閾値あり（n=auto）となし |
+
+| `ru_gate`（11-18 追加、**既定では回さない**。`PAPER_METHODS` に `ru_gate` を足す。`PAPER_GATE=1` でも足せる） | RU | `ru_auto` の下限の山登りに **gate** を付けた（`region-params=auto=1/w=0.1/gate=1`）。下限なし（= `ru_st_nauto`）で始め、ときどき 1 窓だけ「大の自然な取り分」と「大が受け入れたバイトの割合（山登りの出発点）」の中間まで下限を上げて試す。前後の下限なしの窓より J が測定のゆれ（窓どうしの J の差から見積もる）の 2 倍以上上がる試しが 2 回続いたら、`ru_auto` と同じ山登りへ移る。上がらなければ下限なしのまま、試しの間隔を倍にしていく。山登りの下限が 8 窓続けて何も変えなければ（自然な取り分より下に下がった）下限なしに戻る。自然な配分の点で「大に容量を足すと J が上がるか」を測る KKT の判定（`../docs/Che-sim/ru_auto_guide.html` §6）。判断の経過は `P.json` の `region_policy.gate`（試しの ΔJ と閾値、窓ごとの状態の列 s/p/a/c）。**合成負荷 3 種（W1・大が一度きり・その中間、各 2,000 万要求と先頭 400 万要求）では、`ru_auto` より J が良かったのは 6 つのうち 1 つ（大が一度きり・長い実行で +0.03pt）だけ**だった。`ru_auto` の山登りは、下限の要らない負荷では自分で下限を下げて ST と同じになるので、gate が ST で様子を見る分だけ損をする（W1 で −0.4〜−1.8pt）。下限が強く害になり、しかも窓が少なくて山登りが下がり切れない実トレースがあるかを見るためのもの |
+
+| `ru_adm_none_auto` / `ru_adm_auto`（11-18 追加） | RU | **受け入れ × 置き場所の 2×2**。受け入れの篩 = S3-FIFO を flash の篩に使う規則：DRAM（ghost を含む）で 2 回以上リクエストされた物だけ SSD に書く（`admit=dram:min=1/ghost=0.9`：DRAM で当たった物と、篩で断られた後、SSD 容量 × 0.9 分の名簿に名前が残っている間にまた来た物。11-19 から。初版の ghost なしは Flashield に近い厳しい篩で、nha では OHR −5.7pt と S3-FIFO より不利に出た）。`ru_none_auto`（篩なし・置き場所なし）・`ru_auto`（篩なし・サイズで置く）と組み合わせ、置き場所の得が篩を入れた後も残るか（直交性）を `table_orth.md / .csv` に出す（置き場所の ΔBMR を篩なし・ありで並べ、その差 = 相互作用）。nha では置き場所の得が篩なし −0.14pt、篩あり −0.10pt で 7 割残った（ghost なしの篩では −0.06pt） |
+| `r256_adm`（11-18 追加） | 256 MiB | CacheLib（`r256_base`）に同じ篩だけ足したもの。先行研究の手法をそのまま CacheLib に入れた場合。nha では n=1 比 OHR −2.9pt・BMR +0.02pt・書き込み 0.61 倍（ghost なしは −5.7pt・+0.09pt・0.54 倍） |
+
+**受け入れの篩についての注意（11-18、合成負荷）**：W1 の形（2,000 万要求、DRAM = SSD/30）では、篩だけで SSD 書き込みが 0.4% に減り、BMR も 39.7% → 34.0% と大きく良くなった（篩なしでは SSD から追い出したバイトの 88% が一度も当たっていなかった）。篩の後は SSD がほとんど入れ替わらず（Region の追い出し 16 万回 → 740 回）、置き場所（サイズ分類・DRAM ヒット数の分類）は何も変えなかった（サイズ分類は、篩を通った物のサイズの幅が狭く、分けなかった）。つまり**直交するかどうかは「篩を通った後も SSD があふれるか」で決まる**。足跡が SSD よりずっと大きい実トレースや、DRAM が大きい構成（DRAM の滞在中に 1 回当たる物が増え、篩を通る量が増える）では篩の後もあふれる見込みがあるが、確かめていない。2×2 の表はこれを実トレースで見るためのもの。
+**人気が移り変わる合成負荷（11-19、`tools/synth/drift_adm.sh`）**：同じ W1 の形で、period 要求ごとに新しい物が 1 位に生まれ他が 1 つずつ下がる（一巡 τ = 2,000 万 / 500 万要求）。篩の後も SSD は入れ替わり続けた（追い出し 5,000〜16,000 回）。CacheLib 相当（BMR 41.1 / 41.7%）に対し、篩だけで −2.1 / −3.4pt（書き込み 2.4% / 7.2%）、篩＋置き場所の良い方で −4.0 / −4.7pt（書き込みは篩だけと同じ）。置き場所の得は篩の上でも残ったが、篩と同じ手がかり（DRAM ヒット）で置くと大半が重なり（篩なし −5.8 / −5.4pt → 篩あり −1.8 / −0.4pt）、サイズで置くと τ によって向きが変わった（篩あり +1.0 / −1.0pt）。
+
+**11-17・11-18 に足した構成だけ回す**：`./run.sh paper` は `P.json` のある構成を飛ばすので、そのまま実行すれば足りない構成だけが走り、図と表は全構成で作り直される。
+
+**11-18 の修正（`mode=ii` と `n=auto` の組み合わせ）**：n=auto は「書き直した物が次の滞在でまた当たったか」を分類ごとに数えて閾値を決める。`mode=ii` では書き直した物が専用の分類へ移るため、その結果が専用の分類にだけ数えられ、元の分類（小・大）は何も学ばずに n=1（何も知らないときの既定）のままだった。書き直しを決めた分類に数えるように直した（`ssd/rf_region.c`、物ごとの情報に 1 バイト `re_c` を追加。物の情報の大きさは変わらない）。`mode=ii` も `class=reclassify` も使わない構成（既存の paper・tune の全構成）は結果がビット単位で変わらない（確認済み）。小さな合成負荷（W1 の形、300 万要求）で、直す前の `ru_auto_ii` は書き直しが pi の 3.6 倍に増えて BMR が 0.6pt 悪化した。直した後は小が n=2、大が n=5 を主に学び、pi より BMR −0.11pt・書き込み −2.6% だった（1 点だけの確認）。
 
 **11-17 の修正（山登りの OHR の項）**：下限の山登り（`auto=1`）の目的 J の OHR の項が、SSD のヒットだけを数えていた（BHR の項は DRAM と SSD の両方）。DRAM と SSD のヒットの合計に直した（`evict/region_basic.c`・`region_policy.h`・`ssd/rf_region.c`）。`w=0`（`*_auto_w0`）の結果はビット単位で変わらない（確認済み）。`w>0` の `*_auto`（w=0.1）は、DRAM がある構成では前の版と別物になる。揃えて比べるなら、`work/paper/*/ru_auto` と `r256_auto` を消してから `./run.sh paper`（`setup` がパッチの違いを見つけて cachesim を作り直す）。tune の `*hc*` も同様。
 
-**追加の比較（paper-ext）**：CacheLib（R=256 MiB、分類なし）の再挿入なし `r256_n0`・`r256_n2`・`r256_n3`（n=1 は基準 `r256_base`。`config.sh` の `PAPER_EXT_JOBS`）。「書き直しの閾値だけ上げた CacheLib」と比べても、分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。
+**本番用の比較（paper-final、11-19）**：上の構成は検討の途中で足してきたもので数が多い。論文の図と表に載せる組を、今までの計測から絞ったのが `PAPER_FINAL_METHODS`。結果は `paper`・`paper-ext` と共有し（同じ構成は回し直さない）、図と表だけを `work/paper/final/` に出す。交換関係の図（`fig_tradeoff*.svg`：CacheLib の n=0〜3 の線と各方式の点）も出す。
+
+```bash
+./run.sh paper-final           # 足りない構成だけ回して work/paper/final/ に図と表
+./run.sh paper-figs --final    # 図と表だけ作り直す
+```
+
+| 役割 | id | 何を示すか（数字は Meta nha 全量、CacheLib n=1 との ΔBMR / 書き込み比） |
+|---|---|---|
+| 基準 | `r256_base` | いまの CacheLib（R=256 MiB、分類なし、n=1） |
+| CacheLib のつまみ | `r256_n0` / `r256_n2` / `r256_n3` | 書き直しの閾値を変えるだけで届く範囲（n=0：+0.13pt・0.89、n=3：+0.07pt・0.91）。提案がこの線より左下にあれば「書き直しを減らしただけ」ではない |
+| Region を RU に | `ru_base` | DLWA = 1 にする代わりに道連れが増える。提案が取り戻す分の起点 |
+| 切り分け | `ru_none_auto` | 分類なしで n=auto だけ（+0.03pt・0.89）。`ru_auto` との差（−0.14pt）が分類＋下限の効果 |
+| 提案 | `ru_auto` | サイズ分類＋大の分類の下限の山登り＋n=auto（−0.11pt・0.86） |
+| 別の鍵（先行研究の手がかり） | `ru_dram1_auto` | 置き場所を DRAM でのヒット数で分ける（RIPQ / Flashield の手がかり。−0.03pt・0.87）。大きさで分ける方が効く |
+| 受け入れの先行研究 | `r256_adm` | CacheLib ＋ S3-FIFO 型の篩（+0.02pt・0.61） |
+| 直交性 | `ru_adm_auto` | 提案＋同じ篩（−0.08pt・0.50）。置き場所の得は篩の上でも 7 割残る |
+
+nha 以外のトレースではまだ確かめていない（数字は選び方の根拠で、結論ではない）。外した構成（手で調整した `*_ff90_h3`、`ru_auto_w0`、`ru_auto_ii`、`ru_st_*`、`ru_gate`、`r256_auto` など）は検討用として `paper` に残る。`PAPER_FINAL_METHODS` を書き換えれば組を変えられる（`./run.sh methods` の final 列で確認）。
+
+**追加の比較（paper-ext）**：CacheLib（R=256 MiB、分類なし）の再挿入なし `r256_n0`・`r256_n2`・`r256_n3`（n=1 は基準 `r256_base`。`config.sh` の `PAPER_EXT_METHODS`）。「書き直しの閾値だけ上げた CacheLib」と比べても、分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。
 
 ```bash
 ./run.sh paper-ext           # 足りない構成だけ回す（P.json がある構成は飛ばす）。結果・図・表は work/paper/ext/
@@ -330,11 +389,11 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 python3 py/paper_check.py work --ext   # ext の構成も並べて確かめる
 ```
 
-`work/paper/ext/` には、**交換関係の図** `fig_tradeoff.svg`（全トレースを並べた 1 枚）と `fig_tradeoff_<trace>.svg`（1 面ずつ）も出す。横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。CacheLib の n=0〜3 を線でつなぎ（書き直しを増やすほど書き込みが増えて BMR が下がる交換関係）、提案（RU＋分類の自動・手動）と分類なしの n=auto を点で重ねる。点が線の左下なら、同じ BMR を少ない書き込みで出している。
+`work/paper/ext/` には、**交換関係の図** `fig_tradeoff.svg`（全トレースを並べた 1 枚）と `fig_tradeoff_<trace>.svg`（1 面ずつ）も出す。横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。CacheLib の n=0〜3 を線でつなぎ（書き直しを増やすほど書き込みが増えて BMR が下がる交換関係）、提案（RU＋分類の自動・手動）と分類なしの n=auto を点で重ねる。点が線の左下なら、同じ BMR を少ない書き込みで出している。11-18 から、DRAM ヒットの篩（S3-FIFO 型の受け入れ）の `r256_adm`・`ru_adm_auto`（塗り）・`ru_adm_none_auto`（白抜き）も紫系の点で重ねる（`work/paper/` の結果を読む）。篩の点は書き込みが桁違いに少なく左端に来るので、縦の位置を n=0（書き直しなし）の点と比べる。n=0 より上なら、篩は書き込みを減らす代わりに元のサーバからの転送（BMR）を増やしている。S3-FIFO 論文の flash の実験はミス率と書き込みバイトしか示していないので、この図が帯域の側の答えになる。ext の表（`work/paper/ext/table_main.*`）にもこの 3 構成が並ぶ。
 
 また `work/paper/ext/` の図と表には、基準・n=0・n=3・分類なしの n=auto（`r256_none_auto`・`ru_none_auto`）・提案（`ru_ff90_h3`・`ru_auto`）を並べる（`work/paper/` の結果も読み込む。`work/paper/` の図と表は変えない）。
 
-**頑健性の確認（paper-robust）**：結論が RegionFlash の作りや乱数に頼っていないかを見る（`PAPER_ROBUST_JOBS`、1 トレース 10 本、結果は `work/paper/robust/`）。背景は `../docs/regionflash_callgraph.html`（1 要求のコールグラフと、CacheLib との違いの一覧）。
+**頑健性の確認（paper-robust）**：結論が RegionFlash の作りや乱数に頼っていないかを見る（`PAPER_ROBUST_METHODS`、既定は 1 トレース 18 本、結果は `work/paper/robust/`）。背景は `../docs/regionflash_callgraph.html`（1 要求のコールグラフと、CacheLib との違いの一覧）。
 
 | 条件 | 指定 | 確かめること |
 |---|---|---|

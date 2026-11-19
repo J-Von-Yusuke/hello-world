@@ -4,13 +4,18 @@
   python3 paper_figs.py <WORK> [--ext | --cond c0|c0m|f1|s2|s3]  PAPER_LANG=en で英語の文字。--ext = paper-ext の結果を足して work/paper/ext/ に出す。
                                        --cond = paper-robust のその条件の構成だけで同じ一式を work/paper/robust/<条件>/ に出す
 
-比べる構成（config.sh の PAPER_JOBS）:
+比べる構成（config.sh の PAPER_CATALOG から PAPER_METHODS で選んだもの。run.sh が work/paper/methods.tsv に残し、その順と名前で並べる）。既定の例:
   r256_base     Region 256 MiB（CacheLib の上限）・分類なし・再挿入 n=1        ← 基準（いまの CacheLib）
   ru_base       Region = RU（626.5 MiB）・分類なし・再挿入 n=1                ← 上限を外して RU に合わせただけ
   ru_ff90_h3    Region = RU・サイズ分類・大物の下限 0.9・再挿入 n=3（手で調整）  ← 提案
   ru_auto       Region = RU・サイズ分類（SplitThreshold）・下限の山登り（目的 J = BHR + 0.1·OHR）・再挿入 n=auto（全部自動） ← 提案
   r256_ff90_h3, r256_auto  同じ方式を 256 MiB で                              ← 分類の効果が Region の大きさによらないか
   ru_none_auto, r256_none_auto  分類なしで再挿入の閾値の自動化（n=auto）だけ     ← 切り分け：*_auto との差が分類＋下限の効果
+  ru_auto_w0    ru_auto の目的を BHR だけに（w=0）
+  ru_auto_ii    ru_auto の書き直しを専用の書き込み口へ（mode=ii。CacheLib の priority と同じ形）   ← 11-18
+  ru_dram_auto, ru_dram1_auto  分類の鍵を DRAM でのヒット数に（動的な 2 分割 / 0 回と 1 回以上）   ← 11-18
+  ru_st_nauto, ru_st_n0  サイズ分類だけで配分を決めない（OHR 寄り）、再挿入 n=auto / なし          ← 11-18
+  ru_gate       下限なし（ST）で始め、試しの下限で J が上がると分かったときだけ ru_auto の山登りへ（gate=1）   ← 11-18
 指標（図は値そのもの、表は基準との差 = 構成 − 基準）:
   BMR   バイトミス率 [%]（低いほど良い：元サーバへの転送）
   書き込み SSD に書いたバイト [TB]（受け入れ＋再挿入＋詰め物。低いほど良い）
@@ -21,21 +26,25 @@
 import csv, glob, json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from figures import Fig, Ax, PAL, span, to_png
+from figures import Fig, Ax, PAL, INK, fmt, span, to_png, tw
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext/）を足した比較。図と表は work/paper/ext/ に出す
+FINAL = "--final" in sys.argv   # paper-final: work/paper と work/paper/ext の結果から final/methods.tsv の方式だけ。図と表は work/paper/final/
 COND = sys.argv[sys.argv.index("--cond") + 1] if "--cond" in sys.argv else ""   # 頑健性の条件（c0 / f1 / s2 / s3）
 if COND:   # work/paper/robust の <構成>_<条件> だけを <構成> として読み、work/paper/robust/<条件>/ に同じ一式を出す
     SRC = [f"{WORK}/paper/robust"]; D = f"{WORK}/paper/robust/{COND}"
 else:
-    SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT else [])   # 結果を読む場所（同じ構成は後の場所が優先）
-    D = SRC[-1]                                                          # 図と表を書く場所
+    SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT or FINAL else [])   # 結果を読む場所（同じ構成は後の場所が優先）
+    D = f"{WORK}/paper/final" if FINAL else SRC[-1]                             # 図と表を書く場所
 BASE = "r256_base"
-ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto"] if EXT else   # ext: CacheLib の閾値違いと提案
+ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto",
+          "r256_adm", "ru_adm_none_auto", "ru_adm_auto"] if EXT else   # ext: CacheLib の閾値違いと提案、篩（S3-FIFO 型の受け入れ）
          ["r256_base", "r256_n0", "r256_n2", "r256_n3", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"]
          if COND else   # 条件ごと: その条件で回した構成を全部
-         ["r256_base", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "ru_auto_w0", "r256_none_auto", "r256_ff90_h3", "r256_auto", "r256_auto_w0"])   # 図と表に並べる順
+         ["r256_base", "r256_adm", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "ru_auto_w0", "ru_auto_ii", "ru_dram_auto", "ru_dram1_auto",
+          "ru_st_nauto", "ru_st_n0", "ru_gate", "ru_adm_none_auto", "ru_adm_auto", "ru_adm_dram2_auto",
+          "r256_none_auto", "r256_ff90_h3", "r256_auto", "r256_auto_w0"])   # 図と表に並べる順
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
     "r256_n0": ("CacheLib n=0（書き直しなし）", "CacheLib n=0 (no rewrite)"),
@@ -50,9 +59,34 @@ NAME = {
     "r256_auto": ("R=256MiB＋分類（自動・BHR+0.1·OHR）", "R=256MiB + class. (auto, BHR+0.1·OHR)"),
     "ru_auto_w0": ("R=RU＋分類（自動・BHR のみ）", "R=RU + class. (auto, BHR only)"),
     "r256_auto_w0": ("R=256MiB＋分類（自動・BHR のみ）", "R=256MiB + class. (auto, BHR only)"),
+    "ru_auto_ii": ("R=RU＋分類（自動）＋書き直しは別の口（ii）", "R=RU + class. (auto) + rewrite stream (ii)"),
+    "ru_dram_auto": ("R=RU＋DRAM ヒット数で 2 分割（動的・自動）", "R=RU + DRAM-hit split (dynamic, auto)"),
+    "ru_dram1_auto": ("R=RU＋DRAM ヒット 0 / 1 回以上（自動）", "R=RU + DRAM-hit split (0 / >=1, auto)"),
+    "ru_st_nauto": ("R=RU＋サイズ分類のみ（配分なし）＋n=auto", "R=RU + size class. only (no alloc.) + auto n"),
+    "ru_st_n0": ("R=RU＋サイズ分類のみ（配分なし・書き直しなし）", "R=RU + size class. only (no alloc., no rewrite)"),
+    "ru_gate": ("R=RU＋分類（ST か山登りかを自動選択）", "R=RU + class. (gate: ST or climb)"),
+    "r256_adm": ("CacheLib＋S3-FIFO 型の篩（受け入れ）", "CacheLib + S3-FIFO-style admission"),
+    "ru_adm_none_auto": ("R=RU＋篩＋n=auto（分類なし）", "R=RU + admission + auto n (no class.)"),
+    "ru_adm_auto": ("R=RU＋篩＋分類（自動）", "R=RU + admission + class. (auto)"),
+    "ru_adm_dram2_auto": ("R=RU＋篩＋DRAM ヒット 1 回以下 / 2 回以上（自動）", "R=RU + admission + DRAM-hit split (<=1 / >=2)"),
 }
 COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
-       "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a", "ru_auto_w0": "#5b3a8c", "r256_auto_w0": "#8c3a5b"}
+       "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a", "ru_auto_w0": "#5b3a8c", "r256_auto_w0": "#8c3a5b",
+       "ru_auto_ii": "#2a9d8f", "ru_dram_auto": "#6a994e", "ru_dram1_auto": "#a7c957", "ru_st_nauto": "#e9c46a", "ru_st_n0": "#f4a261",
+       "ru_gate": "#264653", "r256_adm": "#b5838d", "ru_adm_none_auto": "#9d8189", "ru_adm_auto": "#6d597a", "ru_adm_dram2_auto": "#b56576"}
+# run.sh が残した選択（methods.tsv: id・図の名前・指定）。paper はその順と名前で並べ、選ばなかった方式は出さない。
+# ext / 条件ごとは上の並びに、選んだ方式のうち並びに無いものを後ろへ足す。名前が空なら上の NAME（無ければ id）
+SEL = []
+_m = f"{WORK}/paper/robust/methods.tsv" if COND else f"{D}/methods.tsv"
+if os.path.exists(_m):
+    for r in (l.rstrip("\n").split("\t") for l in open(_m, encoding="utf-8") if l.strip()):
+        c = r[0][:-len(COND) - 1] if COND and r[0].endswith("_" + COND) else r[0]
+        if COND and c == r[0]: continue   # 別の条件の方式
+        SEL.append(c)
+        if len(r) > 1 and r[1]: NAME[c] = (r[1], r[1])
+if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（./run.sh paper-final で作る）")
+if SEL and not EXT and not COND: ORDER = SEL
+else: ORDER = ORDER + [c for c in SEL if c not in ORDER]
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
 
@@ -127,6 +161,40 @@ tex += [r"\bottomrule", r"\end{tabular}", r"\caption{" + cap.replace("%", r"\%")
 open(f"{D}/table_main.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + cap + "\n")
 open(f"{D}/table_main.tex", "w", encoding="utf-8").write("\n".join(tex) + "\n")
 
+# ---------------------------------------------------------------- 受け入れ × 置き場所（直交性）：4 構成が揃ったトレースだけ
+# 置き場所の得を、受け入れの篩なし（ru_auto − ru_none_auto）と、篩あり（ru_adm_auto − ru_adm_none_auto）で並べる。
+# 差（相互作用）が 0 に近ければ直交、篩ありで得が消えるなら、篩が置き場所の効く理由（追い出しの圧力）を取り去っている
+QO = ("ru_none_auto", "ru_auto", "ru_adm_none_auto", "ru_adm_auto")
+orth = []
+for n in names:
+    R = runs[n]["runs"]
+    if not all(q in R for q in QO): continue
+    a0p0, a0p1, a1p0, a1p1 = (R[q] for q in QO)
+    wr = lambda a, b: TB(a) / TB(b) if TB(b) else None
+    orth.append(dict(trace=n, place_dbmr_pt=BMR(a0p1) - BMR(a0p0), place_dbmr_with_adm_pt=BMR(a1p1) - BMR(a1p0),
+                     adm_dbmr_pt=BMR(a1p0) - BMR(a0p0), interaction_dbmr_pt=(BMR(a1p1) - BMR(a1p0)) - (BMR(a0p1) - BMR(a0p0)),
+                     place_write_ratio=wr(a0p1, a0p0), place_write_ratio_with_adm=wr(a1p1, a1p0), adm_write_ratio=wr(a1p0, a0p0),
+                     place_dohr_pt=OHR(a0p1) - OHR(a0p0), place_dohr_with_adm_pt=OHR(a1p1) - OHR(a1p0)))
+if orth:
+    with open(f"{D}/table_orth.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, list(orth[0])); w.writeheader(); w.writerows(orth)
+    f3 = lambda v, s="+.2f": "–" if v is None else format(v, s)
+    om = ["| " + " | ".join([T("トレース", "Trace"), T("置き場所の ΔBMR（篩なし）", "Placement ΔBMR (no adm.)"),
+                             T("置き場所の ΔBMR（篩あり）", "Placement ΔBMR (with adm.)"), T("篩の ΔBMR", "Admission ΔBMR"),
+                             T("相互作用", "Interaction"), T("置き場所の書込比（篩なし / あり）", "Placement write ratio (no / with adm.)"),
+                             T("篩の書込比", "Admission write ratio")]) + " |", "|" + "---|" * 7]
+    for o in orth:
+        om.append("| " + " | ".join([o["trace"], f3(o["place_dbmr_pt"]), f3(o["place_dbmr_with_adm_pt"]), f3(o["adm_dbmr_pt"]),
+                                     f3(o["interaction_dbmr_pt"]), f3(o["place_write_ratio"], ".3f") + " / " + f3(o["place_write_ratio_with_adm"], ".3f"),
+                                     f3(o["adm_write_ratio"], ".3f")]) + " |")
+    om.append("\n" + T("ΔBMR [pt]（負 = 良い）。置き場所 = サイズ分類＋下限の山登り（ru_auto）、篩 = S3-FIFO 型：DRAM（ghost を含む）で 2 回以上"
+                       "リクエストされた物だけ書く（admit=dram:min=1/ghost=0.9）。"
+                       "相互作用 = 篩ありの置き場所の得 − 篩なしの得（0 なら足し算で効く。正なら篩で得が減る）。書込比 = 構成 ÷ 相方（1 未満 = 減る）。",
+                       "ΔBMR [pt] (negative = better). Placement = size classification + floor climb (ru_auto); admission = S3-FIFO style: write only "
+                       "objects requested at least twice in DRAM including the ghost (admit=dram:min=1/ghost=0.9). Interaction = placement gain with "
+                       "admission − without (0 = additive; positive = admission removes part of the gain). Write ratio = config / its counterpart (< 1 = fewer writes)."))
+    open(f"{D}/table_orth.md", "w", encoding="utf-8").write("\n".join(om) + "\n")
+
 # ---------------------------------------------------------------- 図（1 枚、横に 3 面：BMR・書き込み量・OHR。値そのもの）
 multi = len(names) > 1
 def series(c, fn, mean=True):
@@ -139,11 +207,11 @@ cats_m = names + ([T("平均", "Mean")] if multi else [])
 rel = lambda fn, c, n: fn(runs[n]["runs"][c], runs[n]["runs"][BASE])
 PANELS = {  # slug: (題, 縦軸, 値の関数 (r, b), 平均をつけるか, 小数, 種類 abs|diff|ratio)
     "bmr": (T("BMR（低いほど良い）", "BMR (lower is better)"), "BMR [%]", lambda r, b: BMR(r), True, 2, "abs"),
-    "write": (T("SSD 書き込み量（低いほど良い）", "SSD writes (lower is better)"), T("書き込み [TB]", "Writes [TB]"), lambda r, b: TB(r), False, 1, "abs"),
+    "write": (T("SSD 書き込み量（低いほど良い）", "SSD writes (lower is better)"), T("書き込み [TB]", "Writes [TB]"), lambda r, b: TB(r), False, 2, "abs"),
     "ohr": (T("OHR（参考。高いほど良い）", "OHR (for reference)"), "OHR [%]", lambda r, b: OHR(r), True, 1, "abs"),
     "dbmr": (T("ΔBMR（CacheLib 比。低いほど良い）", "ΔBMR vs. CacheLib (lower is better)"), "ΔBMR [pt]", lambda r, b: BMR(r) - BMR(b), True, 2, "diff"),
     "nwrite": (T("SSD 書き込み量（CacheLib の合計 = 1。低いほど良い）", "SSD writes (CacheLib total = 1; lower is better)"),
-               T("書き込み（正規化）", "Normalized writes"), lambda r, b: TB(r) / TB(b) if TB(b) else None, True, 3, "ratio"),
+               T("書き込み（正規化）", "Normalized writes"), lambda r, b: TB(r) / TB(b) if TB(b) else None, True, 2, "ratio"),
     "dohr": (T("ΔOHR（CacheLib 比。参考）", "ΔOHR vs. CacheLib (for reference)"), "ΔOHR [pt]", lambda r, b: OHR(r) - OHR(b), True, 1, "diff"),
 }
 
@@ -167,6 +235,26 @@ def stacked(a, key, shown, mean):
             y0, y1, y2 = a.Y(0), a.Y(p[0]), a.Y(p[0] + p[1])
             a.f.e.append(f'<rect x="{x+2:.1f}" y="{y1:.1f}" width="{max(w-4, 1):.1f}" height="{y0-y1:.1f}" fill="{col}"/>')
             a.f.e.append(f'<rect x="{x+2:.1f}" y="{y2:.1f}" width="{max(w-4, 1):.1f}" height="{y1-y2:.1f}" fill="{col}" fill-opacity="0.35" stroke="{col}" stroke-width="1.5"/>')
+            stack_labels(a, x, w, (y0, y1, y2), p)
+
+
+def stack_labels(a, x, w, ys, p):
+    """ラベル（小数第 2 位）：合計 = 棒の上、取得 = 濃い段の中（白）、再書き込み = 薄い段の中。
+    棒の幅に横書きが入らなければ縦書き（-90°）。段の中に入らない長さなら、その段のラベルだけ省く（合計は必ず出す）"""
+    y0, y1, y2 = ys; cx = x + w / 2
+    tot, adm, rew = fmt(p[0] + p[1], 2), fmt(p[0], 2), fmt(p[1], 2)
+    fs = 18 if w > 70 else 15
+    horiz = tw(tot, fs) + 6 <= w
+    fv = min(16, w - 4)                       # 縦書きの字の大きさ（棒の幅に収める）
+    if horiz:
+        a.f.t(cx, y2 - 8, tot, fs, "middle", INK, "bold")
+        for txt, top, bot, colr in ((adm, y1, y0, "#fff"), (rew, y2, y1, INK)):
+            if bot - top >= fs + 6: a.f.t(cx, (top + bot) / 2 + fs * 0.35, txt, fs, "middle", colr, "bold" if colr == "#fff" else "normal")
+    elif fv >= 9:
+        tx = cx + fv * 0.35
+        a.f.t(tx, y2 - 6, tot, fv, "start", INK, "bold", rot=-90)
+        for txt, top, bot, colr in ((adm, y1, y0, "#fff"), (rew, y2, y1, INK)):
+            if bot - top >= tw(txt, fv) + 10: a.f.t(tx, (top + bot) / 2 + tw(txt, fv) / 2, txt, fv, "start", colr, "bold" if colr == "#fff" else "normal", rot=-90)
 
 
 def draw(keys):  # keys の面を横に並べた 1 枚の図
@@ -174,7 +262,9 @@ def draw(keys):  # keys の面を横に並べた 1 枚の図
     shown = cfgs if "abs" in kinds else others          # 差・比の図には基準の棒を出さない（基準 = 0 / 1 の線）
     f = Fig(); f.add_legend([(nm(c), COL.get(c, PAL[i % len(PAL)]), "box") for i, c in enumerate(cfgs) if c in shown])
     if {"write", "nwrite"} & set(keys):
-        f.add_legend([(T("書き込み：濃い = 取得（ミス）、薄い = 再書き込み", "Writes: solid = admitted (misses), light = rewrites"), "#bbbbbb", "box")])
+        f.add_legend([(T("書き込み：濃い = 取得（ミス）、薄い = 再書き込み。数字 = 段の中が各量、上が合計", "Writes: solid = admitted (misses), light = rewrites; numbers = each part inside, total on top"), "#bbbbbb", "box")])
+    if "ratio" in kinds:   # 基準の線の名前は凡例に（線の上に書くと棒の上の数字と重なる）
+        f.add_legend([(T("CacheLib = 1", "CacheLib = 1"), "#4d4d4d", "dash")])
     top, x0, gap = f.legend_h() + 50, 110, 115
     W = (1600 - x0 - 30 - gap * (len(keys) - 1)) // len(keys)
     for k, key in enumerate(keys):
@@ -190,12 +280,12 @@ def draw(keys):  # keys の面を横に並べた 1 枚の図
             vals = [(ATB(runs[n]["runs"][c]) + RTB(runs[n]["runs"][c])) / (TB(runs[n]["runs"][BASE]) if key == "nwrite" else 1)
                     for c in shown for n in names if c in runs[n]["runs"]] or [0]
         if kind == "diff": yr = span(vals)                           # 0 を含む（正負の差）
-        else: yr = (0, max(vals + ([1] if kind == "ratio" else [])) * 1.1 or 1)   # 0 から
+        else: yr = (0, max(vals + ([1] if kind == "ratio" else [])) * (1.3 if key in ("write", "nwrite") else 1.1) or 1)   # 0 から（書き込みは上のラベルの分を空ける）
         a = Ax(f, (x0 + k * (W + gap), top, x0 + k * (W + gap) + W, 760), yr=yr, cats=cats_m if mean else names, ylabel=ylab, title=title)
         if key in ("write", "nwrite"): stacked(a, key, shown, mean)
         else: a.bars([(nm(c), COL.get(c, PAL[i % len(PAL)]), data[c], None) for i, c in enumerate(cfgs) if c in shown],
                      d=d, sign=kind == "diff")
-        if kind == "ratio": a.hline(1.0, col="#4d4d4d", label=T("CacheLib = 1", "CacheLib = 1"))
+        if kind == "ratio": a.hline(1.0, col="#4d4d4d")
     return f.svg()
 
 
@@ -264,9 +354,14 @@ for n in names:
 
 # ---------------------------------------------------------------- 交換関係の図（--ext のみ）：横 = SSD 書き込み（CacheLib n=1 = 1）、縦 = ΔBMR [pt]
 #   CacheLib の n=0..3 を線でつなぐ（書き直しを増やすほど書き込みが増え BMR が下がる、という交換関係）。
-#   提案の点がその線の左下にあれば、同じ BMR を少ない書き込みで（同じ書き込みで低い BMR を）出している
+#   提案の点がその線の左下にあれば、同じ BMR を少ない書き込みで（同じ書き込みで低い BMR を）出している。
+#   S3-FIFO 型の篩（受け入れ、admit=dram:min=1/ghost=0.9）の点も重ねる：書き込みは少なく左に来るので、
+#   縦の位置を n=0（書き直しなし）の点と比べると、篩が帯域（BMR）と引き換えにどれだけ書き込みを減らしたかが分かる
 CURVE = [("r256_n0", "n=0"), ("r256_base", "n=1"), ("r256_n2", "n=2"), ("r256_n3", "n=3")]
-PTS = [("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True)]
+PTS = [("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True),
+       ("r256_adm", 10, False), ("ru_adm_auto", 10, False), ("ru_adm_none_auto", 8, True)]
+if FINAL:   # final は選んだ方式を全部（CacheLib の n=0〜3 の線以外）点で
+    PTS = [p for p in PTS if p[0] in SEL] + [(c, 9, False) for c in SEL if c not in {p[0] for p in PTS} | {c for c, _ in CURVE}]
 
 
 def tradeoff(keys):
@@ -295,7 +390,7 @@ def tradeoff(keys):
 
 
 tr = []
-if (EXT or COND) and any("r256_n3" in runs[n]["runs"] or "r256_n0" in runs[n]["runs"] for n in names):
+if (EXT or COND or FINAL) and any("r256_n3" in runs[n]["runs"] or "r256_n0" in runs[n]["runs"] for n in names):
     open(f"{D}/fig_tradeoff.svg", "w", encoding="utf-8").write(tradeoff(names)); tr.append("fig_tradeoff")
     for n in names:
         open(f"{D}/fig_tradeoff_{n}.svg", "w", encoding="utf-8").write(tradeoff([n])); tr.append(f"fig_tradeoff_{n}")
@@ -380,11 +475,14 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 <style>:root{{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}}@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
-<h1>{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
+<h1>{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
 """ + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
        "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
        "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"
-       "点が灰の線より左下にあれば、同じ BMR を少ない書き込みで出している。</p>" if tr else "") + f"""<h2>図：fig_main.svg（3 面まとめ）{" / .png" if png else ""}</h2><img src="fig_main.svg" alt="BMR・SSD 書き込み量・OHR の比較"><h2>図：fig_rel.svg（CacheLib 比の 3 面まとめ）</h2><img src="fig_rel.svg" alt="CacheLib 比の BMR・書き込み・OHR"><p class="m">左 = ΔBMR（構成 − CacheLib、0 = CacheLib、負が良い）。中 = SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い）。右 = ΔOHR（参考）。1 面ずつの図：fig_bmr / fig_write / fig_ohr（値そのもの）、fig_dbmr / fig_nwrite / fig_dohr（CacheLib 比）。</p>
+       "点が灰の線より左下にあれば、同じ BMR を少ない書き込みで出している。"
+       "紫系 = DRAM（ghost を含む）で 2 回以上リクエストされた物だけ書く篩（S3-FIFO 型の受け入れ）：CacheLib＋篩・RU＋篩＋分類（塗り）、RU＋篩のみ（白抜き）。"
+       "篩の点は書き込みが桁違いに少なく左端に来る。縦の位置を n=0（書き直しなし）の点と比べると、篩が帯域（BMR）と引き換えにどれだけ書き込みを減らしたかが分かる"
+       "（n=0 より上なら、書き込みを減らす代わりに元のサーバからの転送が増えている）。</p>" if tr else "") + f"""<h2>図：fig_main.svg（3 面まとめ）{" / .png" if png else ""}</h2><img src="fig_main.svg" alt="BMR・SSD 書き込み量・OHR の比較"><h2>図：fig_rel.svg（CacheLib 比の 3 面まとめ）</h2><img src="fig_rel.svg" alt="CacheLib 比の BMR・書き込み・OHR"><p class="m">左 = ΔBMR（構成 − CacheLib、0 = CacheLib、負が良い）。中 = SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い）。右 = ΔOHR（参考）。1 面ずつの図：fig_bmr / fig_write / fig_ohr（値そのもの）、fig_dbmr / fig_nwrite / fig_dohr（CacheLib 比）。</p>
 <p><b>要点</b>（BMR・OHR はトレースの平均、書き込みは合計）：{pts}。</p>
 <p class="m">左 = BMR（低いほど良い）。中 = SSD に書いたバイト（受け入れ＋再挿入＋詰め物、低いほど良い。トレースごとに規模が違うので平均は出さない）。右 = OHR（参考）。
 濃い灰 = 基準（CacheLib 相当、Region 256 MiB、分類なし、再挿入 n=1）。薄い灰 = Region を RU（626.5 MiB）に合わせただけ（DLWA = 1 だが、Region が大きいぶん道連れと書き直しが増える）。
@@ -395,6 +493,7 @@ img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}
 """ + ("<h2>書き込み量の印での結果（部分トレースで足りるか）</h2><p class='m'>fig_marks_&lt;trace&gt;：横 = CacheLib が SSD に書いた量（先頭の部分トレースの長さ）、縦 = ΔBMR と書き込みの比。"
        "線が右端（全量）の値に早く落ち着き、赤い縦線（指定した書き込み量）の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。数値は table_marks.md / .csv（✗ = 全量と向きが違う）。</p>"
        + "".join(f'<img src="{s_}.svg" alt="{s_}">' for s_ in mk) + (f"<pre>{open(f'{D}/table_marks.md', encoding='utf-8').read()}</pre>" if mrows else "") if mk else "") + f"""
-<h2>表：table_main.md / .tex / .csv</h2><pre>{open(f"{D}/table_main.md", encoding="utf-8").read()}</pre></main></body></html>"""
+<h2>表：table_main.md / .tex / .csv</h2><pre>{open(f"{D}/table_main.md", encoding="utf-8").read()}</pre>""" + (
+    f"<h2>受け入れ × 置き場所（直交性）：table_orth.md / .csv</h2><pre>{open(f'{D}/table_orth.md', encoding='utf-8').read()}</pre>" if orth else "") + """</main></body></html>"""
 open(f"{D}/index.html", "w", encoding="utf-8").write(html)
 print(f"paper: {len(names)} 本 → {D}/fig_main.svg・fig_rel.svg（と 1 面ずつ 6 枚）, 時間変化 {len(tl)} 枚（fig_ops_* / fig_wr_*）{f'、交換関係 {len(tr)} 枚（fig_tradeoff*）' if tr else ''}{'（.png も）' if png else ''}, table_main.(md|tex|csv), index.html")

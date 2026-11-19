@@ -1,6 +1,7 @@
 /* synth_model.c — synth_gen と同じ指定の IRM 負荷に対する Che 型の予測。
  *
  *   synth_model [-R region] [-f f1,f2,..] [-g 0,0,1] [-S samples] [-P steps] size:nobj:share:alpha ...
+ *   build: gcc -O3 -march=native -fopenmp -o synth_model synth_model.c -lm（OMP_NUM_THREADS でスレッド数。-fopenmp なしでも動く）
  *     -f  容量 = 足跡 × f（既定 0.05,0.1,0.2,0.3）  -R  Region の大きさ（既定 容量/256）
  *     -g  サイズのクラス → 分類の対応を 1 つ足す（既定で「分けない」と「クラスごと」を出す）
  *
@@ -91,13 +92,24 @@ static double TFIX;  // 診断 TFIX=<T>：T を与えて解く（占有は C に
 static double CV;    // -c：追い出し年齢 T の変動係数（0 なら Che の T 一定、auto（<0）なら式から）
 static double CVLAST;  // auto で最後に使った CV（出力用）
 static int NOU;        // 診断 NOU=1：封じるまでの待ちを入れない（旧モデル）
+static int CSCAP;
+/* 追い出しの離散性（既定。OLDR=1 で切る）：追い出しは Region 1 個分のバイトを書くたび（間隔 Δ = R ÷ 挿入バイト率）にしか起きない。
+ * Region が少ないと Δ が T より長くなり、「無アクセスが T を超えた瞬間に死ぬ」（Che）が崩れる。長さ g の無アクセス区間が
+ * 追い出しの時刻を年齢 T 以降に含む確率は E[min(1,(g−T)+/Δ)] = e^{−ΛT}(1−e^{−ΛΔ})/(ΛΔ) なので、
+ * 寿命 ≈ (e^{ΛT}−1)/Λ · ΛΔ/(1−e^{−ΛΔ}) + Δ/2（Δ → 0 で Che の式に戻る） */
+static int DISC, OPENR;
+static double DLAST;  // 最後に解いた追い出しの間隔 Δ（pins が使う）
 /* 立ち上がりの隔離（-H <観測期間>）：空のキャッシュを埋める間は全部がミスなので、初回の要求の順に物が
  * Region に詰まる。最初の Region には熱い物が集まり、寿命 (e^{ΛT}−1)/Λ が観測期間 H を超えれば事実上不死になる。
  * その物は二度とミスせず（在籍率 1）、残りの物と容量で定常モデルを解く。pin[i] はビン i の不死の物の数。 */
 static double HOR, *pin, PINB[KMAX];
 static int NOBJ, NREG, NPIN, *obin, *oreg;
 static double *rlam, *rfill;
+static int INIT = -1, ITS;  // 診断 SCAN：内側の反復の初期値（-1 = FIFO の解）、最後の反復の回数と残差
+static double RES, DAMP = 0.5;  // DAMP：log ℓ の減衰（古い値を残す割合）
+static int ITMAX = 300, FIXDAMP;  // 診断 FIXDAMP=1 ITMAX=60：11-17 以前の解き方（減衰 0.5 固定）
 static int ONLY = -1;  // ≥ 0：分類 ONLY の物だけでキャッシュを解く（静的分割の 1 区画）
+static double DOH, DBH, DK[KMAX];  // DRAM のヒット（-D、下の put_hk の前の説明）。SSD 側の各結果に足す
 #define CE(i) (ONLY >= 0 && GR[B[i].k] != ONLY ? 0 : B[i].c - pin[i])  // 定常モデルで扱う物の数
 typedef struct { double t; int b; } fr_t;
 static int cmp_fr(const void *a, const void *b) { double x = ((fr_t *)a)->t - ((fr_t *)b)->t; return (x > 0) - (x < 0); }
@@ -123,7 +135,9 @@ static void coldstart(double C) {  // 初回の要求の順に、分類ごとの
   for (int n = 0; n < NOBJ; n++) {
     int i = o[n].b, g = GR[B[i].k];
     obin[n] = i, oreg[n] = -1;
-    if (sealed >= cap) continue;
+    /* 容量が埋まった後も、初回の要求は必ずミスして初回の順に Region に入る（大きい物が数万要求で容量を埋めても、
+     * 小物の初回は数百万要求続き、熱い小物の Region が不死になる）。CSCAP=1 で旧モデル（容量が埋まるまで） */
+    if (CSCAP && sealed >= cap) continue;
     if (cur[g] < 0 || ob[g] + B[i].s > R) {
       if (cur[g] >= 0) rfill[cur[g]] = ob[g], sealed++;
       cur[g] = NREG++, rlam[cur[g]] = 0, rfill[cur[g]] = 0, ob[g] = 0;
@@ -136,8 +150,8 @@ static int pins(double T) {  // 寿命が観測期間を超える初期 Region �
   static char *pr;
   pr = realloc(pr, NREG + 1);
   for (int r = 0; r < NREG; r++) {
-    double x = rlam[r] * T;  // log((e^x − 1)/Λ) > log H
-    pr[r] = rfill[r] > 0 && x + log(-expm1(-x)) - log(rlam[r]) > log(HOR);
+    double x = rlam[r] * T, d = rlam[r] * DLAST;  // log((e^x − 1)/Λ) > log H（DISC なら離散の倍率 d/(1−e^{−d}) を掛ける）
+    pr[r] = rfill[r] > 0 && x + log(-expm1(-x)) - log(rlam[r]) + (DISC && d > 1e-8 ? log(d / -expm1(-d)) : 0) > log(HOR);
     np += pr[r];
   }
   memset(pin, 0, NB * sizeof(double)), memset(PINB, 0, sizeof PINB);
@@ -152,7 +166,17 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
   double lT = log(T), fe[KMAX];
   for (int k = 0; k < K; k++) fe[k] = (int)(R / SZ[k]) * SZ[k] / R;  // 単一サイズの Region の充填率
   for (int i = 0; i < NB; i++) logL[i] = lT;                          // FIFO の解（LRU の初期値）
-  for (int it = 0; it < 60; it++) {  // FIFO も組成（詰め残し）と封じるまでの待ちのために回す
+  if (lru && INIT >= 0) {  // 診断 SCAN：初期値を変える（0 = 上限 ℓ_max、1.. = T と上限の間の乱数）
+    double nl = 0;
+    for (int i = 0; i < NB; i++) nl = fmax(nl, B[i].lam * (int)(R / SZ[B[i].k]));
+    uint64_t z = 977ull * INIT + 1;
+    for (int i = 0; i < NB; i++) {
+      z = z * 6364136223846793005ull + 1442695040888963407ull;
+      logL[i] = lT + (INIT ? (z >> 11) * 0x1.0p-53 : 1) * (nl * T + log(-expm1(-nl * T)) - log(nl) - lT);
+    }
+  }
+  double dmp = DAMP, rprev = INFINITY;
+  for (int it = 0; it < ITMAX; it++) {  // FIFO も組成（詰め残し）と封じるまでの待ちのために回す
     double lM[KMAX][G + 1], lW[KMAX][G + 1], q[KMAX], res = 0, elk[KMAX], lU[KMAX], half[KMAX];
     static double LS[KMAX][4096];  // 揺らぎの補正用：同居の物の touch 率の和 Λ_rest の標本
     static double la[400000];      // 封じてからの寿命 log L（U を足す前）
@@ -175,7 +199,8 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
       elk[k] = el;
       if (getenv("DBG")) fprintf(stderr, "T=%.0f it=%d k=%d E_ins[lam]=%.3e n*E=%.3e miss=%.4f\n", T, it, k, el,
                                  el * (int)(R / SZ[k]), exp(lz));
-      for (int j = 0; j <= G && lru; j++) {
+#pragma omp parallel for schedule(static)  // 時刻の格子 j ごとに独立
+      for (int j = 0; j <= (lru ? G : -1); j++) {
         double t = T * j / G, mx = -INFINITY, s = 0;
         if (MF) { lM[k][j] = t * el; continue; }
         for (int i = 0; i < NB; i++) if (B[i].k == k && lm[i] + B[i].lam * t > mx) mx = lm[i] + B[i].lam * t;
@@ -241,6 +266,7 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
         lf[g] = log(-expm1(lp)) - lp - log(Lm);
       }
     }
+#pragma omp parallel for schedule(static)  // ビン i ごとに独立
     for (int i = 0; i < NB; i++) {  // log L_i = log ∫ e^{λ_i t + lW(t)} dt（区間ごとに指数で厳密）
       double a = -INFINITY, dt = T / G, *w = lW[B[i].k];
       if (!lru) a = lT;  // Region FIFO：封じてから T で一定
@@ -260,6 +286,20 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
         }
       la[i] = a;
     }
+    if (DISC && lru) {  // 追い出しの間隔 Δ = R ÷ 挿入バイト率（今の ℓ でのミス率）。Λ は同居の平均場の標本 LS
+      double br = 0, D;
+      for (int i = 0; i < NB; i++) br += CE(i) * B[i].s * B[i].lam * (1 - sigm(log(B[i].lam) + logL[i]));
+      D = DLAST = br > R * 1e-15 ? R / br : 1e15;  // 二分法の端（ほぼ全部ヒット）でも有限に
+#pragma omp parallel for schedule(static)
+      for (int i = 0; i < NB; i++) {
+        int c = B[i].k; double g = -INFINITY;  // log の平均 log E_s[x/(1 − e^{−x})]
+        for (int s = 0; s < nls[c]; s++) {
+          double x = (B[i].lam + LS[c][s]) * D;
+          g = lse(g, x < 1e-8 ? 0 : x > 30 ? log(x) : log(x / -expm1(-x)));
+        }
+        la[i] = lse(la[i] + g - log(nls[c]), log(D / 2));
+      }
+    }
     /* 封じるまでの待ち U：書き込み中の Region は追い出されず、Region の時計（最後の touch）は封じた時から
      * 始まるので、滞在 = U ＋ 封じてからの寿命。U = (後に入る物の数) ÷ 分類の挿入率で、挿入率が U に依る
      * （U が長いほどミスが減る）ので、U · rate(U) = half を同じ反復の中で解く（左辺は U について増加）。 */
@@ -267,6 +307,7 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
       double lo = -10, hi = 60;
       for (int it2 = 0; it2 < 60 && !NOU; it2++) {
         double m = (lo + hi) / 2, f = 0;
+#pragma omp parallel for schedule(static) reduction(+ : f)
         for (int i = 0; i < NB; i++)
           if (GR[B[i].k] == GR[c]) {  // c · λU / (1 + λ(L + U))
             double x = log(B[i].lam), z = x + lse(la[i], m);
@@ -279,10 +320,16 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
     for (int i = 0; i < NB; i++) {
       double a = lse(la[i], lU[B[i].k]);
       if (fabs(a - logL[i]) > res) res = fabs(a - logL[i]);
-      logL[i] = it ? 0.5 * logL[i] + 0.5 * a : a;
+      logL[i] = it ? dmp * logL[i] + (1 - dmp) * a : a;
     }
     if (getenv("DBG"))
       fprintf(stderr, "  it=%d lU0=%.2f logL[first]=%.2f logL[last]=%.2f res=%.3g\n", it, lU[0], logL[0], logL[NB - 1], res);
+    /* 減衰の自動調整：写像 Φ の微分には大きな負の固有値がある（ℓ↑ → 熱い物のミス↓ → 流れが冷える → ℓ↓）。
+     * 減衰 d の反復の倍率は d + (1−d)μ なので、μ < −(1+d)/(1−d) だと 2 周期で振動して収束しない（α ≥ 1.2 で
+     * 0.5 では振動し、§N.4 の「跳び」に見えた）。残差が減らなくなったら d を上げる */
+    if (it > 1 && res > 0.95 * rprev && !FIXDAMP) dmp = fmin(0.95, dmp + 0.15);
+    rprev = res;
+    ITS = it, RES = res;
     if (res < 1e-4) break;
   }
   double occ = 0;
@@ -294,6 +341,11 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
     pres[i] = (pin[i] + CE(i) * p) / B[i].c;     // 不死の物は在籍率 1
     occ += o, occ_k[B[i].k] += o;
     *ohr += B[i].c * B[i].lam * pres[i], *bhr += B[i].c * B[i].lam * B[i].s * pres[i] / TB;
+  }
+  if (OPENR) {  // 書き込み中の Region も N 個の枠を 1 つ取る（rf_region.c の rf_place）。中身は平均で半分なので、空きの R/2 を分類ごとに足す
+    int seen[KMAX] = {0};
+    for (int i = 0; i < NB; i++)
+      if (CE(i) > 0 && !seen[GR[B[i].k]]) seen[GR[B[i].k]] = 1, occ += R / 2;
   }
   return occ;
 }
@@ -322,7 +374,7 @@ static double region_solve(double C, int lru, double *ohr, double *bhr, double *
 /* Region LRU の静的分割：分類 g に容量 m·C/P（m = 0..P）を与えた区画を単独で解き、
  * 目的 a·BHR + b·OHR の和が最大になる (m_g)（Σ m_g = P）を動的計画法で選ぶ */
 static int P = 20;
-static void rpart(double C, int ng, int v) {
+static void rpart(double C, int ng, int v, const double *nat) {
   static double oh[KMAX][201], bh[KMAX][201];
   double ck[KMAX];
   for (int g = 0; g < ng; g++) {
@@ -335,6 +387,22 @@ static void rpart(double C, int ng, int v) {
       if (C * m / P >= foot) oh[g][m] = ho, bh[g][m] = hb;  // 区画が分類の全部を持てる
       else region_solve(C * m / P, 1, &oh[g][m], &bh[g][m], ck);
     ONLY = -1;
+  }
+  if (nat) {  /* 自然な配分（共有の Region LRU の取り分 nat[g]）が、ある w の目的 BHR + w·OHR の KKT 点かを調べる：
+               * 分類ごとの限界値 μ_g(w) = d(bh + w·oh)/dC（曲線の中心差分）が全部等しくなる w があるか。
+               * K = 2 では方程式 1 本・未知数 1 個で、ふつう解がある。K ≥ 3 では K−1 本に 1 個で、ふつう無い */
+    double bw = 0, bs = INFINITY, mu[KMAX], mo[KMAX], mb[KMAX];
+    for (int g = 0; g < ng; g++) {
+      int j = (int)fmin(P - 1, fmax(1, round(nat[g] / C * P)));
+      mo[g] = (oh[g][j + 1] - oh[g][j - 1]) / 2, mb[g] = (bh[g][j + 1] - bh[g][j - 1]) / 2;
+    }
+    for (int s = 0; s <= 400; s++) {  // w = 0 と 10^-3 〜 10^5
+      double w = s ? pow(10, -3 + 8.0 * (s - 1) / 399) : 0, lo = INFINITY, hi = -INFINITY, sm = 0;
+      for (int g = 0; g < ng; g++) mu[g] = mb[g] + w * mo[g], lo = fmin(lo, mu[g]), hi = fmax(hi, mu[g]), sm += mu[g] / ng;
+      if (sm > 0 && (hi - lo) / sm < bs) bs = (hi - lo) / sm, bw = w;
+    }
+    printf("  kkt[%d]    w*=%.4g spread=%.3f mu(w*)=", v, bw, bs);
+    for (int g = 0; g < ng; g++) printf("%.4g%s", mb[g] + bw * mo[g], g < ng - 1 ? "," : "\n");
   }
   const char *nm[3] = {"rpartO", "rpartJ", "rpartB"};
   const double wa[3] = {0, 1, 1}, wb[3] = {1, 0.1, 0};
@@ -354,22 +422,28 @@ static void rpart(double C, int ng, int v) {
     for (int g = ng - 1, r = P; g >= 0; r -= m[g], g--) m[g] = ch[g][r], so += oh[g][m[g]], sb += bh[g][m[g]];
     char t[32];
     snprintf(t, sizeof t, "%s[%d]", nm[o], v);
-    printf("  %-9s ohr=%.4f bhr=%.4f Cg=", t, so, sb);
+    printf("  %-9s ohr=%.4f bhr=%.4f Cg=", t, so + DOH, sb + DBH);
     for (int g = 0; g < ng; g++) printf("%.0f%s", C * m[g] / P, g < ng - 1 ? "," : "");
     printf("\n");
   }
 }
+/* DRAM（-D：容量 = SSD の容量 × 比）。inclusion=cachelib：どの要求の後もコンテンツは DRAM に入る（ミスは挿入、
+ * SSD ヒットは昇格）ので、DRAM は SSD に依らない Che の LRU（特性時間 TD）で、DRAM ヒットは 1 − e^{−λ TD}。
+ * SSD に届くのは DRAM ミスだけで、その率は a = λ e^{−λ TD}。SSD 側のモデル（Region の touch・挿入・在籍）は
+ * λ を a に置き換えてそのまま解き、各行の ohr / bhr に DRAM のヒット DOH / DBH を足す（DK：分類ごと） */
+static double DRAMF, TD, *LAM0;
 static void put_hk(const char *nm, double o, double b, double T, const double *ck, double C, const double *sh) {
-  printf("  %-9s ohr=%.4f bhr=%.4f T=%.0f Ck=", nm, o, b, T);
+  printf("  %-9s ohr=%.4f bhr=%.4f T=%.0f Ck=", nm, o + DOH, b + DBH, T);
   for (int k = 0; k < K; k++) printf("%.4f%s", ck[k] / C, k < K - 1 ? "," : "");
   printf(" hk=");
   for (int k = 0; k < K; k++) {
-    double a = 0;
+    double a = DK[k];
     for (int i = 0; i < NB; i++) if (B[i].k == k) a += B[i].c * B[i].lam * pres[i];
     printf("%.4f%s", a / sh[k], k < K - 1 ? "," : "");
   }
   if (CV < 0 && !strncmp(nm, "rlru", 4)) printf(" cv=%.4f", CVLAST);
   if (HOR > 0 && !strncmp(nm, "rlru", 4)) printf(" pinned=%d", NPIN);
+  if (DRAMF > 0) printf(" TD=%.0f dram_ohr=%.4f", TD, DOH);
   printf("\n");
 }
 
@@ -377,6 +451,10 @@ int main(int argc, char **argv) {
   double fr[16] = {0.05, 0.1, 0.2, 0.3}, Rarg = 0, sh[KMAX], al[KMAX], tot = 0;
   int nf = 4, ngr = 2, grs[3][KMAX];
   uint64_t no[KMAX];
+  if (getenv("DAMP")) DAMP = atof(getenv("DAMP"));
+  if (getenv("ITMAX")) ITMAX = atoi(getenv("ITMAX"));
+  FIXDAMP = getenv("FIXDAMP") != NULL;
+  CSCAP = getenv("CSCAP") != NULL, DISC = OPENR = getenv("OLDR") == NULL;  // OLDR=1：11-17 以前の連続の Che（追い出しの離散性・書き込み中の枠なし）
   MF = getenv("MF") != NULL, NOU = getenv("NOU") != NULL, TFIX = getenv("TFIX") ? atof(getenv("TFIX")) : 0;
   for (int a = 1; a < argc; a++) {
     if (!strcmp(argv[a], "-R")) Rarg = parse_size(argv[++a]);
@@ -384,6 +462,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[a], "-c")) CV = strcmp(argv[++a], "auto") ? atof(argv[a]) : -1;
     else if (!strcmp(argv[a], "-H")) HOR = atof(argv[++a]);
     else if (!strcmp(argv[a], "-P")) P = atoi(argv[++a]) > 200 ? 200 : atoi(argv[a]);  // 0 = 静的分割を解かない
+    else if (!strcmp(argv[a], "-D")) DRAMF = atof(argv[++a]);  // DRAM の容量 ÷ SSD の容量
     else if (!strcmp(argv[a], "-f")) { nf = 0; for (char *t = strtok(argv[++a], ","); t; t = strtok(NULL, ",")) fr[nf++] = atof(t); }
     else if (!strcmp(argv[a], "-g")) { int k = 0; for (char *t = strtok(argv[++a], ","); t; t = strtok(NULL, ",")) grs[2][k++] = atoi(t); ngr = 3; }
     else { char *p = argv[a]; SZ[K] = parse_size(strtok(p, ":")); no[K] = strtoull(strtok(NULL, ":"), NULL, 10);
@@ -408,10 +487,35 @@ int main(int argc, char **argv) {
   uint64_t z = 12345;
   for (int i = 0; i < S * 4096; i++) z = z * 6364136223846793005ull + 1442695040888963407ull, U[i] = (z >> 11) * 0x1.0p-53;
   printf("# footprint %.0f  bins %d\n", FP, NB);
+  LAM0 = malloc(NB * sizeof(double));
+  for (int i = 0; i < NB; i++) LAM0[i] = B[i].lam;
   for (int f = 0; f < nf; f++) {
     double C = FP * fr[f], H, BH, ck[KMAX], o, b, T;
     R = Rarg ? Rarg : C / 256;
     printf("f=%.3f C=%.0f R=%.0f\n", fr[f], C, R);
+    if (getenv("SCAN")) {  // 診断 SCAN=T1,T2,..：クラスごとの分類で、T を固定して初期値 NST 通りから内側の不動点を解く
+      int nst = getenv("NST") ? atoi(getenv("NST")) : 6;
+      for (int k = 0; k < K; k++) GR[k] = k;
+      char buf[4096]; strncpy(buf, getenv("SCAN"), sizeof buf - 1);
+      for (char *t = strtok(buf, ","); t; t = strtok(NULL, ","))
+        for (INIT = -1; INIT < nst; INIT++) {
+          double occ = region(atof(t), 1, &o, &b, ck);
+          printf("  scan T=%s init=%d occ/C=%.4f ohr=%.4f bhr=%.4f it=%d res=%.1e Ck/C=", t, INIT, occ / C, o, b, ITS, RES);
+          for (int k = 0; k < K; k++) printf("%.4f%s", ck[k] / C, k < K - 1 ? "," : "\n");
+        }
+      INIT = -1;
+      continue;
+    }
+    if (DRAMF > 0) {  // DRAM を解き、SSD に届く率 a = λ e^{−λ TD} に置き換える
+      for (int i = 0; i < NB; i++) B[i].lam = LAM0[i];
+      TD = bisect(-10, 40, -1, C * DRAMF, 0, 0);
+      DOH = DBH = 0, memset(DK, 0, sizeof DK);
+      for (int i = 0; i < NB; i++) {
+        double e = exp(-LAM0[i] * TD), x = B[i].c * LAM0[i] * (1 - e);
+        DOH += x, DBH += x * B[i].s / TB, DK[B[i].k] += x, B[i].lam = fmax(LAM0[i] * e, 1e-300);  // 熱い物は a → 0（log を避ける）
+      }
+      printf("  dram      ohr=%.4f bhr=%.4f TD=%.0f C_D=%.0f\n", DOH, DBH, TD, C * DRAMF);
+    }
     T = bisect(-10, 40, -1, C, 0, 0);
     che(T, -1, &H, &BH, 0, 0, 0);
     for (int i = 0; i < NB; i++) pres[i] = 1 - exp(-B[i].lam * T);
@@ -426,7 +530,7 @@ int main(int argc, char **argv) {
       double left = C, h = 0, bh = 0;
       for (int j = 0; j < NB && left > 0; j++) { bin_t *q = &B[ix[j]]; double t = fmin(1, left / (q->c * q->s));
         h += t * q->c * q->lam, bh += t * q->c * q->lam * q->s, left -= t * q->c * q->s; }
-      printf("  opt       ohr=%.4f bhr=%.4f\n", h, bh / TB);
+      printf("  opt       ohr=%.4f bhr=%.4f\n", h + DOH, bh / TB + DBH);
       free(ix);
     }
     T = region_solve(C, 0, &o, &b, ck);
@@ -438,14 +542,18 @@ int main(int argc, char **argv) {
         double Cg[KMAX];
         part(C, byte, ng, Cg, &o, &b);
         snprintf(nm, sizeof nm, "%s[%d]", byte ? "partB" : "part", v);
-        printf("  %-9s ohr=%.4f bhr=%.4f Cg=", nm, o, b);
+        printf("  %-9s ohr=%.4f bhr=%.4f Cg=", nm, o + DOH, b + DBH);
         for (int g = 0; g < ng; g++) printf("%.0f%s", Cg[g], g < ng - 1 ? "," : "");
         printf("\n");
       }
       T = region_solve(C, 1, &o, &b, ck);
       snprintf(nm, sizeof nm, "rlru[%d]", v);
       put_hk(nm, o, b, T, ck, C, sh);
-      if (v && P > 0) rpart(C, ng, v);
+      if (v && P > 0) {
+        double nat[KMAX] = {0};  // 自然な配分を分類（グループ）ごとに
+        for (int k = 0; k < K; k++) nat[GR[k]] += ck[k];
+        rpart(C, ng, v, nat);
+      }
     }
     fflush(stdout);
   }

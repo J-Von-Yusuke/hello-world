@@ -29,17 +29,17 @@ for src in (P, f"{P}/ext", D):
     for f in sorted(glob.glob(f"{src}/*.json")):
         d = json.load(open(f))
         if isinstance(d, dict) and "runs" in d: runs.setdefault(d["name"], {}).update(d["runs"])
-names = sorted(n for n, R in runs.items() if any(f"ru_auto{s}" in R and f"r256_base{s}" in R for s, _, _ in COND[1:]))
+names = sorted(n for n, R in runs.items() if any(f"{q}{s}" in R and f"r256_base{s}" in R for s, _, _ in COND[1:] for q in ("ru_auto", "ru_auto_w0")))
 if not names: sys.exit(f"{D} に頑健性の結果が無い（./run.sh paper-robust がまだ）")
 
 BMR = lambda r: 100 * r["bmr"]
 WR = lambda r: r["write"] * r["req_bytes"]
 
 
-def diffs(base):  # {条件: ([ΔBMR], [書込比])}（トレース順、2 本以上なら最後に平均）
+def diffs(base, prop):  # {条件: ([ΔBMR], [書込比])}（トレース順、2 本以上なら最後に平均）。prop = 提案の構成名（条件なしの名前）
     out = {}
     for suf, lab, col in COND:
-        b, p = f"{base}{suf}", f"ru_auto{suf}"
+        b, p = f"{base}{suf}", f"{prop}{suf}"
         db = [BMR(runs[n][p]) - BMR(runs[n][b]) if p in runs[n] and b in runs[n] else None for n in names]
         wr = [WR(runs[n][p]) / WR(runs[n][b]) if p in runs[n] and b in runs[n] and WR(runs[n][b]) else None for n in names]
         if all(x is None for x in db): continue
@@ -50,14 +50,15 @@ def diffs(base):  # {条件: ([ΔBMR], [書込比])}（トレース順、2 本�
     return out
 
 
-def fig(base, title_ref):
-    dd = diffs(base)
+def fig(base, title_ref, prop):
+    dd = diffs(base, prop)
     if not dd: return None, dd
     cats = names + ([T("平均", "Mean")] if len(names) > 1 else [])
     f = Fig(); f.add_legend([(lab, col, "box") for suf, lab, col in COND if suf in dd])
     top = f.legend_h() + 50
     a1 = Ax(f, (130, top, 770, 760), yr=span([x for v in dd.values() for x in v[0] if x is not None]), cats=cats,
-            ylabel=T("ΔBMR [pt]（下 = 良い）", "ΔBMR [pt] (lower is better)"), title=T(f"ΔBMR（提案 − {title_ref}）", f"ΔBMR (proposal − {title_ref})"))
+            ylabel=T("ΔBMR [pt]（下 = 良い）", "ΔBMR [pt] (lower is better)"), title=T(f"ΔBMR（提案{'・BHR のみ' if prop.endswith('w0') else ''} − {title_ref}）",
+                                                                                f"ΔBMR (proposal{', BHR only' if prop.endswith('w0') else ''} − {title_ref})"))
     a1.bars([(lab, col, dd[suf][0], None) for suf, lab, col in COND if suf in dd], d=2)
     hi = max([x for v in dd.values() for x in v[1] if x is not None] + [1])
     a2 = Ax(f, (920, top, 1560, 760), yr=(0, hi * 1.1), cats=cats,
@@ -68,22 +69,25 @@ def fig(base, title_ref):
 
 
 rows, made = [], []
-for base, ref, slug in (("r256_base", T("CacheLib n=1", "CacheLib n=1"), "fig_robust"), ("r256_n3", T("CacheLib n=3", "CacheLib n=3"), "fig_robust_n3")):
-    svg, dd = fig(base, ref)
+# 提案 2 通り：ru_auto（目的 BHR + 0.1·OHR）→ fig_robust*、ru_auto_w0（BHR だけ）→ fig_robust*_w0
+for prop, ps in (("ru_auto", ""), ("ru_auto_w0", "_w0")):
+  for base, ref, slug in (("r256_base", T("CacheLib n=1", "CacheLib n=1"), "fig_robust" + ps), ("r256_n3", T("CacheLib n=3", "CacheLib n=3"), "fig_robust_n3" + ps)):
+    svg, dd = fig(base, ref, prop)
     if not svg: continue
     open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(svg); made.append(slug)
     for suf, lab, _ in COND:
         if suf not in dd: continue
         for i, n in enumerate(names):
-            rows.append(dict(reference=base, condition=lab, trace=n, d_bmr_pt=dd[suf][0][i], write_ratio=dd[suf][1][i]))
+            rows.append(dict(proposal=prop, reference=base, condition=lab, trace=n, d_bmr_pt=dd[suf][0][i], write_ratio=dd[suf][1][i]))
 with open(f"{D}/table_robust.csv", "w", newline="", encoding="utf-8") as f:
-    w = csv.DictWriter(f, ["reference", "condition", "trace", "d_bmr_pt", "write_ratio"]); w.writeheader(); w.writerows(rows)
-md = [f"| {T('比べる相手', 'Reference')} | {T('条件', 'Condition')} | " + " | ".join(names) + " |", "|---|---|" + "---|" * len(names)]
-for base in ("r256_base", "r256_n3"):
+    w = csv.DictWriter(f, ["proposal", "reference", "condition", "trace", "d_bmr_pt", "write_ratio"]); w.writeheader(); w.writerows(rows)
+md = [f"| {T('提案', 'Proposal')} | {T('比べる相手', 'Reference')} | {T('条件', 'Condition')} | " + " | ".join(names) + " |", "|---|---|---|" + "---|" * len(names)]
+for prop in ("ru_auto", "ru_auto_w0"):
+  for base in ("r256_base", "r256_n3"):
     for _, lab, _ in COND:
-        rs = {r["trace"]: r for r in rows if r["reference"] == base and r["condition"] == lab}
+        rs = {r["trace"]: r for r in rows if r["proposal"] == prop and r["reference"] == base and r["condition"] == lab}
         if rs:
-            md.append(f"| {base} | {lab} | " + " | ".join(
+            md.append(f"| {prop} | {base} | {lab} | " + " | ".join(
                 "–" if n not in rs or rs[n]["d_bmr_pt"] is None else f"{rs[n]['d_bmr_pt']:+.3f} / {rs[n]['write_ratio']:.3f}" for n in names) + " |")
 open(f"{D}/table_robust.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
     "各セル = ΔBMR [pt]（提案 − 比べる相手、負 = 良い）/ 書き込みの比（提案 ÷ 比べる相手、1 未満 = 良い）。\n",

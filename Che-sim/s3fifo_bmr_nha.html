@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S3-FIFO と BMR</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6577;--card:#f4f6fa;--line:#d5dbe6;--a:#2b6cb0;--b:#c05621;--g:#2f855a;--r:#c53030;--p:#6b46c1;--abg:#edf4fb;--gbg:#eef8f2;--bbg:#fdf4ec;--rbg:#fcf0f0;--pbg:#f4f0fc}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;--abg:#172230;--gbg:#17261e;--bbg:#2a2017;--rbg:#2b1a1c;--pbg:#211b2e}}
+:root[data-theme="dark"]{--bg:#14171d;--fg:#e6e9ef;--mut:#9aa4b5;--card:#1d222b;--line:#2f3744;--a:#63b3ed;--b:#f6ad55;--g:#68d391;--r:#fc8181;--p:#b794f4;--abg:#172230;--gbg:#17261e;--bbg:#2a2017;--rbg:#2b1a1c;--pbg:#211b2e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15.5px/1.85 system-ui,"Hiragino Sans","Yu Gothic UI","Yu Gothic",sans-serif}
+main{max-width:940px;margin:0 auto;padding:24px 16px 96px}
+h1{font-size:24px;line-height:1.4;margin:0 0 6px}h2{font-size:20px;margin:48px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--line)}h3{font-size:16.5px;margin:26px 0 8px}
+a{color:var(--a)}.sub{color:var(--mut);margin:0 0 16px;font-size:14px}
+.key{border-left:5px solid var(--a);background:var(--abg);border-radius:8px;padding:10px 16px;margin:12px 0}
+.box{border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:14px 0;overflow-x:auto}
+.ok{border-left:5px solid var(--g);background:var(--gbg)}.warn{border-left:5px solid var(--b);background:var(--bbg)}.bad{border-left:5px solid var(--r);background:var(--rbg)}
+.box>b:first-child{display:block;margin-bottom:2px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:8px 0}th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mut);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}.tbl{overflow-x:auto}
+code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:13px;word-break:break-all}
+svg{max-width:100%;height:auto;display:block;margin:8px auto}svg text{fill:var(--fg);font-size:13px;font-family:inherit}
+.mut{color:var(--mut)}.small{font-size:13.5px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px}
+.lg{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px;margin:4px 0}.lg span::before{content:"";display:inline-block;width:18px;height:3px;margin:0 6px 4px 0;vertical-align:middle;background:var(--c)}
+</style>
+</head>
+<body>
+<main>
+<h1>S3-FIFO は Meta CDN（nha）のバイトミス率を悪くするか</h1>
+<p class="sub">2026-11-19。libCacheSim の S3FIFO（S3-FIFO の作者による実装）を 1 段のキャッシュとして、LRU・FIFO と同じリクエスト列で比べた。トレースは nha 全量（サイズ 2<sup>32</sup>−1 の行を除いた 9,584 万リクエスト、のべ容量 約 20 TB）。道具は <code>tools/synth/size_mr.c</code>（コンテンツの大きさ別にヒットとミスを数える）と <code>nha_s3fifo.sh</code>、結果は <code>tools/synth/results/nha_s3fifo.json</code>。</p>
+
+<div class="key"><b>一言</b>　nha では、S3-FIFO は <b>BMR ではなく OHR を悪くする</b>。64 GiB 以上の 4 つの容量すべてで、LRU より <b>OHR は 0.95〜1.44pt 低く、BMR は 0.15〜0.24pt 良い</b>。BMR が悪くなるのは最も小さい 16 GiB（+1.1pt）だけで、その原因は名簿の道ではなく「小の列より大きいコンテンツは置かない」という実装の決まり。</div>
+
+<h2 id="s1">1. S3-FIFO の動き</h2>
+<p>キャッシュを 3 つに分ける。<b>小の列</b>（容量の 10%）、<b>主の列</b>（90%）、<b>名簿</b>（中身は持たず名前だけ。容量の 90% 分のコンテンツの名前）。</p>
+<svg viewBox="0 0 900 350" role="img" aria-label="S3-FIFO の 3 つの列とコンテンツの流れ">
+ <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--mut)"/></marker>
+ <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--r)"/></marker></defs>
+ <g fill="var(--card)" stroke="var(--line)">
+  <rect x="10" y="110" width="160" height="70" rx="8"/>
+  <rect x="280" y="30" width="210" height="70" rx="8"/>
+  <rect x="650" y="30" width="230" height="70" rx="8"/>
+  <rect x="280" y="225" width="210" height="66" rx="8"/>
+ </g>
+ <rect x="650" y="225" width="230" height="66" rx="8" fill="var(--rbg)" stroke="var(--r)"/>
+ <g text-anchor="middle">
+  <text x="90" y="140">ミスしたコンテンツ</text><text x="90" y="162" font-size="12">（取り寄せて置く）</text>
+  <text x="385" y="58" font-weight="600">小の列（10%）</text><text x="385" y="80" font-size="12">来た順に並べ、古い方から押し出す</text>
+  <text x="765" y="58" font-weight="600">主の列（90%）</text><text x="765" y="80" font-size="12">当たっていたら 1 周見逃す（時計）</text>
+  <text x="385" y="253" font-weight="600">名簿（名前だけ）</text><text x="385" y="275" font-size="12">90% 分。古い名前から消える</text>
+  <text x="765" y="253" font-weight="600" fill="var(--r)">置かない</text><text x="765" y="275" font-size="12">小の列より大きいコンテンツ</text>
+ </g>
+ <g stroke="var(--mut)" stroke-width="1.6" fill="none" marker-end="url(#ar)">
+  <path d="M170,125 L278,75"/>
+  <path d="M490,65 L648,65"/>
+  <path d="M385,100 L385,223"/>
+  <path d="M170,160 C 300,215 600,215 720,102"/>
+ </g>
+ <path d="M60,180 C 60,335 520,335 648,262" stroke="var(--r)" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+ <path d="M280,258 C 220,258 170,230 150,184" stroke="var(--r)" stroke-width="1.6" stroke-dasharray="5 4" fill="none" marker-end="url(#arr)"/>
+ <g font-size="12">
+  <text x="186" y="88">名簿に無い</text>
+  <text x="570" y="52" text-anchor="middle">小にいる間に</text><text x="570" y="86" text-anchor="middle">2 回以上当たった</text>
+  <text x="395" y="140">当たり 1 回以下：中身は捨て、</text>
+  <text x="395" y="158">名前だけ名簿へ</text>
+  <text x="604" y="196">名簿に有る → 主へ直接</text>
+  <text x="172" y="222" fill="var(--r)">また来る → ミス</text>
+  <text x="430" y="342" fill="var(--r)" text-anchor="middle">小の列より大きい → 置かない（毎回ミス）</text>
+ </g>
+</svg>
+<p class="small">「2 回以上」は libCacheSim の既定（<code>move-to-main-threshold=2</code>。小に入った後のヒットを数える）。条件の強さで結論が変わらないかを見るため、<b>1 回</b>（<code>=1</code>）でも測った。「小の列より大きいコンテンツは置かない」も libCacheSim の実装の決まり（<code>S3FIFO_can_insert</code>）。</p>
+<div class="box warn"><b>バイトを失う道は 2 つ</b>
+① <b>名簿の道</b>：小の列で 2 回当たらずに押し出されたコンテンツは、次に来たとき必ずミスする（LRU なら、まだキャッシュにいて当たったかもしれない）。<br>
+② <b>大きすぎる道</b>：小の列（容量の 10%）より大きいコンテンツは一度も置かれず、毎回ミスする。容量が小さいほど起きる。</div>
+
+<h2 id="s2">2. 結果：LRU との差</h2>
+<div class="lg"><span style="--c:var(--mut)">FIFO</span><span style="--c:var(--r)">S3-FIFO（既定：2 回）</span><span style="--c:var(--b)">S3-FIFO（1 回）</span><span style="--c:var(--a)">LRU（0 の線）</span></div>
+<div class="two"><svg id="cB"></svg><svg id="cO"></svg></div>
+<div class="tbl"><table id="tAll"></table></div>
+<ul>
+<li><b>BMR</b>：S3-FIFO が LRU より悪いのは 16 GiB だけ（+1.09pt）。64 GiB〜2 TiB では 0.15〜0.24pt 良い（ミスバイトが 4〜5% 減る）。素の FIFO より 0.4〜0.5pt 良い。</li>
+<li><b>OHR</b>：どの容量でも LRU より 0.95〜1.44pt 低い。2 TiB 以外では素の FIFO よりも低い。</li>
+<li>小の列から主の列へ移す条件を「2 回」から「1 回」にしても、BMR は 0.05pt、OHR は 0.16pt しか変わらない。</li>
+<li>248 GiB での 4 つの値は、cachesim を直接動かした結果と一致した（OHR・BMR とも表示桁まで）。</li>
+</ul>
+
+<h2 id="s3">3. どの大きさのコンテンツで差がつくか</h2>
+<p>LRU との BMR の差（pt）を、コンテンツの大きさで 5 つに分けて足し合わせた内訳（各行の合計が上の表の差になる）。赤 = S3-FIFO の方がバイトを多く失う、緑 = 少ない。</p>
+<div class="tbl"><table id="tShare"></table></div>
+<h3>S3-FIFO（既定：2 回）</h3>
+<div class="tbl"><table id="hS3"></table></div>
+<h3>S3-FIFO（既定）：ミスの「回数」の差の内訳（OHR 側。全リクエスト数に対する pt、合計 = OHR の差の符号を逆にしたもの）</h3>
+<div class="tbl"><table id="nS3"></table></div>
+<h3>S3-FIFO（1 回）</h3>
+<div class="tbl"><table id="hS31"></table></div>
+<h3>（比べる用）FIFO</h3>
+<div class="tbl"><table id="hF"></table></div>
+<h3>S3-FIFO（既定）のミスのうち、2 つの道によるもの（全リクエストバイトに対する pt）</h3>
+<div class="tbl"><table id="kS3"></table></div>
+<h2 id="s4">4. なぜ BMR ではなく OHR が悪くなるのか</h2>
+<h3>前提：nha のコンテンツは「数は小さいもの、バイトは大きいもの」</h3>
+<p>上の割合の表のとおり、リクエストの 72% は 256 KiB 未満の小さいコンテンツだが、そのバイトは全体の 0.4% しかない。逆に 4 MiB 以上のコンテンツはリクエストの 13% で、バイトの 98% を占める。しかも大きいコンテンツはとても人気がある：248 GiB の LRU で、64 MiB 以上のコンテンツのバイトのミス率は 1.7%、16 KiB 未満は 77%。</p>
+<h3>仕組み：小の列は「全員に同じ短い試験」</h3>
+<p>小の列は容量の 10% で、来た順に押し出される。だからどのコンテンツも、小の列にいられる時間はほぼ同じで、LRU でキャッシュにいられる時間のおよそ 10 分の 1 しかない（どちらも、後から入ってくるバイトの量で決まるため）。その短い間に 2 回当たったコンテンツだけが主の列に残れる。</p>
+<svg viewBox="0 0 900 290" role="img" aria-label="小の列の試験と 3 種類のコンテンツ">
+ <rect x="170" y="38" width="70" height="232" fill="var(--abg)"/>
+ <line x1="170" y1="38" x2="860" y2="38" stroke="var(--mut)"/>
+ <g font-size="12" text-anchor="middle"><text x="205" y="30">小の列にいる間</text><text x="860" y="30" text-anchor="end">LRU ならここまでキャッシュにいる</text></g>
+ <line x1="860" y1="34" x2="860" y2="270" stroke="var(--line)" stroke-dasharray="4 4"/>
+ <g font-size="13"><text x="8" y="92" font-weight="600">大・人気</text><text x="8" y="162" font-weight="600">大・1 回きり</text><text x="8" y="232" font-weight="600">小・しばらくして再来</text></g>
+ <g fill="var(--g)"><circle cx="176" cy="88" r="6"/><circle cx="198" cy="88" r="6"/><circle cx="222" cy="88" r="6"/><circle cx="320" cy="88" r="6"/><circle cx="450" cy="88" r="6"/><circle cx="600" cy="88" r="6"/><circle cx="760" cy="88" r="6"/></g>
+ <text x="300" y="72" font-size="12">試験中に 2 回当たる → 主の列で当たり続ける</text>
+ <circle cx="176" cy="158" r="6" fill="var(--mut)"/>
+ <rect x="240" y="152" width="620" height="12" fill="var(--line)" opacity="0.6"/>
+ <text x="250" y="148" font-size="12">試験後に捨てる。LRU ならこの灰色の間ずっと場所をとる → そのバイトが空く</text>
+ <circle cx="176" cy="228" r="6" fill="var(--mut)"/>
+ <circle cx="500" cy="228" r="7" fill="none" stroke="var(--r)" stroke-width="3"/>
+ <text x="250" y="216" font-size="12">試験後に捨てる（名前だけ名簿へ）</text>
+ <text x="512" y="232" font-size="12" fill="var(--r)">また来る → S3-FIFO はミス（LRU なら当たり）</text>
+ <text x="512" y="252" font-size="12" class="mut">その後は主の列へ</text>
+</svg>
+<ul>
+<li><b>大きいコンテンツ</b>：人気のものは試験中に当たって残り、1 回きりのものは試験の後すぐ捨てられる。1 回きりの大きいコンテンツが LRU のように場所を長くとらないので、空いたバイトで人気の大きいコンテンツがよく当たる。248 GiB で 64 MiB 以上のバイトのミス率は 1.71% → 1.44%、4 MiB 以上の分だけで BMR が 0.23pt 下がる。</li>
+<li><b>小さいコンテンツ</b>：再来するものでも、短い試験の後に来ることが多いので捨てられ、次のリクエストでミスする。LRU なら小さいので場所もとらず当たっていた。248 GiB で、256 KiB 未満のコンテンツだけでミスが全リクエストの 1.53pt 分増え、これだけで OHR の差（−1.44pt）を説明しきる（256 KiB 以上はわずかにミスが減る）。小さいコンテンツはバイトがわずかなので BMR はほぼ動かない。</li>
+<li>つまり nha の S3-FIFO は、<b>小さいコンテンツのヒット（回数）を払って、大きいコンテンツのバイトを守っている</b>。「OHR が良く BMR が悪い」の逆になる。</li>
+</ul>
+<h3>例外：16 GiB で BMR が悪くなるのは「大きすぎる道」</h3>
+<p>16 GiB では小の列が 1.6 GiB しかなく、nha にはそれより大きいコンテンツ（最大 1.98 GiB）がある。これらは一度も置かれず毎回ミスし、それだけで BMR が 1.13pt 上がる（差 +1.09pt のすべて）。名簿の道のミスは 0.57pt 分あるが、LRU との差としては他の得と打ち消し合っている。64 GiB 以上では小の列が 6.4 GiB 以上になり、この道は起きない。</p>
+
+<h2 id="s5">5. 論文の書き方への示唆</h2>
+<div class="box warn"><b>「S3-FIFO は CDN で BMR を悪くする」は、nha では成り立たない</b>
+nha で言えるのは逆で、<b>実際の大きさを入れると S3-FIFO の OHR の得が消える</b>（64 GiB〜2 TiB で LRU より 0.95〜1.44pt 低い）。BMR はわずかに良くなる。BMR が悪くなるのは容量がのべ容量の 0.1% 程度と小さく、小の列に入らないほど大きいコンテンツがあるときで、それは名簿の仕組みではなく実装の決まりによる。<br>
+批判として書くなら、「S3-FIFO の主な評価は大きさを無視した OHR で、実際の大きさでは OHR と BMR の損得が入れ替わり得る（nha では OHR が LRU より悪化）」の方が数字で支えられる。</div>
+<p><b>flash の 2 段との関係</b>：DRAM を小の列の代わりにした受け入れの篩（<code>admit=dram:min=1/ghost=0.9</code>）でも、nha では OHR −2.9pt・BMR +0.02pt と、損は OHR に出た。向きは 1 段の S3-FIFO と同じ。</p>
+<p><b>研究との関係（見立て、未検証）</b>：損の正体は「大きさの違うコンテンツに同じ長さの試験を課すこと」。小と大で試験の列を分ければ（大きさで分類）、小さいコンテンツへの課税を避けられる可能性がある。</p>
+
+<h2 id="s6">6. 注意</h2>
+<ul class="small">
+<li>トレースは nha の 1 本だけ。大きいコンテンツが人気でないトレースでは、大きいコンテンツの試験落ちが増え、BMR の向きが変わり得る。</li>
+<li>S3-FIFO は libCacheSim の現行版（小の列が満ちてもキャッシュ全体に空きがあるうちは主の列へ入れる版。<code>S3FIFO.c</code> 冒頭の説明）。元の版（<code>S3FIFOv0</code>）は測っていない。</li>
+<li>容量 16 GiB〜2 TiB は、のべ容量（約 20 TB）の 0.09〜11%。立ち上がり（空のキャッシュから）も含めて数えた（全方式同じ条件）。</li>
+<li>「名簿の道のミス」は、ミスした時点でそのコンテンツの名前が名簿にあったもの。そのうち LRU でも外れていたものも含むので、LRU との差そのものではない（差は §3 の内訳表）。</li>
+</ul>
+
+<script id="data" type="application/json">{"sizes":[17179869184,68719476736,266287972352,1099511627776,2199023255552],"labels":["16 GiB","64 GiB","248 GiB","1 TiB","2 TiB"],"algs":["lru","fifo","s3fifo","s3fifo_t1"],"classes":["16 KiB 未満","16〜256 KiB","256 KiB〜4 MiB","4〜64 MiB","64 MiB 以上"],"req_n":95841463,"req_b":886625145980781,"share_req":[30.0219,41.9644,15.0629,11.2764,1.6743],"share_b":[0.0206,0.3525,2.039,37.8572,59.7307],"ohr":{"lru":[31.1504,34.6475,39.6114,46.2445,50.3725],"fifo":[30.8712,34.2029,38.8714,45.2873,49.1388],"s3fifo":[29.8038,33.5809,38.1744,44.8485,49.419],"s3fifo_t1":[29.914,33.5358,38.1639,44.8065,49.2584]},"bmr":{"lru":[6.5116,5.5639,4.539,3.5321,3.0792],"fifo":[7.1923,5.8301,4.7791,3.7677,3.3056],"s3fifo":[7.605,5.3332,4.3033,3.3627,2.9308],"s3fifo_t1":[7.5546,5.3634,4.3278,3.374,2.9356]},"dB":{"fifo":[[0.0,0.0007,0.0094,0.136,0.5347],[0.0001,0.0013,0.011,0.0906,0.1633],[0.0001,0.0024,0.0188,0.1074,0.1114],[0.0002,0.0034,0.0223,0.0934,0.1163],[0.0003,0.0043,0.0225,0.0953,0.104]],"s3fifo":[[0.0002,0.0068,0.0543,-0.0007,1.0328],[0.0003,0.0062,0.0061,-0.119,-0.1243],[0.0004,0.0069,-0.0127,-0.0655,-0.1649],[0.0004,0.006,-0.0133,-0.0382,-0.1244],[0.0003,0.0048,-0.0205,-0.0318,-0.1013]],"s3fifo_t1":[[0.0002,0.0063,0.0407,0.0005,0.9954],[0.0003,0.0059,0.0043,-0.1003,-0.1107],[0.0004,0.0065,-0.0109,-0.071,-0.1363],[0.0004,0.0057,-0.0125,-0.049,-0.1027],[0.0004,0.0048,-0.0177,-0.0412,-0.09]]},"dN":{"fifo":[[0.0697,0.0701,0.0685,0.0535,0.0175],[0.1826,0.1357,0.081,0.0398,0.0055],[0.2547,0.2944,0.1321,0.0548,0.004],[0.3098,0.4308,0.1559,0.0564,0.0042],[0.4023,0.6024,0.1585,0.0668,0.0038]],"s3fifo":[[0.2319,0.6729,0.3973,0.04,0.0046],[0.2391,0.7901,0.0851,-0.0431,-0.0045],[0.5246,1.0001,-0.0291,-0.0524,-0.0062],[0.6187,0.8283,-0.008,-0.0387,-0.0044],[0.4295,0.6236,-0.0479,-0.0482,-0.0034]],"s3fifo_t1":[[0.254,0.6313,0.3195,0.0284,0.0032],[0.3004,0.7776,0.0702,-0.0325,-0.004],[0.5528,0.972,-0.0255,-0.0464,-0.0052],[0.6612,0.8291,-0.0152,-0.0335,-0.0037],[0.5273,0.6637,-0.0396,-0.0343,-0.003]]},"ghost":{"s3fifo":[[0.0004,0.0124,0.0878,0.2466,0.2255],[0.0006,0.0141,0.0525,0.1774,0.1081],[0.001,0.0172,0.0457,0.1725,0.0903],[0.0012,0.0193,0.0483,0.1832,0.0602],[0.0014,0.0207,0.0491,0.1786,0.0439]],"s3fifo_t1":[[0.0005,0.0129,0.0727,0.2045,0.1585],[0.0008,0.0151,0.0471,0.1455,0.0855],[0.0011,0.018,0.0409,0.135,0.0771],[0.0014,0.0208,0.0426,0.1493,0.0503],[0.0016,0.0224,0.0425,0.1229,0.0347]]},"big":{"s3fifo":[[0.0,0.0,0.0,0.0,1.126],[0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0]],"s3fifo_t1":[[0.0,0.0,0.0,0.0,1.126],[0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,0.0]]},"hs":{"s3fifo":[[0.0022,0.0469,0.6945,19.1852,15.1224],[0.0024,0.0539,0.7798,21.4154,16.2667],[0.0027,0.0608,0.7523,21.5121,16.684],[0.0032,0.0703,0.6796,23.3569,19.8047],[0.0033,0.0712,0.6366,25.1762,22.0456]],"s3fifo_t1":[[0.0022,0.0469,0.699,19.5914,16.0393],[0.0024,0.0539,0.7892,21.8758,16.7336],[0.0027,0.0609,0.7649,21.7484,17.3981],[0.0032,0.0704,0.6949,23.4593,20.6404],[0.0033,0.0712,0.6532,25.2626,22.4605]]},"cls_bmr":{"lru":[[84.4411,80.7663,43.1839,9.4103,2.9575],[81.4565,76.8536,39.6168,8.113,2.3389],[76.844,71.3658,34.8968,6.7042,1.711],[69.7765,64.2042,29.186,5.5137,1.0196],[65.1227,59.9155,26.227,4.9263,0.7616]],"fifo":[[84.5257,80.9736,43.6434,9.7695,3.8526],[81.7589,77.2335,40.1546,8.3523,2.6123],[77.4135,72.0436,35.8179,6.9879,1.8976],[70.6879,65.1564,30.28,5.7604,1.2143],[66.3952,61.1279,27.331,5.1781,0.9357]],"s3fifo":[[85.3019,82.7086,45.8461,9.4085,4.6865],[82.7406,78.6063,39.9171,7.7986,2.1309],[78.9026,73.3298,34.2762,6.5313,1.435],[71.8456,65.9097,28.5326,5.4129,0.8114],[66.6439,61.2903,25.2219,4.8423,0.5919]],"s3fifo_t1":[[85.2988,82.5436,45.1795,9.4116,4.6239],[82.8097,78.5173,39.8283,7.848,2.1537],[78.9481,73.2003,34.3622,6.5168,1.4829],[71.9554,65.8168,28.5747,5.3842,0.8476],[66.8911,61.2883,25.3607,4.8176,0.6108]]}}</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const NS = 'http://www.w3.org/2000/svg';
+const COL = {fifo: 'var(--mut)', s3fifo: 'var(--r)', s3fifo_t1: 'var(--b)', lru: 'var(--a)'};
+const NAME = {lru: 'LRU', fifo: 'FIFO', s3fifo: 'S3-FIFO（2 回）', s3fifo_t1: 'S3-FIFO（1 回）'};
+const sg = v => (v >= 0 ? '+' : '') ;
+function mk(tag, at, par, txt) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in at) e.setAttribute(k, at[k]);
+  if (txt !== undefined) e.textContent = txt;
+  if (par) par.appendChild(e);
+  return e;
+}
+function niceStep(r) { const p = Math.pow(10, Math.floor(Math.log10(r))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= r) return m * p; return 10 * p; }
+function diffChart(id, key, title) {  // plotted: algorithm minus LRU, in pt
+  const svg = document.getElementById(id), W = 430, H = 270, L = 54, R = 14, T = 34, B = 46, n = D.labels.length;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const A = ['fifo', 's3fifo', 's3fifo_t1'], ys = [];
+  for (const a of A) D[key][a].forEach((v, i) => ys.push(v - D[key].lru[i]));
+  let lo = Math.min(0, ...ys), hi = Math.max(0, ...ys); const pad = (hi - lo) * 0.08 || 0.1; lo -= pad; hi += pad;
+  const x = i => L + (W - L - R) * i / (n - 1), y = v => T + (H - T - B) * (hi - v) / (hi - lo);
+  mk('text', {x: 4, y: 18, 'font-weight': 600}, svg, title);
+  const st = niceStep((hi - lo) / 5);
+  for (let k = Math.ceil(lo / st); k <= Math.floor(hi / st); k++) {
+    const v = k * st;
+    mk('line', {x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: 'var(--line)'}, svg);
+    mk('text', {x: L - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11}, svg, (k > 0 ? '+' : '') + v.toFixed(st < 0.1 ? 2 : 1));
+  }
+  mk('line', {x1: L, x2: W - R, y1: y(0), y2: y(0), stroke: COL.lru, 'stroke-width': 2}, svg);
+  D.labels.forEach((t, i) => mk('text', {x: x(i), y: H - B + 18, 'text-anchor': 'middle', 'font-size': 11}, svg, t));
+  mk('text', {x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', 'font-size': 11}, svg, 'キャッシュ容量');
+  for (const a of A) {
+    const d = D[key][a].map((v, i) => v - D[key].lru[i]);
+    mk('polyline', {points: d.map((v, i) => `${x(i)},${y(v)}`).join(' '), fill: 'none', stroke: COL[a], 'stroke-width': 2.2}, svg);
+    d.forEach((v, i) => { const c = mk('circle', {cx: x(i), cy: y(v), r: 3.6, fill: COL[a]}, svg); mk('title', {}, c, `${NAME[a]} ${D.labels[i]}: ${sg(v)}${v.toFixed(3)} pt`); });
+  }
+}
+function cell(v, mx, bold) {
+  const al = Math.min(1, Math.abs(v) / mx) * 0.5, c = v > 0 ? `rgba(197,48,48,${al})` : `rgba(47,133,90,${al})`;
+  return `<td class="n" style="background:${c}${bold ? ';font-weight:700' : ''}">${sg(v)}${v.toFixed(3)}</td>`;
+}
+function heat(id, a, key = 'dB') {
+  const M = D[key][a], mx = Math.max(0.01, ...M.map(r => Math.abs(r.reduce((p, q) => p + q, 0))), ...M.flat().map(Math.abs));
+  let h = '<tr><th>容量</th>' + D.classes.map(c => `<th class="n">${c}</th>`).join('') + '<th class="n">計</th></tr>';
+  D.labels.forEach((lab, i) => { h += `<tr><td>${lab}</td>` + M[i].map(v => cell(v, mx)).join('') + cell(M[i].reduce((p, q) => p + q, 0), mx, true) + '</tr>'; });
+  document.getElementById(id).innerHTML = h;
+}
+function kinds(id, a) {
+  let h = '<tr><th>容量</th><th>道</th>' + D.classes.map(c => `<th class="n">${c}</th>`).join('') + '<th class="n">計</th></tr>';
+  D.labels.forEach((lab, i) => {
+    for (const [k, nm] of [['ghost', '① 名簿'], ['big', '② 大きすぎる']]) {
+      const r = D[k][a][i], s = r.reduce((p, q) => p + q, 0);
+      h += `<tr><td>${k === 'ghost' ? lab : ''}</td><td>${nm}</td>` + r.map(v => `<td class="n">${v.toFixed(3)}</td>`).join('') + `<td class="n"><b>${s.toFixed(3)}</b></td></tr>`;
+    }
+  });
+  document.getElementById(id).innerHTML = h;
+}
+if (D) {
+  diffChart('cB', 'bmr', 'BMR の差（pt、上ほど悪い）');
+  diffChart('cO', 'ohr', 'OHR の差（pt、上ほど良い）');
+  let h = '<tr><th>容量</th>' + D.algs.map(a => `<th class="n">${NAME[a]} OHR</th><th class="n">BMR</th>`).join('') + '</tr>';
+  D.labels.forEach((lab, i) => {
+    h += `<tr><td>${lab}</td>` + D.algs.map(a => {
+      const o = D.ohr[a][i], b = D.bmr[a][i], dO = o - D.ohr.lru[i], dB = b - D.bmr.lru[i];
+      return a === 'lru' ? `<td class="n">${o.toFixed(2)}</td><td class="n">${b.toFixed(2)}</td>`
+        : `<td class="n">${o.toFixed(2)} <span class="mut small">(${sg(dO)}${dO.toFixed(2)})</span></td><td class="n">${b.toFixed(2)} <span class="mut small">(${sg(dB)}${dB.toFixed(2)})</span></td>`;
+    }).join('') + '</tr>';
+  });
+  document.getElementById('tAll').innerHTML = h + '<tr><td colspan="9" class="mut small">単位 %。括弧は LRU との差（pt）。</td></tr>';
+  document.getElementById('tShare').innerHTML = '<tr><th>大きさ</th>' + D.classes.map(c => `<th class="n">${c}</th>`).join('') + '</tr>'
+    + '<tr><td>リクエスト数の割合</td>' + D.share_req.map(v => `<td class="n">${v.toFixed(1)}%</td>`).join('') + '</tr>'
+    + '<tr><td>リクエストバイトの割合</td>' + D.share_b.map(v => `<td class="n">${v.toFixed(1)}%</td>`).join('') + '</tr>';
+  heat('hS3', 's3fifo'); heat('nS3', 's3fifo', 'dN'); heat('hS31', 's3fifo_t1'); heat('hF', 'fifo'); kinds('kS3', 's3fifo');
+}
+</script>
+</main>
+</body>
+</html>
