@@ -33,7 +33,8 @@ svg{max-width:100%;height:auto;display:block;margin:8px auto}svg text{fill:var(-
 <body>
 <main>
 <h1>ru_auto の自動設定<br><span style="font-size:17px;font-weight:600">3 つの自動の中身、paper に足した 5 構成、ST か BMR 重視かを自動で選ぶ案</span></h1>
-<p class="sub">2026-11-18。コードは <code>libCacheSim/cache/eviction/flash/</code>（<code>hint/split_threshold.c</code>・<code>util/sst.h</code>・<code>evict/region_basic.c</code>・<code>ssd/rf_ssd.c</code>・<code>ssd/rf_region.c</code>）。理論の番号は <a href="appendix_highschool.html">appendix_highschool.html</a>（付録の高校数学版）の章。</p>
+<p class="sub">スライド形式で 1 つの数値例を通して追う版：<a href="ru_auto_walkthrough.html">ru_auto_walkthrough.html</a>（11-19）。</p>
+<p class="sub">2026-11-18。コードは<code>libCacheSim/cache/eviction/flash/</code>（<code>hint/split_threshold.c</code>・<code>util/sst.h</code>・<code>evict/region_basic.c</code>・<code>ssd/rf_ssd.c</code>・<code>ssd/rf_region.c</code>）。理論の番号は <a href="appendix_highschool.html">appendix_highschool.html</a>（付録の高校数学版）の章。</p>
 
 <div class="key"><b>一言</b>　<code>ru_auto</code> は「<b>何で分けるか</b>（サイズの閾値 τ）」「<b>どれだけ配るか</b>（大の分類の容量の下限 ff）」「<b>何を書き直すか</b>（再挿入の閾値 n）」の 3 つを、走りながら自分で決める。決め方はそれぞれ別で、τ はサイズの分布の形、ff は実測した目的 J の山登り、n は書き直した物が次にまた当たったかの成績、を見る。</div>
 
