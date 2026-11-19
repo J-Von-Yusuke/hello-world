@@ -39,10 +39,10 @@ index 4b36a6f..5c7e5ff 100644
        params->block_size = (int)(strtol(value, &end, 0));
      } else if (strcasecmp(key, "header") == 0 ||
 diff --git a/libCacheSim/cache/CMakeLists.txt b/libCacheSim/cache/CMakeLists.txt
-index 49968ff..e004517 100644
+index 49968ff..995b392 100644
 --- a/libCacheSim/cache/CMakeLists.txt
 +++ b/libCacheSim/cache/CMakeLists.txt
-@@ -71,6 +71,50 @@ set(eviction_sources_c
+@@ -71,6 +71,51 @@ set(eviction_sources_c
          eviction/S3FIFOd.c
          eviction/other/flashProb.c
          eviction/other/S3LRU.c
@@ -53,6 +53,7 @@ index 49968ff..e004517 100644
 +        eviction/flash/core/rf_tier.c
 +        eviction/flash/ssd/rf_ssd.c
 +        eviction/flash/ssd/rf_region.c
++        eviction/flash/ssd/rf_piece.c
 +        eviction/flash/ssd/fdp.c
 +        eviction/flash/evict/region_policy.c
 +        eviction/flash/evict/region_basic.c
@@ -93,7 +94,7 @@ index 49968ff..e004517 100644
  )
  
  # C++ eviction algorithms
-@@ -150,6 +194,7 @@ set(cache_sources_c
+@@ -150,6 +195,7 @@ set(cache_sources_c
      plugin.c
  )
  
@@ -519,10 +520,10 @@ index 9c32668..fdeb31f 100644
  #ifdef __cplusplus
 diff --git a/libCacheSim/cache/eviction/flash/RegionFlash.c b/libCacheSim/cache/eviction/flash/RegionFlash.c
 new file mode 100644
-index 0000000..661aa6f
+index 0000000..f572184
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/RegionFlash.c
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,519 @@
 +//
 +//  RegionFlash.c — DRAM (object unit) + SSD two-tier flash cache, ported from
 +//  cachesim (docs/re-DESIGN.md §1, §6).
@@ -645,6 +646,67 @@ index 0000000..661aa6f
 +  rf_obj_delete(p, o);
 +}
 +
++/* a request DRAM missed finds o on the SSD (rc: the request's class, s: its size). True = a hit. With
++ * chunk-mode=piece some pieces may be lost: the ones there are read (hit bytes), the rest fetched (miss bytes); as a
++ * request that is a miss (OHR counts whole hits) and piece_partial_hits counts it. Either way o is promoted to DRAM
++ * (the missing pieces are written when it leaves, rf_victim); without DRAM a partial hit refills them now. */
++static bool rf_ssd_found(rf_params_t *p, cache_obj_t *o, uint64_t s, uint32_t rc) {
++  uint64_t miss = p->pmode && (MD(o).flags & RF_CHUNK) ? rf_piece_missing(p, o) : 0;
++  if (miss) {
++    CNT(p, piece_partial_hits, rc, 1);
++    CNT(p, misses, rc, 1);
++    CNT(p, miss_bytes, rc, miss);
++    SB(p, misses, s, 1);
++    SB(p, miss_bytes, s, miss);
++  } else {
++    CNT(p, ssd_hits, rc, 1);
++    SB(p, ssd_hits, s, 1);
++  }
++  CNT(p, hit_bytes, rc, s - miss);
++  CNT(p, ssd_hit_bytes, rc, s - miss);
++  SB(p, ssd_hit_bytes, s, s - miss);
++  rf_ssd_hit(p, o);
++  if (MD(o).ssd_hits < UINT16_MAX) MD(o).ssd_hits++;  // with lost pieces: the pieces there were hit
++  rf_hint_req(p, p->hops->on_find, o->obj_id, s, rc, HINT_SSD_HIT);
++  o->next_access_vtime = p->req_local->next_access_vtime;  // before o may leave DRAM at once (oracle counters, hints)
++  if (p->dram_cap) {
++    if (p->inclusion == INC_EXCLUSIVE) rf_ssd_invalidate(p, o);
++    rf_dram_insert(p, o);
++  } else if (miss) {
++    rf_ssd_try_admit(p, o, SRC_MISS);
++    if (!(MD(o).flags & RF_SSD)) rf_obj_delete(p, o);
++  }
++  return miss == 0;
++}
++
++/* a request neither tier holds: o (NULL = not tracked) is fetched and enters DRAM, or the SSD without DRAM */
++static void rf_ssd_miss(rf_params_t *p, cache_t *cache, cache_obj_t *o, uint64_t s, uint32_t rc) {
++  const request_t *req = p->req_local;
++  rf_hint_req(p, p->hops->on_find, req->obj_id, s, rc, HINT_MISS);
++  CNT(p, misses, rc, 1);
++  CNT(p, miss_bytes, rc, s);
++  {  // 計測用：RF_MISSLOG=<file> でミスごとに 時刻 物ID
++    static FILE *ml = (FILE *)1;
++    if (ml == (FILE *)1) ml = getenv("RF_MISSLOG") ? fopen(getenv("RF_MISSLOG"), "w") : NULL;
++    if (ml) fprintf(ml, "%lld %llu\n", (long long)p->t, (unsigned long long)req->obj_id);
++  }
++  SB(p, misses, s, 1);
++  SB(p, miss_bytes, s, s);
++  if (o == NULL) {
++    o = hashtable_insert(cache->hashtable, p->req_local);
++    p->n_obj++;
++    MD(o).cls = (uint8_t)rc;
++    MD(o).loc = RF_NONE;
++  }
++  o->next_access_vtime = req->next_access_vtime;
++  if (p->dram_cap) {
++    rf_dram_insert(p, o);
++  } else {
++    rf_ssd_try_admit(p, o, SRC_MISS);
++    if (!(MD(o).flags & RF_SSD)) rf_obj_delete(p, o);
++  }
++}
++
 +// ***********************************************************************
 +// ****                       cache interface                         ****
 +// ***********************************************************************
@@ -721,69 +783,13 @@ index 0000000..661aa6f
 +      cache->admissioner->update(cache->admissioner, p->req_local, p->ssd_cap);
 +    if (p->aops->on_lookup)
 +      p->aops->on_lookup(p->adm, (uint64_t)p->t, req->obj_id, rf_u32(s));
-+    outcome = HINT_SSD_HIT;
-+    uint64_t miss = o != NULL && p->pmode && (MD(o).flags & RF_SSD) && (MD(o).flags & RF_CHUNK) ? rf_piece_missing(p, o) : 0;
-+    if (miss) {  /* chunk-mode=piece, some pieces lost: the ones there are read (hit bytes), the rest fetched
-+                  * (miss bytes). As a request it is a miss (OHR counts whole hits); piece_partial_hits counts it */
-+      hit = false;
-+      CNT(p, piece_partial_hits, rc, 1);
-+      CNT(p, misses, rc, 1);
-+      CNT(p, miss_bytes, rc, miss);
-+      CNT(p, hit_bytes, rc, s - miss);
-+      CNT(p, ssd_hit_bytes, rc, s - miss);
-+      SB(p, misses, s, 1);
-+      SB(p, miss_bytes, s, miss);
-+      SB(p, ssd_hit_bytes, s, s - miss);
-+      rf_ssd_hit(p, o);
-+      if (MD(o).ssd_hits < UINT16_MAX) MD(o).ssd_hits++;  // the pieces there were hit
-+      rf_hint_req(p, p->hops->on_find, req->obj_id, s, rc, HINT_SSD_HIT);
-+      o->next_access_vtime = req->next_access_vtime;
-+      if (p->dram_cap) {  // as a hit: into DRAM; the missing pieces are written when it leaves (rf_victim)
-+        if (p->inclusion == INC_EXCLUSIVE) rf_ssd_invalidate(p, o);
-+        rf_dram_insert(p, o);
-+      } else {
-+        rf_ssd_try_admit(p, o, SRC_MISS);
-+        if (!(MD(o).flags & RF_SSD)) rf_obj_delete(p, o);
-+      }
-+    } else if (o != NULL && (MD(o).flags & RF_SSD)) {  // every piece is still there
-+      CNT(p, ssd_hits, rc, 1);
-+      CNT(p, hit_bytes, rc, s);
-+      CNT(p, ssd_hit_bytes, rc, s);
-+      SB(p, ssd_hits, s, 1);
-+      SB(p, ssd_hit_bytes, s, s);
-+      rf_ssd_hit(p, o);
-+      if (MD(o).ssd_hits < UINT16_MAX) MD(o).ssd_hits++;
-+      rf_hint_req(p, p->hops->on_find, req->obj_id, s, rc, HINT_SSD_HIT);
-+      if (p->dram_cap) {  // promote
-+        if (p->inclusion == INC_EXCLUSIVE) rf_ssd_invalidate(p, o);
-+        rf_dram_insert(p, o);
-+      }
++    if (o != NULL && (MD(o).flags & RF_SSD)) {
++      outcome = HINT_SSD_HIT;
++      hit = rf_ssd_found(p, o, s, rc);
 +    } else {
-+      hit = false;
 +      outcome = HINT_MISS;
-+      rf_hint_req(p, p->hops->on_find, req->obj_id, s, rc, HINT_MISS);
-+      CNT(p, misses, rc, 1);
-+      CNT(p, miss_bytes, rc, s);
-+      {  // 計測用：RF_MISSLOG=<file> でミスごとに 時刻 物ID
-+        static FILE *ml = (FILE *)1;
-+        if (ml == (FILE *)1) ml = getenv("RF_MISSLOG") ? fopen(getenv("RF_MISSLOG"), "w") : NULL;
-+        if (ml) fprintf(ml, "%lld %llu\n", (long long)p->t, (unsigned long long)req->obj_id);
-+      }
-+      SB(p, misses, s, 1);
-+      SB(p, miss_bytes, s, s);
-+      if (o == NULL) {
-+        o = hashtable_insert(cache->hashtable, p->req_local);
-+        p->n_obj++;
-+        MD(o).cls = (uint8_t)rc;
-+        MD(o).loc = RF_NONE;
-+      }
-+      o->next_access_vtime = req->next_access_vtime;
-+      if (p->dram_cap) {
-+        rf_dram_insert(p, o);
-+      } else {
-+        rf_ssd_try_admit(p, o, SRC_MISS);
-+        if (!(MD(o).flags & RF_SSD)) rf_obj_delete(p, o);
-+      }
++      hit = false;
++      rf_ssd_miss(p, cache, o, s, rc);
 +    }
 +  }
 +  if (p->hops->on_get) rf_hint_req(p, p->hops->on_get, req->obj_id, s, rc, outcome);
@@ -801,6 +807,11 @@ index 0000000..661aa6f
 +  cache_set_remove_hook(NULL, NULL);
 +  rf_cur = NULL;
 +  rf_check(p);
++  {  // RF_AUDIT=<k>: the region store's consistency every k requests (debugging, rf_region_audit)
++    static int64_t every = -1;
++    if (every < 0) every = getenv("RF_AUDIT") ? atoll(getenv("RF_AUDIT")) : 0;
++    if (every > 0 && p->ssd_mode == SSD_REGION && p->t % every == 0) rf_region_audit(p);
++  }
 +  return hit;
 +}
 +
@@ -981,8 +992,9 @@ index 0000000..661aa6f
 +  p->rops = p->rev_lcs ? NULL : rf_rpol_find(algo[T_REG]);  // NULL: lcs:<algorithm>
 +
 +  if (p->pmode && !p->chunk) rf_die("RegionFlash: chunk-mode=piece needs chunk > 0\n");
-+  if (p->pmode && (p->re_score || p->re_reclass || (p->rops != NULL && strcmp(p->rops->name, "gl") == 0)))
-+    rf_die("RegionFlash: chunk-mode=piece does not take reinsert=score|recent, class=reclassify or region-evict=gl\n");
++  if (p->pmode && (p->re_score || p->re_reclass || p->re_hint || (p->rops != NULL && strcmp(p->rops->name, "gl") == 0)))
++    rf_die("RegionFlash: chunk-mode=piece does not take reinsert=score|recent, class=reclassify, hint_on_reinsert=yes "
++           "or region-evict=gl\n");
 +  if (p->ssd_mode == SSD_OBJECT) {
 +    if (p->chunk || p->fdp_on || p->rops == NULL || strcasecmp(p->rops->name, "lru") != 0)
 +      rf_die("RegionFlash: chunk, ru-size and region-evict need ssd-mode=region\n");
@@ -6765,10 +6777,10 @@ index 0000000..8cd7a6a
 +    on_evict, epoch, bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/regionflash_internal.h b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 new file mode 100644
-index 0000000..7408bba
+index 0000000..7a9fd20
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/regionflash_internal.h
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,310 @@
 +//
 +//  regionflash_internal.h — RegionFlash's state and the functions its modules
 +//  share. Not for use outside cache/eviction/flash/.
@@ -6784,7 +6796,11 @@ index 0000000..7408bba
 +//    ssd/   rf_ssd.c      the SSD tier: admission, hits, invalidation,
 +//                          eviction accounting, reinsertion's rule, object mode
 +//           rf_region.[ch] the Region store: OPEN / SEALED / FREE, placement,
-+//                          piece-wise writes, evicting a region
++//                          evicting a region, the audit (RF_AUDIT)
++//           rf_piece.c     objects larger than chunk as pieces: writing,
++//                          refilling missing pieces, a piece's eviction /
++//                          rewrite (chunk-mode=object / piece). Rule: a
++//                          piece's class is its region's class
 +//           fdp.[ch]       the FDP device model under the regions
 +//    evict/ region_policy.[ch]  which sealed region to evict: the interface,
 +//                          its table, ranking, utility (a new policy: a
@@ -7026,13 +7042,23 @@ index 0000000..7408bba
 +void rf_free_region(rf_params_t *p, uint32_t r);
 +void rf_touch(rf_params_t *p, uint32_t r);
 +void rf_drop(rf_params_t *p, uint32_t r, uint32_t pos, uint64_t s);
++uint32_t rf_place(rf_params_t *p, cache_obj_t *o, uint32_t piece, uint64_t s, uint32_t c, uint32_t *pos);
 +bool rf_append(rf_params_t *p, cache_obj_t *o, uint32_t c);
-+uint64_t rf_piece_missing(const rf_params_t *p, const cache_obj_t *o);  // chunk-mode=piece: bytes not on the SSD
-+void rf_fill_missing(rf_params_t *p, cache_obj_t *o, uint32_t c);      // chunk-mode=piece: write them
 +void rf_region_invalidate(rf_params_t *p, cache_obj_t *o);
 +void rf_region_read(rf_params_t *p, const cache_obj_t *o);
 +void rf_evict_region(rf_params_t *p, uint32_t r);
 +void rf_region_evict(rf_params_t *p);
++void rf_region_audit(rf_params_t *p);  // RF_AUDIT=<k>: consistency check every k requests (debugging)
++
++/* rf_piece.c (objects larger than chunk; chunk-mode=object / piece) */
++bool rf_piece_write(rf_params_t *p, cache_obj_t *o, uint32_t c);
++uint64_t rf_piece_missing(const rf_params_t *p, const cache_obj_t *o);  // chunk-mode=piece: bytes not on the SSD
++void rf_fill_missing(rf_params_t *p, cache_obj_t *o, uint32_t c);      // chunk-mode=piece: write them
++void rf_piece_invalidate(rf_params_t *p, cache_obj_t *o);
++bool rf_piece_evict_obj(rf_params_t *p, uint32_t r, uint32_t i);              // object mode, region r's entry i
++void rf_piece_evict(rf_params_t *p, uint32_t r, uint32_t i, uint64_t *budget);  // piece mode, region r's entry i
++void rf_reinsert_piece(rf_params_t *p, cache_obj_t *o, uint32_t q);
++void rf_piece_audit(rf_params_t *p);
 +
 +/* region_lcs.c */
 +void rf_lcs_on_seal(rf_params_t *p, uint32_t r);
@@ -7266,17 +7292,272 @@ index 0000000..fc9592e
 +#endif
 +
 +#endif
+diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_piece.c b/libCacheSim/cache/eviction/flash/ssd/rf_piece.c
+new file mode 100644
+index 0000000..4b16997
+--- /dev/null
++++ b/libCacheSim/cache/eviction/flash/ssd/rf_piece.c
+@@ -0,0 +1,248 @@
++//
++//  rf_piece.c — piece-wise writes: an object larger than chunk is kept as a list of chunk-sized pieces (p->pc, the
++//  first piece at MD(o).loc), which may span regions. The Region store (rf_region.c) places and evicts entries; this
++//  file owns what an entry that is a piece means:
++//    chunk-mode=object  losing one piece loses the object; a write that loses one of its own pieces aborts
++//    chunk-mode=piece   (CacheLib's piece-wise caching) a piece is lost, kept or rewritten alone; the first piece holds
++//                       the valid bytes (vb); a hit on a partly lost object refills only the missing pieces
++//  Class rule (piece mode): a piece belongs to its region's class. It is decided by that class's reinsertion rule
++//  and rewritten to it (or to the hot class with mode=ii); its hits are the object's SSD hits since it was written (h0).
++//
++#include "../regionflash_internal.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++static uint32_t rf_piece_alloc(rf_params_t *p) {
++  if (p->npcfree) return p->pcfree[--p->npcfree];
++  RF_GROW(p->pc, p->cap_pc, p->npc + 1);
++  return p->npc++;
++}
++
++static void rf_piece_free(rf_params_t *p, uint32_t q) {
++  RF_GROW(p->pcfree, p->cap_pcfree, p->npcfree + 1);
++  p->pcfree[p->npcfree++] = q;
++}
++
++/* 1 + the slot of o in the stack of piece-wise writes in progress, 0 if o is not being written */
++static uint32_t rf_writing(const rf_params_t *p, const cache_obj_t *o) {
++  uint32_t w = p->nw;
++  while (w > 0 && p->wobj[w - 1] != o) w--;
++  return w;
++}
++
++static uint32_t rf_write_begin(rf_params_t *p, cache_obj_t *o) {
++  if (p->nw == RF_WMAX) rf_die("RegionFlash: piece-wise writes nested too deep\n");
++  p->wobj[p->nw] = o;
++  p->wab[p->nw] = false;
++  return p->nw++;
++}
++
++/* chunk-mode=piece: bytes of o's pieces that are not on the SSD */
++uint64_t rf_piece_missing(const rf_params_t *p, const cache_obj_t *o) {
++  return (uint64_t)o->obj_size - p->pc[MD(o).loc].vb;
++}
++
++/* chunk-mode=piece: the valid bytes counted again by a walk, after a write of o's pieces (an eviction meanwhile may
++ * have dropped some of them without updating vb) */
++static void rf_piece_recount(rf_params_t *p, const cache_obj_t *o) {
++  uint64_t v = 0;
++  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next)
++    if (p->pc[q].valid) v += p->pc[q].size;
++  p->pc[MD(o).loc].vb = v;
++}
++
++/* chunk-mode=piece: if none of o's pieces is left, o leaves the SSD (its pieces' bytes were counted as they went;
++ * account = count the object's departure). True if some piece is still there. */
++static bool rf_piece_check_gone(rf_params_t *p, cache_obj_t *o, bool account) {
++  if (p->pc[MD(o).loc].vb > 0) return true;
++  for (uint32_t q = MD(o).loc; q != RF_NONE;) {
++    uint32_t nx = p->pc[q].next;
++    rf_piece_free(p, q);
++    q = nx;
++  }
++  MD(o).flags &= ~(RF_SSD | RF_CHUNK);
++  MD(o).loc = RF_NONE;
++  if (account) rf_evict_account_b(p, o, false);
++  return false;
++}
++
++/* write o (larger than chunk) to class c as pieces. Object mode: false if the write aborted (one of its own pieces was
++ * evicted meanwhile; nothing of it stays). Piece mode: never aborts; false if no piece survived. */
++bool rf_piece_write(rf_params_t *p, cache_obj_t *o, uint32_t c) {
++  uint64_t s = (uint64_t)o->obj_size;
++  uint32_t n = (uint32_t)((s + p->chunk - 1) / p->chunk), head = RF_NONE, prev = RF_NONE, pos;
++  uint32_t w = rf_write_begin(p, o);
++  for (uint32_t k = 0; k < n && !p->wab[w]; k++) {
++    uint64_t psz = k + 1 < n ? p->chunk : s - p->chunk * (n - 1);
++    uint32_t q = rf_piece_alloc(p);
++    p->pc[q] = (rf_piece_t){o, RF_NONE, 0, RF_NONE, (uint32_t)psz, false, MD(o).ssd_hits, 0, 0, 0};
++    uint32_t r = rf_place(p, o, q, psz, c, &pos);  // may evict regions (and grow p->pc): index again after it
++    p->pc[q].region = r;
++    p->pc[q].pos = pos;
++    p->pc[q].valid = true;
++    if (prev == RF_NONE)
++      head = q;
++    else
++      p->pc[prev].next = q;
++    prev = q;
++  }
++  bool aborted = p->wab[w];
++  p->nw--;  // nested writes have finished: w is the top
++  CNT(p, chunk_objs, c, 1);
++  CNT(p, chunk_pieces, c, n);
++  if (p->pmode) {
++    MD(o).loc = head;
++    MD(o).flags |= RF_SSD | RF_CHUNK;
++    rf_piece_recount(p, o);
++    return rf_piece_check_gone(p, o, false);
++  }
++  if (aborted) {
++    for (uint32_t q = head; q != RF_NONE;) {
++      uint32_t nx = p->pc[q].next;
++      if (p->pc[q].valid) rf_drop(p, p->pc[q].region, p->pc[q].pos, p->pc[q].size);
++      rf_piece_free(p, q);
++      q = nx;
++    }
++    MD(o).flags &= ~(RF_SSD | RF_CHUNK);
++    CNT(p, chunk_write_aborts, c, 1);
++    return false;
++  }
++  MD(o).loc = head;
++  MD(o).flags |= RF_SSD | RF_CHUNK;
++  return true;
++}
++
++/* chunk-mode=piece: write o's missing pieces to class c (counted as being written: a region eviction meanwhile drops a
++ * piece of it without rewriting it). The pieces there keep their hits; a new piece starts at 0. */
++void rf_fill_missing(rf_params_t *p, cache_obj_t *o, uint32_t c) {
++  uint32_t pos;
++  rf_write_begin(p, o);
++  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next) {
++    if (p->pc[q].valid) continue;
++    p->pc[q].h0 = MD(o).ssd_hits, p->pc[q].re_b = 0;
++    uint32_t r = rf_place(p, o, q, p->pc[q].size, c, &pos);
++    p->pc[q].region = r, p->pc[q].pos = pos, p->pc[q].valid = true;
++  }
++  p->nw--;
++  rf_piece_recount(p, o);
++  rf_piece_check_gone(p, o, false);
++}
++
++/* o's pieces leave the SSD (o is invalidated) */
++void rf_piece_invalidate(rf_params_t *p, cache_obj_t *o) {
++  for (uint32_t q = MD(o).loc; q != RF_NONE;) {
++    uint32_t nx = p->pc[q].next;
++    if (p->pc[q].valid) rf_drop(p, p->pc[q].region, p->pc[q].pos, p->pc[q].size);
++    p->pc[q].valid = false;
++    rf_piece_free(p, q);
++    q = nx;
++  }
++}
++
++/* chunk-mode=object: entry i of evicted region r is a piece of o. True if o is being written (that write aborts, the
++ * entry is dropped: nothing else to do); else the loss of o is counted here and the caller evicts o whole. */
++bool rf_piece_evict_obj(rf_params_t *p, uint32_t r, uint32_t i) {
++  cache_obj_t *o = p->reg[r].ent[i].o;
++  uint32_t piece = p->reg[r].ent[i].piece, w = rf_writing(p, o);
++  if (w > 0) {
++    rf_drop(p, r, i, p->pc[piece].size);
++    p->pc[piece].valid = false;
++    p->wab[w - 1] = true;
++    return true;
++  }
++  uint64_t orphan = 0;
++  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next)
++    if (p->pc[q].valid && p->pc[q].region != r) orphan += p->pc[q].size;
++  if (p->pc[MD(o).loc].region == r)
++    CNT(p, chunk_loss_head, MD(o).cls, 1);
++  else
++    CNT(p, chunk_loss_other, MD(o).cls, 1);
++  CNT(p, chunk_orphan_bytes, MD(o).cls, orphan);
++  return false;
++}
++
++/* chunk-mode=piece: entry i of evicted region r is a piece: it alone is kept for a rewrite (into p->rebuf /
++ * p->rebuf_pc, within *budget) or lost. Decided with its region's class (the class rule above). */
++void rf_piece_evict(rf_params_t *p, uint32_t r, uint32_t i, uint64_t *budget) {
++  cache_obj_t *o = p->reg[r].ent[i].o;
++  uint32_t piece = p->reg[r].ent[i].piece, c = p->reg[r].cls, w = rf_writing(p, o);
++  uint64_t ps = p->pc[piece].size;
++  uint32_t h = (uint16_t)(MD(o).ssd_hits - p->pc[piece].h0);  // its own hits, as if it were its own key
++  if (p->pc[piece].re_b && w == 0) {  // n=auto: was its last rewrite hit again (credited to the deciding class)
++    p->re_try[p->pc[piece].re_c][p->pc[piece].re_b]++;
++    if (h) p->re_hit[p->pc[piece].re_c][p->pc[piece].re_b]++;
++    p->pc[piece].re_b = 0;
++  }
++  bool keep = w == 0 && ps <= *budget && rf_reinsert_ok_h(p, c, h, ps) &&
++              (p->aops != &adm_budget_ops ||
++               adm_budget_charge(p->adm, (uint64_t)p->req_local->clock_time, (uint32_t)ps));
++  rf_drop(p, r, i, ps);
++  if (keep) {  // valid while it waits (region = RF_NONE): the object is not gone
++    *budget -= ps;
++    p->pc[piece].region = RF_NONE;
++    p->pc[piece].re_c = (uint8_t)c;  // rf_reinsert_piece rewrites to it (pi) and credits it (n=auto)
++    if (p->re_auto) p->pc[piece].re_b = (uint8_t)(h < 8 ? h : 8);
++    RF_GROW(p->rebuf, p->cap_re, p->nre + 1);
++    RF_GROW(p->rebuf_pc, p->cap_repc, p->nre + 1);
++    p->rebuf_pc[p->nre] = piece;
++    p->rebuf[p->nre++] = o;
++    return;
++  }
++  p->pc[piece].valid = false;
++  if (w == 0) p->pc[MD(o).loc].vb -= ps;  // a write in progress recounts at its end
++  CNT(p, piece_evict_bytes, c, ps);
++  CNT(p, ssd_evict_bytes, c, ps);
++  if (h == 0) CNT(p, dead_evict_bytes, c, ps);
++  {  // the oracle split of evicted bytes, piece by piece as the bytes above (rf_evict_account_b skips it then)
++    int64_t nx = o->next_access_vtime;
++    if (nx == -1 || nx == MAX_REUSE_DISTANCE) CNT(p, oracle_never_bytes, c, ps);
++    else if (nx >= 0) CNT(p, oracle_reused_bytes, c, ps);
++  }
++  if (w == 0) rf_piece_check_gone(p, o, true);  // a write in progress checks at its end
++}
++
++/* chunk-mode=piece: rewrite piece q of o, kept by rf_piece_evict: to the class that decided it (pc[q].re_c; pi) or
++ * the one hot class (mode=ii) */
++void rf_reinsert_piece(rf_params_t *p, cache_obj_t *o, uint32_t q) {
++  uint32_t c = p->re_ii ? p->khint : p->pc[q].re_c, pos;
++  uint64_t s = p->pc[q].size;
++  uint32_t r = rf_place(p, o, q, s, c, &pos);  // may evict regions (and grow p->pc): index again after it
++  p->pc[q].region = r, p->pc[q].pos = pos, p->pc[q].h0 = MD(o).ssd_hits;
++  CNT(p, reinsert_objs, c, 1);
++  CNT(p, reinsert_bytes, c, s);
++}
++
++/* rf_region_audit's half for pieces: every live piece list (from its first piece: MD(o).loc == q), skipping freed ones */
++void rf_piece_audit(rf_params_t *p) {
++#define AUD(cond, ...) do { if (!(cond)) rf_die("RegionFlash audit (request %lld): " __VA_ARGS__); } while (0)
++  uint8_t *fr = calloc(p->npc ? p->npc : 1, 1);
++  for (uint32_t k = 0; k < p->npcfree; k++) fr[p->pcfree[k]] = 1;
++  for (uint32_t q0 = 0; q0 < p->npc; q0++) {
++    cache_obj_t *o = p->pc[q0].o;
++    if (fr[q0] || o == NULL || MD(o).loc != q0 || !(MD(o).flags & RF_CHUNK)) continue;
++    uint64_t v = 0, all = 0;
++    for (uint32_t q = q0; q != RF_NONE; q = p->pc[q].next) {
++      AUD(!fr[q] && p->pc[q].o == o, "object %llu: piece %u freed or foreign\n", (long long)p->t, (unsigned long long)o->obj_id, q);
++      AUD(!p->pc[q].valid || p->pc[q].region != RF_NONE, "object %llu: piece %u still waits to be rewritten\n", (long long)p->t,
++          (unsigned long long)o->obj_id, q);
++      if (p->pc[q].valid) v += p->pc[q].size;
++      all += p->pc[q].size;
++    }
++    AUD(all == (uint64_t)o->obj_size, "object %llu: pieces sum to %llu B, size %lld\n", (long long)p->t,
++        (unsigned long long)o->obj_id, (unsigned long long)all, (long long)o->obj_size);
++    if (p->pmode)
++      AUD(v == p->pc[q0].vb && v > 0 && (MD(o).flags & RF_SSD), "object %llu: valid %llu B, vb %llu\n", (long long)p->t,
++          (unsigned long long)o->obj_id, (unsigned long long)v, (unsigned long long)p->pc[q0].vb);
++    else
++      AUD(v == all && (MD(o).flags & RF_SSD), "object %llu: object mode with a lost piece\n", (long long)p->t,
++          (unsigned long long)o->obj_id);
++  }
++  free(fr);
++#undef AUD
++}
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_region.c b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
 new file mode 100644
-index 0000000..acdc4e4
+index 0000000..9a1d4fe
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,381 @@
 +//
 +//  rf_region.c — the SSD's Region store: placement into the OPEN region of a
 +//  write stream, sealing (a whole-region write, to the FDP device if any),
-+//  piece-wise writes, and evicting a region (with reinsertion). Which region
-+//  to evict is the policy's (region_policy.h, or region_lcs.c).
++//  and evicting a region (with reinsertion). An entry may be a piece: what
++//  that means is rf_piece.c's. Which region to evict is the policy's
++//  (region_policy.h, or region_lcs.c).
 +//
 +#include "../regionflash_internal.h"
 +
@@ -7330,8 +7611,8 @@ index 0000000..acdc4e4
 +  p->ssd_used -= s;
 +}
 +
-+/* append an entry of s bytes to the OPEN region of class c */
-+static uint32_t rf_place(rf_params_t *p, cache_obj_t *o, uint32_t piece,
++/* append an entry of s bytes (o's piece, RF_NONE = o whole) to the OPEN region of class c; may evict regions */
++uint32_t rf_place(rf_params_t *p, cache_obj_t *o, uint32_t piece,
 +                         uint64_t s, uint32_t c, uint32_t *pos) {
 +  uint32_t r;
 +  rf_reg_flush(p);
@@ -7369,135 +7650,14 @@ index 0000000..acdc4e4
 +  return r;
 +}
 +
-+static uint32_t rf_piece_alloc(rf_params_t *p) {
-+  if (p->npcfree) return p->pcfree[--p->npcfree];
-+  RF_GROW(p->pc, p->cap_pc, p->npc + 1);
-+  return p->npc++;
-+}
-+
-+static void rf_piece_free(rf_params_t *p, uint32_t q) {
-+  RF_GROW(p->pcfree, p->cap_pcfree, p->npcfree + 1);
-+  p->pcfree[p->npcfree++] = q;
-+}
-+
-+/* chunk-mode=piece: bytes of o's pieces that are not on the SSD (the first piece keeps the valid bytes) */
-+uint64_t rf_piece_missing(const rf_params_t *p, const cache_obj_t *o) {
-+  return (uint64_t)o->obj_size - p->pc[MD(o).loc].vb;
-+}
-+
-+/* chunk-mode=piece: the valid bytes counted again by a walk, after a write of o's pieces (rf_append, rf_fill_missing:
-+ * an eviction meanwhile may have dropped some of them without updating vb) */
-+static void rf_piece_recount(rf_params_t *p, const cache_obj_t *o) {
-+  uint64_t v = 0;
-+  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next)
-+    if (p->pc[q].valid) v += p->pc[q].size;
-+  p->pc[MD(o).loc].vb = v;
-+}
-+
-+/* chunk-mode=piece: if none of o's pieces is left, o leaves the SSD (its pieces' bytes were counted as they
-+ * went; account = count the object's departure). True if some piece is still there. */
-+static bool rf_piece_check_gone(rf_params_t *p, cache_obj_t *o, bool account) {
-+  if (p->pc[MD(o).loc].vb > 0) return true;
-+  for (uint32_t q = MD(o).loc; q != RF_NONE;) {
-+    uint32_t nx = p->pc[q].next;
-+    rf_piece_free(p, q);
-+    q = nx;
-+  }
-+  MD(o).flags &= ~(RF_SSD | RF_CHUNK);
-+  MD(o).loc = RF_NONE;
-+  if (account) rf_evict_account_b(p, o, false);
-+  return false;
-+}
-+
-+/* chunk-mode=piece: write o's missing pieces to class c (counted as being written: a region eviction meanwhile
-+ * drops a piece of it without rewriting it). The pieces there keep their hits; a new piece starts at 0. */
-+void rf_fill_missing(rf_params_t *p, cache_obj_t *o, uint32_t c) {
-+  if (p->nw == RF_WMAX) rf_die("RegionFlash: piece-wise writes nested too deep\n");
-+  uint32_t w = p->nw++, pos;
-+  p->wobj[w] = o;
-+  p->wab[w] = false;
-+  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next) {
-+    if (p->pc[q].valid) continue;
-+    p->pc[q].h0 = MD(o).ssd_hits, p->pc[q].re_b = 0;
-+    uint32_t r = rf_place(p, o, q, p->pc[q].size, c, &pos);
-+    p->pc[q].region = r, p->pc[q].pos = pos, p->pc[q].valid = true;
-+  }
-+  p->nw--;
-+  rf_piece_recount(p, o);
-+  rf_piece_check_gone(p, o, false);
-+}
-+
-+/* chunk-mode=piece: rewrite piece q of o, evicted with its region (reinsertion, piece by piece) */
-+static void rf_reinsert_piece(rf_params_t *p, cache_obj_t *o, uint32_t q) {
-+  uint32_t c = p->re_ii ? p->khint : MD(o).cls, pos;
-+  if (p->re_auto) {
-+    uint32_t h = (uint16_t)(MD(o).ssd_hits - p->pc[q].h0);
-+    p->pc[q].re_b = (uint8_t)(h < 8 ? h : 8), p->pc[q].re_c = MD(o).cls;
-+  }
-+  uint64_t s = p->pc[q].size;
-+  uint32_t r = rf_place(p, o, q, s, c, &pos);  // may evict regions (and grow p->pc): index again after it
-+  p->pc[q].region = r, p->pc[q].pos = pos, p->pc[q].h0 = MD(o).ssd_hits;
-+  CNT(p, reinsert_objs, c, 1);
-+  CNT(p, reinsert_bytes, c, s);
-+}
-+
-+/* piece-wise: an object larger than chunk is written as chunk-sized pieces
-+ * (it may span regions). Losing one piece drops the whole object. If one of
-+ * its own pieces is evicted while it is being written, the write aborts.
-+ * chunk-mode=piece: a lost piece is lost alone (rf_evict_region). */
++/* write o to class c: one entry, or pieces if larger than chunk (rf_piece.c; false = nothing of it stays) */
 +bool rf_append(rf_params_t *p, cache_obj_t *o, uint32_t c) {
 +  uint64_t s = (uint64_t)o->obj_size;
-+  uint32_t pos, r;
-+  if (!p->chunk || s <= p->chunk) {
-+    r = rf_place(p, o, RF_NONE, s, c, &pos);
-+    MD(o).loc = r;
-+    MD(o).pos = pos;
-+    MD(o).flags = (MD(o).flags | RF_SSD) & ~RF_CHUNK;
-+    return true;
-+  }
-+  uint32_t n = (uint32_t)((s + p->chunk - 1) / p->chunk), head = RF_NONE,
-+           prev = RF_NONE;
-+  if (p->nw == RF_WMAX) rf_die("RegionFlash: piece-wise writes nested too deep\n");
-+  uint32_t w = p->nw++;
-+  p->wobj[w] = o;
-+  p->wab[w] = false;
-+  for (uint32_t k = 0; k < n && !p->wab[w]; k++) {
-+    uint64_t psz = k + 1 < n ? p->chunk : s - p->chunk * (n - 1);
-+    uint32_t q = rf_piece_alloc(p);
-+    p->pc[q] = (rf_piece_t){o, RF_NONE, 0, RF_NONE, (uint32_t)psz, false, MD(o).ssd_hits, 0, 0, 0};
-+    r = rf_place(p, o, q, psz, c, &pos);
-+    p->pc[q].region = r;
-+    p->pc[q].pos = pos;
-+    p->pc[q].valid = true;
-+    if (prev == RF_NONE)
-+      head = q;
-+    else
-+      p->pc[prev].next = q;
-+    prev = q;
-+  }
-+  bool aborted = p->wab[w];
-+  p->nw--;  // nested writes have finished: w is the top
-+  CNT(p, chunk_objs, c, 1);
-+  CNT(p, chunk_pieces, c, n);
-+  if (p->pmode) {  // chunk-mode=piece: own pieces evicted meanwhile were lost alone (never aborts)
-+    MD(o).loc = head;
-+    MD(o).flags |= RF_SSD | RF_CHUNK;
-+    rf_piece_recount(p, o);
-+    return rf_piece_check_gone(p, o, false);
-+  }
-+  if (aborted) {
-+    for (uint32_t q = head; q != RF_NONE;) {
-+      uint32_t nx = p->pc[q].next;
-+      if (p->pc[q].valid) rf_drop(p, p->pc[q].region, p->pc[q].pos, p->pc[q].size);
-+      rf_piece_free(p, q);
-+      q = nx;
-+    }
-+    MD(o).flags &= ~(RF_SSD | RF_CHUNK);
-+    CNT(p, chunk_write_aborts, c, 1);
-+    return false;
-+  }
-+  MD(o).loc = head;
-+  MD(o).flags |= RF_SSD | RF_CHUNK;
++  if (p->chunk && s > p->chunk) return rf_piece_write(p, o, c);
++  uint32_t pos, r = rf_place(p, o, RF_NONE, s, c, &pos);
++  MD(o).loc = r;
++  MD(o).pos = pos;
++  MD(o).flags = (MD(o).flags | RF_SSD) & ~RF_CHUNK;
 +  return true;
 +}
 +
@@ -7586,54 +7746,12 @@ index 0000000..acdc4e4
 +    cache_obj_t *o = g->ent[i].o;
 +    uint32_t piece = g->ent[i].piece;
 +    if (o == NULL) continue;
-+    if (p->pmode && piece != RF_NONE) {  // chunk-mode=piece: this piece alone is rewritten or lost
-+      uint32_t w = p->nw, c = MD(o).cls;
-+      while (w > 0 && p->wobj[w - 1] != o) w--;
-+      uint64_t ps = p->pc[piece].size;
-+      uint32_t h = (uint16_t)(MD(o).ssd_hits - p->pc[piece].h0);  // its own hits, as if it were its own key
-+      if (p->pc[piece].re_b && w == 0) {  // n=auto: was its last rewrite hit again (credited to the deciding class)
-+        p->re_try[p->pc[piece].re_c][p->pc[piece].re_b]++;
-+        if (h) p->re_hit[p->pc[piece].re_c][p->pc[piece].re_b]++;
-+        p->pc[piece].re_b = 0;
-+      }
-+      bool keep = w == 0 && ps <= budget && rf_reinsert_ok_h(p, c, h, ps) &&
-+                  (p->aops != &adm_budget_ops ||
-+                   adm_budget_charge(p->adm, (uint64_t)p->req_local->clock_time, (uint32_t)ps));
-+      rf_drop(p, r, i, ps);
-+      if (keep) {  // valid while it waits (region = RF_NONE): the object is not gone
-+        budget -= ps;
-+        p->pc[piece].region = RF_NONE;
-+        RF_GROW(p->rebuf, p->cap_re, p->nre + 1);
-+        RF_GROW(p->rebuf_pc, p->cap_repc, p->nre + 1);
-+        p->rebuf_pc[p->nre] = piece;
-+        p->rebuf[p->nre++] = o;
++    if (piece != RF_NONE) {  // a piece (rf_piece.c): piece mode decides it alone; object mode loses the object
++      if (p->pmode) {
++        rf_piece_evict(p, r, i, &budget);
 +        continue;
 +      }
-+      p->pc[piece].valid = false;
-+      if (w == 0) p->pc[MD(o).loc].vb -= ps;  // a write in progress recounts at its end
-+      CNT(p, piece_evict_bytes, c, ps);
-+      CNT(p, ssd_evict_bytes, c, ps);
-+      if (h == 0) CNT(p, dead_evict_bytes, c, ps);
-+      if (w == 0) rf_piece_check_gone(p, o, true);  // a write in progress checks at its end
-+      continue;
-+    }
-+    if (piece != RF_NONE) {
-+      uint32_t w = p->nw;
-+      while (w > 0 && p->wobj[w - 1] != o) w--;
-+      if (w > 0) {  // a piece of an object being written: abort that write
-+        rf_drop(p, r, i, p->pc[piece].size);
-+        p->pc[piece].valid = false;
-+        p->wab[w - 1] = true;
-+        continue;
-+      }
-+      uint64_t orphan = 0;
-+      for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next)
-+        if (p->pc[q].valid && p->pc[q].region != r) orphan += p->pc[q].size;
-+      if (p->pc[MD(o).loc].region == r)
-+        CNT(p, chunk_loss_head, MD(o).cls, 1);
-+      else
-+        CNT(p, chunk_loss_other, MD(o).cls, 1);
-+      CNT(p, chunk_orphan_bytes, MD(o).cls, orphan);
++      if (rf_piece_evict_obj(p, r, i)) continue;  // its write aborts
 +    }
 +    rf_ssd_invalidate(p, o);
 +    if (MD(o).re_b) {  // n=auto: was its last rewrite hit again before this eviction (credited to the deciding class)
@@ -7693,13 +7811,7 @@ index 0000000..acdc4e4
 +    rf_drop(p, MD(o).loc, MD(o).pos, (uint64_t)o->obj_size);
 +    return;
 +  }
-+  for (uint32_t q = MD(o).loc; q != RF_NONE;) {
-+    uint32_t nx = p->pc[q].next;
-+    if (p->pc[q].valid) rf_drop(p, p->pc[q].region, p->pc[q].pos, p->pc[q].size);
-+    p->pc[q].valid = false;
-+    rf_piece_free(p, q);
-+    q = nx;
-+  }
++  rf_piece_invalidate(p, o);
 +}
 +
 +/* an SSD hit reads every piece, touching its region in order */
@@ -7711,6 +7823,44 @@ index 0000000..acdc4e4
 +  }
 +  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next)
 +    if (p->pc[q].valid) rf_touch(p, p->pc[q].region);  // chunk-mode=piece: only the pieces that are there
++}
++
++/* RF_AUDIT=<k> (debugging): every k requests, between requests, check the region store against itself and the
++ * objects / pieces against the store. O(entries + pieces). Dies with what disagrees. */
++void rf_region_audit(rf_params_t *p) {
++#define AUD(cond, ...) do { if (!(cond)) rf_die("RegionFlash audit (request %lld): " __VA_ARGS__); } while (0)
++  uint64_t used = 0;
++  for (uint32_t r = 0; r < p->N; r++) {
++    const rf_region_t *g = &p->reg[r];
++    if (g->state == RF_R_FREE) { AUD(g->n_ent == 0 && g->valid == 0, "free region %u not empty\n", (long long)p->t, r); continue; }
++    uint64_t v = 0;
++    uint32_t nv = 0;
++    for (uint32_t i = 0; i < g->n_ent; i++) {
++      cache_obj_t *o = g->ent[i].o;
++      uint32_t q = g->ent[i].piece;
++      if (o == NULL) continue;
++      nv++;
++      AUD(MD(o).flags & RF_SSD, "region %u entry %u: object %llu not marked on the SSD\n", (long long)p->t, r, i,
++          (unsigned long long)o->obj_id);
++      if (q == RF_NONE) {
++        AUD(!(MD(o).flags & RF_CHUNK) && MD(o).loc == r && MD(o).pos == i, "region %u entry %u: object %llu points elsewhere\n",
++            (long long)p->t, r, i, (unsigned long long)o->obj_id);
++        v += (uint64_t)o->obj_size;
++      } else {
++        AUD(q < p->npc && (MD(o).flags & RF_CHUNK) && p->pc[q].o == o && p->pc[q].valid && p->pc[q].region == r &&
++                p->pc[q].pos == i, "region %u entry %u: piece %u of object %llu disagrees\n", (long long)p->t, r, i, q,
++            (unsigned long long)o->obj_id);
++        v += p->pc[q].size;
++      }
++    }
++    AUD(v == g->valid && nv == g->nvalid, "region %u: valid %llu B / %u entries, counted %llu B / %u\n", (long long)p->t,
++        r, (unsigned long long)g->valid, g->nvalid, (unsigned long long)v, nv);
++    used += v;
++  }
++  AUD(used == p->ssd_used, "regions hold %llu B, ssd_used %llu B\n", (long long)p->t, (unsigned long long)used,
++      (unsigned long long)p->ssd_used);
++#undef AUD
++  rf_piece_audit(p);
 +}
 +
 +/* make one region free */
@@ -7866,10 +8016,10 @@ index 0000000..3428cb2
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c b/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c
 new file mode 100644
-index 0000000..4b7736e
+index 0000000..33be16e
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,189 @@
 +//
 +//  rf_ssd.c — the SSD tier as the request flow sees it: admission (admit ->
 +//  hint -> write), hits, invalidation, eviction accounting and reinsertion's
@@ -7916,7 +8066,8 @@ index 0000000..4b7736e
 +    CNT(p, dead_evict_objs, c, 1);
 +    if (bytes) CNT(p, dead_evict_bytes, c, s);
 +  }
-+  if (next == -1 || next == MAX_REUSE_DISTANCE)
++  if (!bytes) {  // chunk-mode=piece: the oracle split was counted piece by piece too
++  } else if (next == -1 || next == MAX_REUSE_DISTANCE)
 +    CNT(p, oracle_never_bytes, c, s);
 +  else if (next >= 0)
 +    CNT(p, oracle_reused_bytes, c, s);
