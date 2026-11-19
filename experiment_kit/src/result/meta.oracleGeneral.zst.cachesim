@@ -1,0 +1,17 @@
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6411, byte miss ratio 0.0493, throughput 0.17 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6117, byte miss ratio 0.0495, throughput 0.85 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6411, byte miss ratio 0.0493, throughput 0.73 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6202, byte miss ratio 0.0506, throughput 0.68 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6323, byte miss ratio 0.0503, throughput 0.66 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6145, byte miss ratio 0.0480, throughput 0.55 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6125, byte miss ratio 0.0491, throughput 0.55 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6517, byte miss ratio 0.0498, throughput 0.45 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6141, byte miss ratio 0.0484, throughput 0.89 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6196, byte miss ratio 0.0497, throughput 0.92 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6403, byte miss ratio 0.0496, throughput 0.92 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6413, byte miss ratio 0.0487, throughput 0.74 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6538, byte miss ratio 0.0483, throughput 0.54 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6153, byte miss ratio 0.0474, throughput 0.54 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6129, byte miss ratio 0.0477, throughput 0.54 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6087, byte miss ratio 0.0477, throughput 0.51 MQPS
+/root/tc/meta.oracleGeneral.zst RegionFlash-lru-lru cache size   240GiB,         95841463 req, miss ratio 0.6138, byte miss ratio 0.0476, throughput 0.50 MQPS

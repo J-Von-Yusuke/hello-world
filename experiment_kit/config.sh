@@ -29,6 +29,9 @@ SSD_DEFAULT=${SSD_DEFAULT:-30%}            # SSD 容量: 240G（固定）/ 30%�
 DRAM_DIV=${DRAM_DIV:-30}                   # DRAM = SSD / DRAM_DIV        （meta: 240G の SSD に 8G）
 REGION_N=${REGION_N:-392}                  # Region の数。R = SSD / REGION_N（MiB に切り捨て。meta: 626.5 MiB）
 CHUNK=${CHUNK:-64K}                        # piece-wise 書き込みの幅（R より大きければ R に縮める）
+CHUNK_MODE=${CHUNK_MODE:-piece}            # 片の扱い。piece = CacheLib の piece-wise caching と同じ（失った片だけが消え、欠けた片だけを
+                                           # 取り直す。11-19 から既定）/ object = 片を 1 つ失うと物全体を捨てる（11-19 までの結果）。
+                                           # chunk=0 の構成と物単位 SSD（obj 系）は片が無いので常に object。モードが違う結果は回し直す
 PIECE=${PIECE:-131072}                     # K(N)（piece 数）の数え方。CacheLib は 128 KiB
 INTERVAL=${INTERVAL:-10000}                # 先頭 N 要求の曲線の刻み（要求数）。小さいトレース（< 1000 万）は 1000 に
 NREQ=${NREQ:-}                             # 空 = 全要求。数字 = 各 RegionFlash 実行を先頭 NREQ 要求で打ち切る（試運転用）
@@ -137,6 +140,8 @@ PAPER_CATALOG=(
   "ru_dram1_auto|hint=key:key=dram/thr=1,region-evict=lru,region-params=auto=1/w=0.1,$RA" # 同（DRAM で 0 回 / 1 回以上）
   "ru_st_nauto|hint=split_threshold,region-evict=lru,$RA" # OHR 寄り: サイズ分類だけで容量の配分は決めない
   "ru_st_n0|hint=split_threshold,region-evict=lru"        # 同、書き直しなし
+  "r256_auto_n1|region-size=$PAPER_R256,$AUTO,reinsert=hits:n=1"   # 分類＋下限だけ、書き直しは CacheLib と同じ n=1（11-19。piece で CacheLib に BMR・書き込みとも勝つ）
+  "ru_auto_n1|$AUTO,reinsert=hits:n=1"
   "ru_gate|hint=split_threshold,region-evict=lru,region-params=auto=1/w=0.1/gate=1,$RA"   # 下限が要るかを試してから山登り（ru_auto_guide.html §6）
   # 受け入れ（何を書くか）× 置き場所（どこに書くか）の 2×2（相方は ru_none_auto・ru_auto）と、CacheLib に篩だけ足したもの
   "ru_adm_none_auto|hint=none,region-evict=lru,$RA,$ADM"
@@ -146,8 +151,10 @@ PAPER_CATALOG=(
   # CacheLib の書き直しの閾値違い（paper-ext。n=1 は r256_base）
   "r256_n0|$B256"  "r256_n2|$B256,reinsert=hits:n=2"  "r256_n3|$B256,reinsert=hits:n=3"
   # 頑健性（paper-robust）。id の末尾が条件で、図はそれを外した名前で並べる:
-  #   _c0  chunk=0（CacheLib と同じ置き方。Region より大きい物は入らない）。同じ R どうしの比較だけに使う
-  #   _c0m chunk=0 ＋ 受け入れの上限を全構成 256 MiB に（R の違う構成を chunk=0 で比べるとき）
+  #   _c0  chunk=0（片に分けず 1 Region の中に連続で置く。Region より大きい物は入らない）。片を 1 つ失うと物ごと消える
+  #        RegionFlash の扱いを外した感度分析。実機の置き方ではない（CacheLib の piece-wise caching は物を片に分けて独立の項目にする）
+  #   _c0m chunk=0 ＋ 受け入れの上限を全構成 256 MiB に（どの構成も同じ物の集まりにする。nha では 256 MiB を超える物が
+  #        リクエストバイトの 44% あり、それを全構成でミスにするので、言えるのは 256 MiB 以下の物の中での傾向だけ）
   #   _f1  再挿入の上限なし（max_frac=1）   _s2 / _s3  乱数の種
   "r256_base_c0|$B256,reinsert=hits:n=1,chunk=0"  "r256_n3_c0|$B256,reinsert=hits:n=3,chunk=0"  "ru_auto_c0|$AUTO,$RA,chunk=0"
   "r256_base_c0m|$B256,reinsert=hits:n=1,chunk=0,admit=sizemax:max=$PAPER_R256"  "r256_n3_c0m|$B256,reinsert=hits:n=3,chunk=0,admit=sizemax:max=$PAPER_R256"
@@ -162,25 +169,27 @@ PAPER_CATALOG=(
 # 回す方式（空白区切り。改行してもよい）
 PAPER_METHODS=${PAPER_METHODS:-"
   r256_base r256_adm ru_base ru_none_auto ru_ff90_h3 ru_auto ru_auto_w0 ru_auto_ii ru_dram_auto ru_dram1_auto
-  ru_st_nauto ru_st_n0 ru_adm_none_auto ru_adm_auto r256_none_auto r256_ff90_h3 r256_auto r256_auto_w0"}
+  ru_st_nauto ru_st_n0 ru_adm_none_auto ru_adm_auto r256_none_auto r256_ff90_h3 r256_auto r256_auto_w0 r256_auto_n1 ru_auto_n1"}
 PAPER_EXT_METHODS=${PAPER_EXT_METHODS:-"r256_n0 r256_n2 r256_n3"}
 PAPER_ROBUST_METHODS=${PAPER_ROBUST_METHODS:-"
   r256_base_c0 r256_n3_c0 ru_auto_c0  r256_base_c0m r256_n3_c0m ru_auto_c0m ru_base_c0m  r256_base_f1 r256_n3_f1 ru_auto_f1
   r256_base_s2 ru_auto_s2 r256_base_s3 ru_auto_s3
   ru_auto_w0_c0 ru_auto_w0_c0m ru_auto_w0_f1 ru_auto_w0_s2 ru_auto_w0_s3"}
 # 論文の本番用に絞った比較（./run.sh paper-final → 図と表は work/paper/final/。結果は paper・paper-ext と共有し、済んだ run は回さない）。
-# 選び方（README §6.5.2「本番用の比較」。数字は Meta nha 全量、CacheLib n=1 との差、書き込みは CacheLib = 1）:
-#   r256_base          基準 = いまの CacheLib（n=1）
+# 選び方（README §6.5.2「本番用の比較」）。数字は Meta nha 全量、chunk-mode=piece（実機と同じ片の扱い）、
+# CacheLib n=1 との ΔBMR [pt]・書き込み（CacheLib = 1）。chunk-mode=object の数字は README の変更の履歴:
+#   r256_base          基準 = いまの CacheLib（n=1。BMR 4.705%）
 #   r256_n0/n2/n3      CacheLib 自身のつまみ（書き直しの閾値）。「書き直しを減らしただけ」ではないことを示す
-#                      （nha: n=0 ΔBMR +0.13pt・0.89、n=3 +0.07・0.91 → 提案は BMR も書き込みも両方で上回る）
-#   ru_base            Region を RU に広げただけ（DLWA = 1 の代わりに道連れが増える。提案が取り戻す分の起点）
-#   ru_none_auto       切り分け: 分類なしで n=auto だけ（nha +0.03・0.89。ru_auto との差 −0.14pt = 分類＋下限の効果）
-#   ru_auto            提案（nha −0.11pt・0.86）
-#   ru_dram1_auto      置き場所の鍵を DRAM のヒット数に（RIPQ / Flashield の手がかり。nha −0.03・0.87 → 大きさの方が効く）
-#   r256_adm           CacheLib ＋ S3-FIFO 型の篩（先行研究の受け入れ。nha +0.02・0.61）
-#   ru_adm_auto        提案 ＋ 同じ篩（直交性: nha −0.08・0.50。置き場所の得は篩の上でも 7 割残る）
+#   r256_auto_n1       提案の中心: R=256MiB のまま分類＋下限の山登りだけ足す（書き直しは CacheLib と同じ n=1）。−0.090・0.972、OHR −0.04
+#   ru_auto_n1         同じものを R=RU で（−0.079・0.987）
+#   ru_base            Region を RU に広げただけ（−0.036・1.008。BMR の得はほぼ無い。RU の利点は DLWA の側）
+#   ru_none_auto       切り分け: 分類なしで n=auto だけ（+0.137・0.870）
+#   ru_auto            分類＋下限＋n=auto（+0.084・0.850。n=auto が書き直しを 9 → 0.6 TB に減らしすぎて BMR が悪化）
+#   ru_dram1_auto      置き場所の鍵を DRAM のヒット数に（RIPQ / Flashield の手がかり。piece では未測定）
+#   r256_adm           CacheLib ＋ S3-FIFO 型の篩（先行研究の受け入れ。−0.008・0.604）
+#   ru_adm_auto        分類＋下限＋n=auto ＋ 同じ篩（+0.135・0.498）
 PAPER_FINAL_METHODS=${PAPER_FINAL_METHODS:-"
-  r256_base r256_n0 r256_n2 r256_n3 ru_base ru_none_auto ru_auto ru_dram1_auto r256_adm ru_adm_auto"}
+  r256_base r256_n0 r256_n2 r256_n3 r256_auto_n1 ru_auto_n1 ru_base ru_none_auto ru_auto ru_dram1_auto r256_adm ru_adm_auto"}
 # 以前の指定の互換: PAPER_GATE=1 で ru_gate を足す / ROBUST_W0=0 で ru_auto_w0_* を外す
 [ "${PAPER_GATE:-0}" = 1 ] && PAPER_METHODS="$PAPER_METHODS ru_gate"
 [ "${ROBUST_W0:-1}" = 0 ] && PAPER_ROBUST_METHODS=$(printf '%s\n' $PAPER_ROBUST_METHODS | grep -v '^ru_auto_w0_' | tr '\n' ' ')

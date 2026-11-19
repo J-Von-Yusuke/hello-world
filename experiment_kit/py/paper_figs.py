@@ -69,11 +69,14 @@ NAME = {
     "ru_adm_none_auto": ("R=RU＋篩＋n=auto（分類なし）", "R=RU + admission + auto n (no class.)"),
     "ru_adm_auto": ("R=RU＋篩＋分類（自動）", "R=RU + admission + class. (auto)"),
     "ru_adm_dram2_auto": ("R=RU＋篩＋DRAM ヒット 1 回以下 / 2 回以上（自動）", "R=RU + admission + DRAM-hit split (<=1 / >=2)"),
+    "r256_auto_n1": ("R=256MiB＋分類（自動）＋n=1", "R=256MiB + class. (auto) + n=1"),
+    "ru_auto_n1": ("R=RU＋分類（自動）＋n=1", "R=RU + class. (auto) + n=1"),
 }
 COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
        "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a", "ru_auto_w0": "#5b3a8c", "r256_auto_w0": "#8c3a5b",
        "ru_auto_ii": "#2a9d8f", "ru_dram_auto": "#6a994e", "ru_dram1_auto": "#a7c957", "ru_st_nauto": "#e9c46a", "ru_st_n0": "#f4a261",
-       "ru_gate": "#264653", "r256_adm": "#b5838d", "ru_adm_none_auto": "#9d8189", "ru_adm_auto": "#6d597a", "ru_adm_dram2_auto": "#b56576"}
+       "ru_gate": "#264653", "r256_adm": "#b5838d", "ru_adm_none_auto": "#9d8189", "ru_adm_auto": "#6d597a", "ru_adm_dram2_auto": "#b56576",
+       "r256_auto_n1": "#e76f51", "ru_auto_n1": "#0b6e4f"}
 # run.sh が残した選択（methods.tsv: id・図の名前・指定）。paper はその順と名前で並べ、選ばなかった方式は出さない。
 # ext / 条件ごとは上の並びに、選んだ方式のうち並びに無いものを後ろへ足す。名前が空なら上の NAME（無ければ id）
 SEL = []
@@ -358,7 +361,7 @@ for n in names:
 #   S3-FIFO 型の篩（受け入れ、admit=dram:min=1/ghost=0.9）の点も重ねる：書き込みは少なく左に来るので、
 #   縦の位置を n=0（書き直しなし）の点と比べると、篩が帯域（BMR）と引き換えにどれだけ書き込みを減らしたかが分かる
 CURVE = [("r256_n0", "n=0"), ("r256_base", "n=1"), ("r256_n2", "n=2"), ("r256_n3", "n=3")]
-PTS = [("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True),
+PTS = [("r256_auto_n1", 11, False), ("ru_auto_n1", 10, False), ("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True),
        ("r256_adm", 10, False), ("ru_adm_auto", 10, False), ("ru_adm_none_auto", 8, True)]
 if FINAL:   # final は選んだ方式を全部（CacheLib の n=0〜3 の線以外）点で
     PTS = [p for p in PTS if p[0] in SEL] + [(c, 9, False) for c in SEL if c not in {p[0] for p in PTS} | {c for c, _ in CURVE}]

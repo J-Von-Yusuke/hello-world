@@ -27,6 +27,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+/* 計測（PROF=1 のとき標準エラーに）：region() の呼び出し・内側の反復の回数と、段階ごとの時間 */
+static double wall(void) { struct timeval v; gettimeofday(&v, 0); return v.tv_sec + v.tv_usec * 1e-6; }
+static double *WSL, WSLT; static int WSOK;  // ウォームスタート：前の解 log L と、そのときの log T
+static long PR_CALL, PR_IT, PR_MAXED; static double PR_T[6], PR_RESMAX;  // PR_MAXED：ITMAX まで回って収束しなかった呼び出し  // 0 組成の標本 1 lM 2 寿命 la 3 離散 4 待ち U 5 その他
 
 #define KMAX 8
 #define G 160  // t の格子
@@ -166,6 +171,10 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
   double lT = log(T), fe[KMAX];
   for (int k = 0; k < K; k++) fe[k] = (int)(R / SZ[k]) * SZ[k] / R;  // 単一サイズの Region の充填率
   for (int i = 0; i < NB; i++) logL[i] = lT;                          // FIFO の解（LRU の初期値）
+  /* ウォームスタート（2026-11-19）：同じ区間解き（region_solve）の中で前の T の解が収束していれば、それを
+   * T の比だけずらして初期値にする（T を少し動かすたびに FIFO の解から解き直していた）。収束しなかった解は使わない */
+  if (lru && INIT < 0 && WSOK && !getenv("NOWARM"))
+    for (int i = 0; i < NB; i++) logL[i] = WSL[i] + lT - WSLT;
   if (lru && INIT >= 0) {  // 診断 SCAN：初期値を変える（0 = 上限 ℓ_max、1.. = T と上限の間の乱数）
     double nl = 0;
     for (int i = 0; i < NB; i++) nl = fmax(nl, B[i].lam * (int)(R / SZ[B[i].k]));
@@ -175,9 +184,11 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
       logL[i] = lT + (INIT ? (z >> 11) * 0x1.0p-53 : 1) * (nl * T + log(-expm1(-nl * T)) - log(nl) - lT);
     }
   }
-  double dmp = DAMP, rprev = INFINITY;
+  double dmp = DAMP, rprev = INFINITY, w0 = wall(), w1;
+  PR_CALL++;
   for (int it = 0; it < ITMAX; it++) {  // FIFO も組成（詰め残し）と封じるまでの待ちのために回す
     double lM[KMAX][G + 1], lW[KMAX][G + 1], q[KMAX], res = 0, elk[KMAX], lU[KMAX], half[KMAX];
+    PR_IT++;
     static double LS[KMAX][4096];  // 揺らぎの補正用：同居の物の touch 率の和 Λ_rest の標本
     static double la[400000];      // 封じてからの寿命 log L（U を足す前）
     int nls[KMAX];
@@ -209,6 +220,7 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
       }
       q[k] = lz;
     }
+    w1 = wall(), PR_T[1] += w1 - w0, w0 = w1;
     for (int c = 0, u = 0; c < K; c++) {  // 物（クラス c）を置き、残りを同じ分類の挿入の流れで埋める
       int nn[KMAX], one = 1;
       double qq[KMAX], mx = -INFINITY, tot = 0, ef = 0, cnt = 0;
@@ -239,6 +251,7 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
       fe[c] = ef / (one ? 1 : S);
       half[c] = cnt / (one ? 1 : S) / 2;  // 物の後に入る物の数の平均（0〜n−1 で一様）
     }
+    w1 = wall(), PR_T[0] += w1 - w0, w0 = w1;
     /* T の揺らぎの補正（CV > 0）：Region は無アクセス時間がその時点の閾値 Θ を超えると死ぬ。
      * Θ = T(1 + CV·z)、z ~ N(0,1)。寿命が Θ の変動の時間より長い Region では死亡率が時間平均で効き、
      * 1 回の無アクセス区間で死ぬ確率 p = E_Θ[e^{−ΛΘ}]、寿命 L(Λ) = (1/p − 1)/Λ。
@@ -286,6 +299,7 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
         }
       la[i] = a;
     }
+    w1 = wall(), PR_T[2] += w1 - w0, w0 = w1;
     if (DISC && lru) {  // 追い出しの間隔 Δ = R ÷ 挿入バイト率（今の ℓ でのミス率）。Λ は同居の平均場の標本 LS
       double br = 0, D;
       for (int i = 0; i < NB; i++) br += CE(i) * B[i].s * B[i].lam * (1 - sigm(log(B[i].lam) + logL[i]));
@@ -300,23 +314,38 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
         la[i] = lse(la[i] + g - log(nls[c]), log(D / 2));
       }
     }
+    w1 = wall(), PR_T[3] += w1 - w0, w0 = w1;
     /* 封じるまでの待ち U：書き込み中の Region は追い出されず、Region の時計（最後の touch）は封じた時から
      * 始まるので、滞在 = U ＋ 封じてからの寿命。U = (後に入る物の数) ÷ 分類の挿入率で、挿入率が U に依る
      * （U が長いほどミスが減る）ので、U · rate(U) = half を同じ反復の中で解く（左辺は U について増加）。 */
+    /* 解き方（2026-11-19）：前は [−10, 60] の二分法 60 回で、反復ごとに 60 × K 回の並列区間を作り、全体の半分の時間を
+     * 使っていた。f(m) = Σ c·λU/(1 + λ(L + U))（m = log U）は m について増加で、微分も閉じた形
+     * f'(m) = Σ term·(1 − σ(z)·σ(m − la))（z = log λ + lse(la, m)）なので、前の反復の U から始めるニュートン法にし、
+     * 枠 [lo, hi] から出る一歩は二分法に替える（同じ根を、ほぼ機械精度まで数回で求める）。 */
+    static double lUprev[KMAX]; static int lUok;
+    if (it == 0) lUok = 0;
     for (int c = 0; c < K; c++) {
-      double lo = -10, hi = 60;
-      for (int it2 = 0; it2 < 60 && !NOU; it2++) {
-        double m = (lo + hi) / 2, f = 0;
-#pragma omp parallel for schedule(static) reduction(+ : f)
+      double lo = -10, hi = 60, m = lUok && lUprev[c] > lo && lUprev[c] < hi ? lUprev[c] : 25;
+      for (int it2 = 0; it2 < 100 && !NOU; it2++) {
+        double f = 0, fp = 0;
+#pragma omp parallel for schedule(static) reduction(+ : f, fp)
         for (int i = 0; i < NB; i++)
           if (GR[B[i].k] == GR[c]) {  // c · λU / (1 + λ(L + U))
             double x = log(B[i].lam), z = x + lse(la[i], m);
-            f += CE(i) * exp(x + m - (z > 0 ? z + log1p(exp(-z)) : log1p(exp(z))));
+            double t = CE(i) * exp(x + m - (z > 0 ? z + log1p(exp(-z)) : log1p(exp(z))));
+            f += t, fp += t * (1 - sigm(z) * sigm(m - la[i]));
           }
         if (f < half[c]) lo = m; else hi = m;
+        double mn = fp > 0 ? m - (f - half[c]) / fp : NAN;
+        if (!(mn > lo && mn < hi)) mn = (lo + hi) / 2;
+        if (fabs(mn - m) < 1e-13 * fmax(1, fabs(m)) || hi - lo < 1e-13) { m = mn; break; }
+        m = mn;
       }
-      lU[c] = NOU ? -INFINITY : (lo + hi) / 2;
+      lU[c] = NOU ? -INFINITY : m;
+      lUprev[c] = m;
     }
+    lUok = 1;
+    w1 = wall(), PR_T[4] += w1 - w0, w0 = w1;
     for (int i = 0; i < NB; i++) {
       double a = lse(la[i], lU[B[i].k]);
       if (fabs(a - logL[i]) > res) res = fabs(a - logL[i]);
@@ -330,7 +359,13 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
     if (it > 1 && res > 0.95 * rprev && !FIXDAMP) dmp = fmin(0.95, dmp + 0.15);
     rprev = res;
     ITS = it, RES = res;
+    w1 = wall(), PR_T[5] += w1 - w0, w0 = w1;
     if (res < 1e-4) break;
+  }
+  if (ITS == ITMAX - 1 && RES >= 1e-4) PR_MAXED++, PR_RESMAX = fmax(PR_RESMAX, RES);
+  if (lru) {  // 次の T の初期値に残す（収束したときだけ）
+    WSOK = RES < 1e-4;
+    if (WSOK) memcpy(WSL, logL, NB * sizeof(double)), WSLT = lT;
   }
   double occ = 0;
   *ohr = *bhr = 0;
@@ -352,14 +387,27 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
 static double region_solve(double C, int lru, double *ohr, double *bhr, double *occ_k) {
   double lo, hi;
   memset(pin, 0, NB * sizeof(double)), memset(PINB, 0, sizeof PINB), NPIN = 0;
+  WSOK = 0;  // ウォームスタートは 1 つの区間解きの中だけ（区画・分類・容量が変わると別の問題）
   int hor = lru && HOR > 0 && ONLY < 0;  // 静的分割の区画では立ち上がりの隔離を入れない
   if (hor) coldstart(C);
   for (int outer = 0, last = -1; outer < 8; outer++) {  // T → 不死の集合 → T … が止まるまで
     lo = -5, hi = 40;
     if (TFIX && lru) lo = hi = log(TFIX);
-    for (int it = 0; it < 36 && lo < hi; it++) {
-      double m = (lo + hi) / 2;
-      if (region(exp(m), lru, ohr, bhr, occ_k) < C) lo = m; else hi = m;
+    /* 占有 = C となる log T を、符号を保つ線形補間（イリノイ法）で詰める（2026-11-19）。前は 36 回の二分法で、
+     * 1 回の区間解きに region() を 37 回呼んでいた。占有は T について増加でなめらかなので、同じ精度
+     * （log T の幅 1e-10）まで 10 回前後で届く。補間が枠の外に出る・縮まないときは二分法の一歩にする。 */
+    if (lo < hi) {
+      double glo = region(exp(lo), lru, ohr, bhr, occ_k) - C, ghi = region(exp(hi), lru, ohr, bhr, occ_k) - C;
+      if (glo >= 0) hi = lo;        // どの T でも占有が C 以上：下端（二分法でも下端に寄る）
+      else if (ghi < 0) lo = hi;    // どの T でも足りない：上端
+      for (int it = 0, side = 0; it < 80 && hi - lo > 1e-10; it++) {
+        double m = (lo * ghi - hi * glo) / (ghi - glo);
+        if (!(m > lo && m < hi) || it % 8 == 7) m = (lo + hi) / 2;  // 8 回に 1 回は二分（補間が片側に張り付くのを防ぐ）
+        double g = region(exp(m), lru, ohr, bhr, occ_k) - C;
+        if (g < 0) { lo = m, glo = g; if (side < 0) ghi /= 2; side = -1; }
+        else       { hi = m, ghi = g; if (side > 0) glo /= 2; side = 1; }
+        if (fabs(g) < 1e-12 * C) { lo = hi = m; break; }
+      }
     }
     if (!hor) break;
     int np = pins(exp((lo + hi) / 2));
@@ -482,7 +530,7 @@ int main(int argc, char **argv) {
     }
   }
   logL = malloc(NB * sizeof(double)), pres = malloc(NB * sizeof(double)), lm = malloc(NB * sizeof(double));
-  pin = calloc(NB, sizeof(double));
+  pin = calloc(NB, sizeof(double)), WSL = malloc(NB * sizeof(double));
   U = malloc(sizeof(double) * S * 4096);
   uint64_t z = 12345;
   for (int i = 0; i < S * 4096; i++) z = z * 6364136223846793005ull + 1442695040888963407ull, U[i] = (z >> 11) * 0x1.0p-53;
@@ -533,8 +581,12 @@ int main(int argc, char **argv) {
       printf("  opt       ohr=%.4f bhr=%.4f\n", h + DOH, bh / TB + DBH);
       free(ix);
     }
+    double pw = wall(); long pc = PR_CALL, pi = PR_IT;
+#define PROF_STEP(nm) if (getenv("PROF")) fprintf(stderr, "PROF f=%.3f %-8s %7.2f s  region() %5ld  iterations %7ld\n", fr[f], nm, \
+                                                  wall() - pw, PR_CALL - pc, PR_IT - pi), pw = wall(), pc = PR_CALL, pi = PR_IT
     T = region_solve(C, 0, &o, &b, ck);
     put_hk("rfifo", o, b, T, ck, C, sh);
+    PROF_STEP("rfifo");
     for (int v = 0; v < ngr; v++) {
       char nm[32]; int ng = 0;
       for (int k = 0; k < K; k++) GR[k] = grs[v][k], ng = GR[k] + 1 > ng ? GR[k] + 1 : ng;
@@ -549,13 +601,19 @@ int main(int argc, char **argv) {
       T = region_solve(C, 1, &o, &b, ck);
       snprintf(nm, sizeof nm, "rlru[%d]", v);
       put_hk(nm, o, b, T, ck, C, sh);
+      PROF_STEP(nm);
       if (v && P > 0) {
         double nat[KMAX] = {0};  // 自然な配分を分類（グループ）ごとに
         for (int k = 0; k < K; k++) nat[GR[k]] += ck[k];
         rpart(C, ng, v, nat);
+        PROF_STEP("rpart");
       }
     }
     fflush(stdout);
   }
+  if (getenv("PROF"))
+    fprintf(stderr, "PROF not converged (hit ITMAX): %ld, largest residual %.2e\n", PR_MAXED, PR_RESMAX),
+    fprintf(stderr, "PROF total: region() %ld, iterations %ld | sample %.1f s, lM %.1f s, la %.1f s, disc %.1f s, U %.1f s, other %.1f s\n",
+            PR_CALL, PR_IT, PR_T[0], PR_T[1], PR_T[2], PR_T[3], PR_T[4], PR_T[5]);
   return 0;
 }

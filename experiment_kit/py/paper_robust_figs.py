@@ -5,8 +5,10 @@
 
 条件ごとに、提案（RU＋分類の自動、ru_auto）と CacheLib（R=256MiB、分類なし）の差を並べる:
   既定        work/paper の ru_auto と r256_base（n3 は work/paper/ext の r256_n3）
-  chunk=0     _c0：物を 1 Region の中に連続で置く（片の損失が起きない）。R より大きい物は入らないので R の違う構成の比較には使わない
-  chunk=0m    _c0m：_c0 に、受け入れの上限を全構成で 256 MiB にそろえたもの（R の違う構成を chunk=0 で比べるのはこちら）
+  chunk=0     _c0：片に分けず、物を 1 Region の中に連続で置く（片を 1 つ失って物ごと消える RegionFlash の扱いが起きない）。
+              実機の置き方ではない（CacheLib の piece-wise caching は片を独立の項目にする）。R より大きい物は入らない
+  chunk=0m    _c0m：_c0 に、受け入れの上限を全構成で 256 MiB にそろえたもの。256 MiB を超える物（nha ではバイトの 44%）は
+              全構成でミスなので、256 MiB 以下の物の中での傾向だけを見る診断
   上限なし    _f1：再挿入の上限なし（max_frac=1）
   種 2 / 種 3 _s2 / _s3：乱数の種
 出力: fig_robust.svg（提案 − CacheLib n=1）、fig_robust_n3.svg（提案 − CacheLib n=3。n=3 のある条件だけ）、

@@ -115,6 +115,15 @@ ssd_bytes() {  # ssd_bytes <指定> <footprint>
   local s=${1:-$SSD_DEFAULT}
   if [[ "$s" == *% ]]; then awk -v f="$2" -v p="${s%\%}" 'BEGIN{printf "%d", f*p/100}'; else numfmt --from=iec "$s"; fi
 }
+cmode() {  # cmode <RegionFlash の指定>: その構成の片の扱い。最後の chunk= が 0（か無い）・物単位 SSD なら object、ほかは CHUNK_MODE
+  local c; c=$(grep -o 'chunk=[^,]*' <<< "$1" | tail -1)
+  if [ -z "$c" ] || [ "$c" = chunk=0 ] || [[ "$1" == *ssd-mode=object* ]]; then echo object; else echo "$CHUNK_MODE"; fi
+}
+with_cmode() {  # with_cmode <指定>: piece なら ,chunk-mode=piece を足した指定（object は何も足さない：11-19 以前と同じ指定）
+  if [ "$(cmode "$1")" = piece ]; then echo "$1,chunk-mode=piece"; else echo "$1"; fi
+}
+# 済んだ run の印：P.json があり、同じ片の扱いで回したもの（"chunk_mode": "<mode>"。11-19 以前の P.json には無いので回し直す）
+done_test() { echo "grep -qs 'chunk_mode.: .$(cmode "$2").' $1/P.json"; }
 jq1() { python3 -c "import json,sys; print(json.load(open('$1'))['$2'])"; }
 auto_p() {  # auto_p <物の数> <footprint> <SSD> <DRAM>  →  "P 1本の見積りGB 空きGB"（P が数字ならそのまま）
   local av; av=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
@@ -146,7 +155,7 @@ variant_run() {  # variant_run <name> <var: asis|fix|drop|delete> <trace.zst> <s
   [ -x /usr/bin/time ] && TM=1   # 各 run のピーク RSS を <id>/rss に残す（見積り MEM_* の検証用）
   job() {  # job <id> <eviction params> （完成済みはスキップ）
     local d=$O/$1
-    echo "[ -f $d/P.json ] || { mkdir -p $d && ${TM:+/usr/bin/time -f %M -o $d/rss} $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -o $d/lcs.txt -e \"$2,out=$d/P\" > $d/stdout 2>&1 || echo FAIL $d; }" >> "$J"
+    echo "$(done_test $d "$2") || { mkdir -p $d && ${TM:+/usr/bin/time -f %M -o $d/rss} $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -o $d/lcs.txt -e \"$(with_cmode "$2"),out=$d/P\" > $d/stdout2>&1 || echo FAIL $d; }" >> "$J"
   }
   local E0="dram-size=$DRAM,region-size=$R,chunk=$CH,$BASE_E,interval=$INTERVAL" h hid hs v bud
   for bud in "" $BUDGET_DWPD; do
@@ -235,7 +244,7 @@ tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <
     if [[ "$spec" == *ssd-mode=object* ]]; then spec="dram-size=$DRAM,dram-algo=lru,inclusion=cachelib,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU},$spec"
     elif [[ "$spec" == *region-size=* ]]; then spec="$E,$spec"   # 構成が Region の大きさを持つ（paper の 256 MiB など）
     else spec="$E,region-size=$R,$spec"; fi
-    echo "[ -f $O/$id/P.json ] || { mkdir -p $O/$id && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$spec,out=$O/$id/P\" > $O/$id/stdout 2>&1 || echo FAIL $O/$id; }" >> "$J"
+    echo "$(done_test $O/$id "$spec") || { mkdir -p $O/$id && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$O/$id/P\" > $O/$id/stdout 2>&1 || echo FAIL $O/$id; }" >>"$J"
   done
   echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"warmup\":\"$WU\",\"nreq_limit\":\"$NREQ\"}" > "$O/config.json"
   local p=${TUNE_P:-}; [ -z "$p" ] && { [ "$P" = auto ] && p=$NCPU || p=$P; }
@@ -301,9 +310,9 @@ che_one() {  # name path fmt params category source ssd → work/che/<name>.json
         none) spec="$E,region-size=$R,hint=none,region-evict=lru";;
         st_lru) spec="$E,region-size=$R,hint=split_threshold,region-evict=lru";;
       esac
-      [ "$id" = none ] && [ -f "$T/none/P.json" ] && continue   # tune の結果を使う（st_lru は記録が要るので回す）
+      [ "$id" = none ] && eval "$(done_test "$T/none" "$spec")" && continue   # 同じ片の扱いの tune の結果を使う（st_lru は記録が要るので回す）
       d=$O/$id ev=""; [ "$id" = st_lru ] && ev="RF_EVLOG=$d/evlog RF_ENDDUMP=$d/enddump"
-      echo "[ -f $d/P.json ] || { mkdir -p $d && env $ev $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$spec,out=$d/P\" > $d/stdout 2>&1 || echo FAIL $d; }" >> "$J"
+      echo "$(done_test $d "$spec") || { mkdir -p $d && env $ev $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$d/P\" > $d/stdout 2>&1 || echo FAIL $d; }" >> "$J"
     done
     # 増幅つきのトレースでは素の LRU は回さない（cachesim の lru は amp を知らない）
     [ "${TR_AMP_KEY:-1}" = 1 ] && [ "${TR_AMP_SIZE:-1}" = 1 ] &&
