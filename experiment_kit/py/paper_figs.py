@@ -494,11 +494,14 @@ if KN:
 CURVE = [("r256_n0", "n=0"), ("r256_base", "n=1"), ("r256_n2", "n=2"), ("r256_n3", "n=3")]
 PT_BIG = {"ru_auto_v2": 12, "ru_v2_n1": 12, "r256_v2_n1": 12, "ru_auto": 11, "r256_auto_n1": 11, "ru_auto_n1": 10, "ru_adm_auto_n1": 11}   # 強調の大きさ（無ければ 9）
 PT_HOLLOW = {"ru_ff90_h3", "ru_none_auto", "r256_none_auto", "ru_adm_none_auto"}                                                 # 切り分け用は白抜き
-PTS = [(c, PT_BIG.get(c, 9), c in PT_HOLLOW) for c in cfgs if c not in {k for k, _ in CURVE}]   # 系列は全部点で（CacheLib の n=0〜3 は線）
+LCURVE = [("ru_auto_v2", "λ=0"), ("ru_auto_v2_l01", "λ=0.1"), ("ru_auto_v2_l03", "λ=0.3"), ("ru_auto_v2_l1", "λ=1")]   # 11-20 現在の提案の λ の線
+PTS = [(c, PT_BIG.get(c, 9), c in PT_HOLLOW) for c in cfgs if c not in {k for k, _ in CURVE} | {k for k, _ in LCURVE[1:]}]   # 系列は全部点で（CacheLib の n=0〜3 は線）
 
 def tradeoff(keys):
     f = Fig()
+    lam = [c for c, _ in LCURVE[1:] if c in cfgs and any(c in runs[n]["runs"] for n in keys)]
     f.add_legend([(T("CacheLib（R=256MiB）n=0〜3", "CacheLib (R=256MiB) n=0..3"), "#4d4d4d", "line")] +
+                 ([(T("現在の提案の λ = 0〜1（書き込みの値段）", "proposal, λ = 0..1 (write price)"), colr("ru_auto_v2"), "dash")] if lam else []) +
                  [(nm(c), colr(c), "hollow" if hol else "dot") for c, _, hol in PTS if any(c in runs[n]["runs"] for n in keys)])
     top = f.legend_h() + 50; cols = min(3, len(keys)); rows_ = (len(keys) + cols - 1) // cols
     W = (1600 - 110 - 30 - 115 * (cols - 1)) // cols; H = (870 - top - 70 * (rows_ - 1)) // rows_
@@ -508,7 +511,8 @@ def tradeoff(keys):
         P = lambda c: (TB(R[c]) / TB(b), BMR(R[c]) - BMR(b))
         cur = [(P(c), lab) for c, lab in CURVE if c in R]
         dots = [(P(c), c, r, hol) for c, r, hol in PTS if c in R]
-        xs = [p[0] for p, *_ in cur + dots]; ys = [p[1] for p, *_ in cur + dots]
+        lp = [P(c) for c, _ in LCURVE if c in R]
+        xs = [p[0] for p, *_ in cur + dots] + [p[0] for p in lp]; ys = [p[1] for p, *_ in cur + dots] + [p[1] for p in lp]
         cx, cy = i % cols, i // cols
         box = (110 + cx * (W + 115), top + cy * (H + 70), 110 + cx * (W + 115) + W, top + cy * (H + 70) + H)
         a = Ax(f, box, xr=(0, max(xs + [1]) * 1.08), yr=span(ys), title=n,
@@ -517,6 +521,10 @@ def tradeoff(keys):
         cur.sort(key=lambda t: t[0][0])
         a.line([p[0] for p, _ in cur], [p[1] for p, _ in cur], "#4d4d4d", w=3, marker=True)
         for p, lab in cur: f.t(a.X(p[0]) + 10, a.Y(p[1]) - 10, lab, 18, "start", "#4d4d4d")
+        lc = [(P(c), lab) for c, lab in LCURVE if c in R and (c == "ru_auto_v2" or c in lam)]
+        if len(lc) > 1:   # λ を上げるほど書き込みが減る（左へ）
+            a.line([p[0] for p, _ in lc], [p[1] for p, _ in lc], colr("ru_auto_v2"), w=3, dash=True, marker=True)
+            for p, lab in lc[1:]: f.t(a.X(p[0]) + 10, a.Y(p[1]) + 24, lab, 18, "start", colr("ru_auto_v2"))
         for p, c, r, hol in dots: a.dot(p[0], p[1], colr(c), r, hollow=hol)
     return f.svg()
 

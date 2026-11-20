@@ -34,7 +34,7 @@ for src in (P, f"{P}/ext", D):
         d = json.load(open(f))
         if isinstance(d, dict) and "runs" in d: runs.setdefault(d["name"], {}).update(d["runs"])
 # 比べる組：(構成, 比べる相手, 図の名前, 題の構成名)。構成と相手の両方の結果がある条件だけを描く
-PROPS = [("ru_auto", "", T("提案", "proposal")), ("ru_auto_w0", "_w0", T("提案・BHR のみ", "proposal, BHR only")),
+PROPS = [("ru_auto_v2", "_v2", T("現在の提案（V2）", "proposal (V2)")), ("ru_auto", "", T("以前の提案", "previous proposal")), ("ru_auto_w0", "_w0", T("提案・BHR のみ", "proposal, BHR only")),
          ("ru_base", "_rubase", T("R=RU のみ", "R=RU only"))]
 PAIRS = [(p, b, f"{slug}{ps}", lab, ref) for p, ps, lab in PROPS
          for b, slug, ref in (("r256_base", "fig_robust", T("CacheLib n=1", "CacheLib n=1")), ("r256_n3", "fig_robust_n3", T("CacheLib n=3", "CacheLib n=3")))]

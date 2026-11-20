@@ -148,7 +148,13 @@ PAPER_CATALOG=(
   "ru_adm_v2_n1|$V2,reinsert=hits:n=1,$ADM"              # ＋篩（w01 では大きく効き、Tencent・ブロックのトレースでは逆効果）
   "ru_v2_cb|$V2,$CB"                                     # 書き直しを初めて書いた物の基準で（書き込みを減らす側）
   "ru_none_v2|hint=none,region-evict=lru,$CBM"          # 分類なしで書き直しだけ n=cb（11-20。ru_auto_v2 との差 = 分類＋配分の効果。paper-sens）
-  "ru_adm_v2|$V2,$CBM,$ADM"                             # 現在の提案 ＋ 篩（11-20。既定ではどの組にも入れていない）
+  "ru_adm_v2|$V2,$CBM,$ADM"                             # 現在の提案 ＋ 篩（11-20）
+  # 11-20 論文の問い（docs/Che-sim/paper_story.html §3）をそろえるための V2 の変種
+  "ru_v2_nofloor|hint=st_otsu:val=logreq/bins=1/hold=4/band=2/ema_den=0,region-evict=lru,$CBM"   # Q3：閾値だけで配分は自然なまま（下限なし）
+  "ru_adm_none_v2|hint=none,region-evict=lru,$CBM,$ADM"   # Q5：篩 ＋ 分類なし ＋ n=cb（2×2 の残り 1 つ。相方 ru_none_v2・ru_auto_v2・ru_adm_v2）
+  "ru_auto_v2_l01|$V2,reinsert=hits:n=cb/lambda=0.1/base=marg"   # Q4：書き込みの値段 λ を入れた ru_auto_v2（交換関係の図で λ の線になる）
+  "ru_auto_v2_l03|$V2,reinsert=hits:n=cb/lambda=0.3/base=marg"
+  "ru_auto_v2_l1|$V2,reinsert=hits:n=cb/lambda=1/base=marg"
   # 3. 以前の提案（st の閾値 ＋ 下限の山登り）
   "ru_auto|$AUTO,$RA"                                     # 以前の ru_auto（+0.083・0.609。n=auto が書き直しを削りすぎ）
   "r256_auto|region-size=$PAPER_R256,$AUTO,$RA"
@@ -193,6 +199,7 @@ PAPER_CATALOG=(
   "r256_base_f1|$B256,reinsert=hits:n=1/max_frac=1"  "r256_n3_f1|$B256,reinsert=hits:n=3/max_frac=1"  "ru_auto_f1|$AUTO,$RA/max_frac=1"
   "r256_base_s2|$B256,reinsert=hits:n=1,seed=2"  "ru_auto_s2|$AUTO,$RA,seed=2"
   "r256_base_s3|$B256,reinsert=hits:n=1,seed=3"  "ru_auto_s3|$AUTO,$RA,seed=3"
+  "ru_auto_v2_s2|$V2,$CBM,seed=2"  "ru_auto_v2_s3|$V2,$CBM,seed=3"   # Q2 の誤差（11-20）
   "ru_auto_w0_c0|$AUTO0,$RA,chunk=0"  "ru_auto_w0_c0m|$AUTO0,$RA,chunk=0,admit=sizemax:max=$PAPER_R256"
   "ru_auto_w0_f1|$AUTO0,$RA/max_frac=1"  "ru_auto_w0_s2|$AUTO0,$RA,seed=2"  "ru_auto_w0_s3|$AUTO0,$RA,seed=3"
 )
@@ -201,7 +208,10 @@ PAPER_CATALOG=(
 # 本番（paper-final2）: 基準・CacheLib のつまみ・現在の提案・以前の提案の要素・切り分け・先行研究の手がかり（README §6.5.2）
 PAPER_FINAL2_METHODS=${PAPER_FINAL2_METHODS:-"
   r256_base r256_n0 r256_n2 r256_n3 r256_auto_n1 ru_auto_n1 ru_base ru_none_auto ru_auto_v2 ru_dram1_auto r256_adm ru_adm_auto
-  r256_adm_auto_n1 ru_adm_auto_n1 r256_base_cb ru_auto_cb"}
+  r256_adm_auto_n1 ru_adm_auto_n1 r256_base_cb ru_auto_cb
+  ru_v2_nofloor ru_v2_n1 ru_none_v2 ru_adm_none_v2 ru_adm_v2 ru_auto_v2_l01 ru_auto_v2_l03 ru_auto_v2_l1"}
+# 11-20 の 2 行目 = 論文の問い（paper_story.html §3）のための V2 の変種：Q3 部品の段階（ru_base → ru_v2_nofloor → ru_v2_n1 → ru_auto_v2）、
+# Q4 λ の線（ru_auto_v2 と _l01・_l03・_l1）、Q5 篩との 2×2（ru_none_v2・ru_auto_v2 × ru_adm_none_v2・ru_adm_v2）。種は paper-robust（ru_auto_v2_s2・_s3）
 # 以前の本番（paper-final）: 上と同じ組で、提案を以前の ru_auto にしたもの。11-20 に足した V2 の変種 3 つも並べる
 PAPER_FINAL_METHODS=${PAPER_FINAL_METHODS:-"
   r256_base r256_n0 r256_n2 r256_n3 r256_auto_n1 ru_auto_n1 ru_base ru_none_auto ru_auto ru_dram1_auto r256_adm ru_adm_auto
@@ -217,7 +227,8 @@ PAPER_EXT_METHODS=${PAPER_EXT_METHODS:-"r256_n0 r256_n2 r256_n3"}
 PAPER_ROBUST_METHODS=${PAPER_ROBUST_METHODS:-"
   r256_base_c0 r256_n3_c0 ru_auto_c0  r256_base_c0m r256_n3_c0m ru_auto_c0m ru_base_c0m  r256_base_f1 r256_n3_f1 ru_auto_f1
   r256_base_s2 ru_auto_s2 r256_base_s3 ru_auto_s3
-  ru_auto_w0_c0 ru_auto_w0_c0m ru_auto_w0_f1 ru_auto_w0_s2 ru_auto_w0_s3"}
+  ru_auto_w0_c0 ru_auto_w0_c0m ru_auto_w0_f1 ru_auto_w0_s2 ru_auto_w0_s3
+  ru_auto_v2_s2 ru_auto_v2_s3"}
 # 以前の指定の互換: PAPER_GATE=1 で ru_gate を足す / ROBUST_W0=0 で ru_auto_w0_* を外す
 [ "${PAPER_GATE:-0}" = 1 ] && PAPER_METHODS="$PAPER_METHODS ru_gate"
 [ "${ROBUST_W0:-1}" = 0 ] && PAPER_ROBUST_METHODS=$(printf '%s\n' $PAPER_ROBUST_METHODS | grep -v '^ru_auto_w0_' | tr '\n' ' ')

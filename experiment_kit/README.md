@@ -135,11 +135,11 @@ bash のファイル。どの項目も環境変数で上書きできる（例 `P
 
 | 組 | 変数 | コマンド | 既定 |
 |---|---|---|---|
-| 本番 | `PAPER_FINAL2_METHODS` | `paper-final2` | 16 方式（現在の提案 `ru_auto_v2`、§6.5.2） |
+| 本番 | `PAPER_FINAL2_METHODS` | `paper-final2` | 24 方式（現在の提案 `ru_auto_v2` と論文の問い Q1〜Q5 の変種、§6.5.2） |
 | 以前の本番 | `PAPER_FINAL_METHODS` | `paper-final` | 20 方式（以前の `ru_auto` と V2 の変種、§6.5.2） |
 | 検討用の全部 | `PAPER_METHODS` | `paper` | 31 方式（§6.5.1） |
 | CacheLib の閾値違い | `PAPER_EXT_METHODS` | `paper-ext` | `r256_n0 r256_n2 r256_n3` |
-| 頑健性 | `PAPER_ROBUST_METHODS` | `paper-robust` | 19 方式（§6.5.4） |
+| 頑健性 | `PAPER_ROBUST_METHODS` | `paper-robust` | 21 方式（§6.5.4） |
 | 感度 | `PAPER_SENS_METHODS` | `paper-sens` | 5 方式 × 変えた点（`SENS_SSD`・`SENS_DRAM`・`SENS_RU`、§6.5.6） |
 
 ```bash
@@ -392,6 +392,9 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 | | `ru_v2_n1` / `r256_v2_n1` | RU / 256 MiB | 同じ分類と配分で、書き直しは CacheLib と同じ n=1 |
 | | `ru_adm_v2_n1` | RU | ＋ S3-FIFO 型の篩。w01 では書き込み 0.2 倍で BMR −3.2、Tencent・ブロックのトレースでは BMR が悪化 |
 | | `ru_v2_cb` | RU | 書き直しの基準を「初めて書いた物の値」に（より厳しく、書き込みを減らす側） |
+| | `ru_none_v2` / `ru_v2_nofloor` | RU | 部品の段階（Q3）：分類なしで n=cb だけ / 閾値だけで配分は自然なまま（下限なし）。`ru_base` → `ru_v2_nofloor` → `ru_v2_n1` → `ru_auto_v2` の順に部品が増える |
+| | `ru_adm_v2` / `ru_adm_none_v2` | RU | 篩との 2×2（Q5）：篩 ＋ 現在の提案 / 篩 ＋ 分類なし ＋ n=cb（相方 `ru_auto_v2`・`ru_none_v2`） |
+| | `ru_auto_v2_l01` / `_l03` / `_l1` | RU | 書き込みの値段 λ = 0.1・0.3・1（Q4）。交換関係の図で `ru_auto_v2`（λ=0）とつないだ破線になる |
 | 3 以前の提案 | `ru_auto` / `r256_auto` | RU / 256 MiB | st の閾値 ＋ 下限の山登り（前の窓と J = BHR + 0.1·OHR を比べる）＋ n=auto（+0.083・0.609。山登りは 1 歩の効果が窓ごとの揺れに埋もれて酔歩し、n=auto は書き直しを 9 → 0.8 TB に削りすぎた） |
 | | `ru_auto_n1` / `r256_auto_n1` | RU / 256 MiB | 同じで書き直しを n=1 に（−0.062・0.708 / −0.093・0.971） |
 | | `ru_auto_w0` / `r256_auto_w0` | RU / 256 MiB | 山登りの目的を BHR だけに（appendix §O） |
@@ -428,6 +431,9 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 | 直交性 | `ru_adm_auto` | 以前の分類＋下限＋n=auto ＋ 同じ篩（+0.112・0.354） |
 | 篩＋分類＋下限（n=1） | `r256_adm_auto_n1` / `ru_adm_auto_n1` | −0.074・0.588 / −0.064・0.429。BMR が CacheLib より良い構成の中で書き込み最少 |
 | 書き直しを損得で | `r256_base_cb` / `ru_auto_cb` | +0.011・0.989 / −0.064・0.674。損得で決めると答えはほぼ n=1 |
+| **論文の問い（11-20、`../docs/Che-sim/paper_story.html` §3）** | `ru_v2_nofloor` `ru_v2_n1` `ru_none_v2` | Q3 部品の段階：`ru_base` → 閾値だけ → ＋配分（n=1）→ ＋n=cb（`ru_auto_v2`） |
+| | `ru_auto_v2_l01` `_l03` `_l1` | Q4 書き込みとの交換：λ を上げると左（書き込み減）へ。`fig_tradeoff*.svg` で CacheLib の n=0〜3 の線と並ぶ破線 |
+| | `ru_adm_none_v2` `ru_adm_v2` | Q5 篩との 2×2（`ru_none_v2`・`ru_auto_v2` と組む） |
 
 **確かめた範囲と弱点**（`../docs/Che-sim/summary_1120.html`）：`ru_auto_v2` の数字は手元のスクリプトで回した nha・w01・Tencent（Region を nha と同じ比率に縮めた版）。設計の選択（閾値の量、`move=2` など）はこの 3 本を見て決めたので、検証用に回した msr（−0.30、以前の `ru_auto` の −1.05 に負け、名簿の向きが逆という未解決の問題）、block_traces_3（差が出ない）、大きさの分布が途中で変わる合成負荷（分けない CacheLib に負ける）では得が小さいか負けている。篩はトレースを選ぶ。`chunk-mode=object` で測った以前の数字は、付録の変更の履歴にある。
 
@@ -439,7 +445,7 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 
 #### 6.5.4 頑健性（`paper-robust`）
 
-結論が RegionFlash の作りや乱数に頼っていないかを見る（既定は 1 トレース 19 本）。背景は `../docs/regionflash_callgraph.html`。
+結論が RegionFlash の作りや乱数に頼っていないかを見る（既定は 1 トレース 21 本。11-20 に現在の提案の種 2・3 `ru_auto_v2_s2`・`_s3` を足し、`fig_robust_v2.svg` に出す）。背景は `../docs/regionflash_callgraph.html`。
 
 | 条件 | 指定 | 確かめること |
 |---|---|---|
@@ -516,6 +522,7 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 
 ## 付録：変更の履歴
 
+- **11-20 論文の問い Q1〜Q5 を paper-final2 一回で**：`paper_story.html` §3 の計測に足りなかった方式をカタログに足し、`PAPER_FINAL2_METHODS` に並べた（16 → 24 方式）：`ru_v2_nofloor`（閾値だけ・下限なし）、`ru_v2_n1`・`ru_none_v2`（部品の段階）、`ru_adm_none_v2`・`ru_adm_v2`（篩との 2×2）、`ru_auto_v2_l01`・`_l03`・`_l1`（λ）。交換関係の図は `ru_auto_v2` と λ の変種を破線でつなぐ。種 2・3 の `ru_auto_v2_s2`・`_s3` は paper-robust に入れ、`paper_robust_figs.py` が `fig_robust_v2.svg` を出す。`tools/synth/kit_q_test.sh` で確かめた。
 - **11-20 自分で決める値の動きの図 `fig_knobs_<trace>.svg` と `table_knobs.md`**：cachesim が区間の終わりごとに `P.knobs.csv`（閾値 τ、大の分類の下限、分類ごとの容量の割合・n=cb の基準・実質の n、λ）を書くようにし、paper 系の図に足した（§6.5.5）。既存の出力（P.json・P.interval*.csv）はビット単位で変わらない（24 構成）。図の点は 400 までに間引く。`tools/synth/kit_knobs_test.sh` で Tencent（縮小）全量の paper-final2 から図と表が出ることを確かめた（ru_auto_v2：閾値 2^16、下限 0.22、小の分類の基準 1.17・実質 n=2、大の分類 0.26・n=1）。
 - **11-20 感度 `paper-sens`**：SSD 容量（トレースの既定の 0.33・2 倍）・DRAM（SSD ÷ 100・10）・RU（256 MiB・1.25 GiB・2.5 GiB）を一つずつ変える組を足した（§6.5.6）。既定の点は paper の結果を共有し、RU の点では CacheLib を回さない。図は `py/paper_sens_figs.py`。カタログに `ru_none_v2`（分類なし＋n=cb）と `ru_adm_v2`（現在の提案＋篩、既定ではどの組にも入れていない）を足した。`run.sh` は `SSD_MULT` で SSD を倍にできる（paper-sens の中だけで使う）。`tools/synth/kit_sens_test.sh` で、nha の先頭 20 万要求について点ごとの SSD・DRAM・Region が指定どおりになること、RU の点で `r256_base` を回さないこと、図と表が出ることを確かめた。
 - **11-20 図の系列を config.sh の選択から**：`paper_figs.py` が持っていた方式の並び（ext と頑健性の条件ごと）と交換関係の図の点の一覧をやめ、組で選んで結果のある方式を全部系列にした。名前の無い方式は指定から名前を作り、色はどの図でも同じにした（前は図によって並び順の色がずれることがあった）。`./run.sh paper-figs` は描く前に methods.tsv を今の config.sh から作り直す。
