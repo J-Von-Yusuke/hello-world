@@ -167,6 +167,30 @@ static int pins(double T) {  // 寿命が観測期間を超える初期 Region �
     }
   return np;
 }
+/* Region の中身（組成）の厳密な分布（2026-11-19）：クラス c の物で始まる Region に、分類の挿入の流れ（確率 p_k）から
+ * 物を 1 つずつ引き、入らない物を引いたら封じる。終わりの組成 n（クラス k が n_k 個、詰め f = s_c + Σ n_k s_k ≤ R）の確率は
+ *   多項係数(n) · Π p_k^{n_k} · Σ_{k: f + s_k > R} p_k
+ * （詰めは増えるだけなので、同じ物の集まりはどの順でも入る）。前は S 個の組成を固定の乱数で引いていた。引いた個数は p_k について
+ * 階段状に変わるので、反復の写像が不連続になり（lW は組成の lse で大物の多い数個に支配され、段差が大きく出る）、
+ * 分類なし（混在）の rlru[0] が周期解に落ちて収束せず、標本の偏り（S = 400 → 4000 で BHR が 0.2pt 動く）も残っていた。 */
+typedef struct { double lp, f, n, ls; } mix_t;
+static mix_t *MX; static long NMX, CAPMX;
+#define MIXCAP 4000000  // 組成の数がこれを超える負荷は従来の標本に戻す
+static void mix_rec(int a, int na, const int *ks, const double *lpk, const double *el, double f, double lw, double n, double ls) {
+  if (NMX > MIXCAP) return;
+  if (a == na) {
+    double st = 0;
+    for (int b = 0; b < na; b++) if (f + SZ[ks[b]] > R) st += exp(lpk[b]);
+    if (st <= 0) return;  // まだ入る物しか引けない：先へ続く（その組成は終わりにならない）
+    if (NMX == CAPMX) CAPMX = CAPMX ? 2 * CAPMX : 4096, MX = realloc(MX, CAPMX * sizeof(mix_t));
+    MX[NMX++] = (mix_t){lw + lgamma(n + 1) + log(st), f, n, ls};
+    return;
+  }
+  for (int m = 0; f + m * SZ[ks[a]] <= R; m++)
+    mix_rec(a + 1, na, ks, lpk, el, f + m * SZ[ks[a]], lw + m * lpk[a] - lgamma(m + 1), n + m, ls + m * el[ks[a]]);
+}
+static int cmp_mix(const void *a, const void *b) { double x = ((mix_t *)b)->lp - ((mix_t *)a)->lp; return (x > 0) - (x < 0); }
+static int64_t gcd64(int64_t a, int64_t b) { while (b) { int64_t t = a % b; a = b, b = t; } return a; }
 static double region(double T, int lru, double *ohr, double *bhr, double *occ_k) {
   double lT = log(T), fe[KMAX];
   for (int k = 0; k < K; k++) fe[k] = (int)(R / SZ[k]) * SZ[k] / R;  // 単一サイズの Region の充填率
@@ -189,7 +213,7 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
   for (int it = 0; it < ITMAX; it++) {  // FIFO も組成（詰め残し）と封じるまでの待ちのために回す
     double lM[KMAX][G + 1], lW[KMAX][G + 1], q[KMAX], res = 0, elk[KMAX], lU[KMAX], half[KMAX];
     PR_IT++;
-    static double LS[KMAX][4096];  // 揺らぎの補正用：同居の物の touch 率の和 Λ_rest の標本
+    static double LS[KMAX][4096], LW[KMAX][4096];  // 同居の物の touch 率の和 Λ_rest の値と、その log 確率（揺らぎ・離散の補正用）
     static double la[400000];      // 封じてからの寿命 log L（U を足す前）
     int nls[KMAX];
     for (int k = 0; k < K; k++) {  // log M_k(t) = log E_ins[e^{λt}]（挿入はミス率に比例）
@@ -227,7 +251,43 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
       for (int k = 0; k < K; k++) if (GR[k] == GR[c] && q[k] > mx) mx = q[k];
       for (int k = 0; k < K; k++) qq[k] = GR[k] == GR[c] && mx > -INFINITY ? exp(q[k] - mx) : k == c, tot += qq[k], one &= !qq[k] || k == c;
       for (int j = 0; j <= G; j++) lW[c][j] = -INFINITY;
+      int ks[KMAX], na = 0; double lpk[KMAX];
+      int64_t gu = 0;
+      for (int k = 0; k < K; k++) if (qq[k] > 0) ks[na] = k, lpk[na++] = log(qq[k] / tot), gu = gcd64(gu, (int64_t)SZ[k]);
+      NMX = 0;
+      if (!getenv("MIXSAMPLE")) mix_rec(0, na, ks, lpk, elk, SZ[c], 0, 0, 0);  // 診断 MIXSAMPLE=1：従来の標本
+      long M = gu > 0 ? (long)((R - SZ[c]) / gu) : 0;
+      if (!getenv("MIXSAMPLE") && NMX > 0 && NMX <= MIXCAP && M < 50000000) {  // 厳密な組成
+        double mass = 0;
+        for (long x = 0; x < NMX; x++) { double w = exp(MX[x].lp); mass += w, ef += w * MX[x].f / R, cnt += w * MX[x].n; }
+        if (fabs(mass - 1) > 1e-9) fprintf(stderr, "synth_model: Region の組成の確率の和が %.12f（1 のはず）\n", mass);
+        fe[c] = ef / mass, half[c] = cnt / mass / 2;
+        /* Λ_rest の分布：確率の大きい順に、残りが 1e-12 未満になるか 4096 個まで（離散・揺らぎの補正は lse で増幅されない） */
+        qsort(MX, NMX, sizeof(mix_t), cmp_mix);
+        double kept = 0; int ns = 0;
+        while (ns < NMX && ns < 4096 && kept < mass * (1 - 1e-12)) kept += exp(MX[ns].lp), ns++;
+        for (int s = 0; s < ns; s++) LS[c][s] = MX[s].ls, LW[c][s] = MX[s].lp - log(kept);
+        nls[c] = ns;
+        /* lW = log E[Π_k M_k^{n_k}]：詰め f からの残りの寄与 V(f) = Σ_k p_k (f + s_k > R ? 1 : M_k V(f + s_k)) を上から解く */
+#pragma omp parallel for schedule(static)
+        for (int j = 0; j <= (lru ? G : -1); j++) {
+          double *v = malloc((M + 1) * sizeof(double));
+          for (long m = M; m >= 0; m--) {
+            double f = SZ[c] + (double)m * gu, a = -INFINITY;
+            for (int b = 0; b < na; b++) {
+              long m2 = m + (long)(SZ[ks[b]] / gu);
+              a = lse(a, lpk[b] + (f + SZ[ks[b]] > R ? 0 : lM[ks[b]][j] + v[m2]));
+            }
+            v[m] = a;
+          }
+          lW[c][j] = v[0];
+          free(v);
+        }
+        continue;
+      }
+      if (NMX > MIXCAP) fprintf(stderr, "synth_model: Region の組成が %d 個を超えるので標本 %d 個で近似する\n", MIXCAP, S);
       for (int s = 0; s < (one ? 1 : S); s++) {  // 単一サイズなら組成は決まる
+        LW[c][s] = -log(one ? 1 : S);
         double fill = SZ[c];
         memset(nn, 0, sizeof nn);
         for (;;) {
@@ -289,9 +349,8 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
           double y = (log(B[i].lam + LS[c][s]) - x0) / (x1 - x0) * GF;
           int g = y < 0 ? 0 : y >= GF ? GF - 1 : (int)y;
           double fr = fmin(fmax(y - g, 0), 1);
-          a = lse(a, lf[g] + fr * (lf[g + 1] - lf[g]));
+          a = lse(a, LW[c][s] + lf[g] + fr * (lf[g + 1] - lf[g]));
         }
-        a -= log(nls[c]);
       } else
         for (int j = 0; j < G; j++) {
           double g0 = B[i].lam * dt * j + w[j], g1 = B[i].lam * dt * (j + 1) + w[j + 1];
@@ -309,9 +368,9 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
         int c = B[i].k; double g = -INFINITY;  // log の平均 log E_s[x/(1 − e^{−x})]
         for (int s = 0; s < nls[c]; s++) {
           double x = (B[i].lam + LS[c][s]) * D;
-          g = lse(g, x < 1e-8 ? 0 : x > 30 ? log(x) : log(x / -expm1(-x)));
+          g = lse(g, LW[c][s] + (x < 1e-8 ? 0 : x > 30 ? log(x) : log(x / -expm1(-x))));
         }
-        la[i] = lse(la[i] + g - log(nls[c]), log(D / 2));
+        la[i] = lse(la[i] + g, log(D / 2));
       }
     }
     w1 = wall(), PR_T[3] += w1 - w0, w0 = w1;
@@ -346,10 +405,17 @@ static double region(double T, int lru, double *ohr, double *bhr, double *occ_k)
     }
     lUok = 1;
     w1 = wall(), PR_T[4] += w1 - w0, w0 = w1;
+    int iworst = 0;
     for (int i = 0; i < NB; i++) {
       double a = lse(la[i], lU[B[i].k]);
-      if (fabs(a - logL[i]) > res) res = fabs(a - logL[i]);
+      if (fabs(a - logL[i]) > res) res = fabs(a - logL[i]), iworst = i;
       logL[i] = it ? dmp * logL[i] + (1 - dmp) * a : a;
+    }
+    if (getenv("DIAGIT")) {  // 計測用 DIAGIT=1：反復ごとの残差・減衰・最悪のビン（クラス、λ、在籍率）・U・Δ・占有・OHR
+      double oc = 0, oh = 0;
+      for (int i = 0; i < NB; i++) { double p = sigm(log(B[i].lam) + logL[i]); oc += CE(i) * B[i].s * p / fe[B[i].k]; oh += CE(i) * B[i].lam * p; }
+      fprintf(stderr, "it=%d res=%.3e dmp=%.2f worst bin %d k=%d lam=%.3e p=%.6f lU=%.4f,%.4f D=%.4g occ=%.6e ohr=%.6f\n", it, res, dmp,
+              iworst, B[iworst].k, B[iworst].lam, sigm(log(B[iworst].lam) + logL[iworst]), lU[0], lU[K - 1], DLAST, oc, oh);
     }
     if (getenv("DBG"))
       fprintf(stderr, "  it=%d lU0=%.2f logL[first]=%.2f logL[last]=%.2f res=%.3g\n", it, lU[0], logL[0], logL[NB - 1], res);
@@ -409,12 +475,23 @@ static double region_solve(double C, int lru, double *ohr, double *bhr, double *
         if (fabs(g) < 1e-12 * C) { lo = hi = m; break; }
       }
     }
+    if (getenv("DIAG")) {  // 計測用 DIAG=1：外側の反復ごとに 不死の Region の数・T・占有/C・内側の反復と残差・括弧の両端の占有
+      double gl = region(exp(lo), lru, ohr, bhr, occ_k) - C, gh = region(exp(hi), lru, ohr, bhr, occ_k) - C;
+      double oc = region(exp((lo + hi) / 2), lru, ohr, bhr, occ_k);
+      fprintf(stderr, "DIAG lru=%d outer=%d pinned=%d T=%.6g occ/C=%.6f its=%d res=%.1e  g(lo)/C=%.2e g(hi)/C=%.2e width=%.1e\n",
+              lru, outer, NPIN, exp((lo + hi) / 2), oc / C, ITS, RES, gl / C, gh / C, hi - lo);
+    }
     if (!hor) break;
     int np = pins(exp((lo + hi) / 2));
     if (np == last) break;
     last = NPIN = np;
   }
   region(exp((lo + hi) / 2), lru, ohr, bhr, occ_k);
+  if (getenv("DIAG")) {
+    double s = 0; for (int k = 0; k < K; k++) s += occ_k[k];
+    fprintf(stderr, "DIAG final only=%d regions=%.1f pinned=%d sum(occ_k)/C=%.6f its=%d res=%.1e T=%.6g D=%.4g ohr=%.6f bhr=%.6f\n", ONLY,
+            C / R, NPIN, s / C, ITS, RES, exp((lo + hi) / 2), DLAST, *ohr, *bhr);
+  }
   if (lru && getenv("DUMP"))  // 診断：ビンごとの (クラス, 物の数, λ, 在籍率)
     for (int i = 0; i < NB; i++) fprintf(stderr, "B %d %g %.4e %.5f\n", B[i].k, B[i].c, B[i].lam, pres[i]);
   return exp((lo + hi) / 2);
@@ -543,7 +620,7 @@ int main(int argc, char **argv) {
     printf("f=%.3f C=%.0f R=%.0f\n", fr[f], C, R);
     if (getenv("SCAN")) {  // 診断 SCAN=T1,T2,..：クラスごとの分類で、T を固定して初期値 NST 通りから内側の不動点を解く
       int nst = getenv("NST") ? atoi(getenv("NST")) : 6;
-      for (int k = 0; k < K; k++) GR[k] = k;
+      for (int k = 0; k < K; k++) GR[k] = getenv("SCAN0") ? 0 : k;  // SCAN0=1：分類なし（全部 1 つの流れ）
       char buf[4096]; strncpy(buf, getenv("SCAN"), sizeof buf - 1);
       for (char *t = strtok(buf, ","); t; t = strtok(NULL, ","))
         for (INIT = -1; INIT < nst; INIT++) {

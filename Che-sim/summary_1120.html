@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11-19〜20 の整理</title>
+<style>
+:root { --ink:#14213D; --body:#3D4656; --mute:#6B7486; --paper:#F7F6F2; --card:#FBFBF8; --line:#CFCBBF;
+  --blue:#2F6FB0; --orange:#D9692A; --blue-soft:#DCE7F3; --orange-soft:#F6E0D2; --good:#2E7D4F; --bad:#B23A2E; --grey-soft:#ECEAE3; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --good:#6CC08F; --bad:#E07A6E; --grey-soft:#1C2433; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--body); font-family:"Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif; line-height:1.75; }
+main { max-width:1000px; margin:0 auto; padding:32px 16px 80px; }
+h1 { color:var(--ink); font-size:32px; margin:0 0 4px; }
+h2 { color:var(--ink); font-size:24px; margin:44px 0 12px; padding-top:12px; border-top:2px solid var(--line); }
+h3 { color:var(--ink); font-size:18px; margin:20px 0 8px; }
+p, li { font-size:16px; } ul { padding-left:1.3em; }
+.small { font-size:13px; color:var(--mute); }
+.box { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:12px 0; }
+.box.blue { background:var(--blue-soft); border-color:var(--blue); } .box.orange { background:var(--orange-soft); border-color:var(--orange); }
+.grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
+table { border-collapse:collapse; width:100%; font-size:14px; font-variant-numeric:tabular-nums; margin:8px 0; }
+th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:right; vertical-align:top; }
+th:first-child, td:first-child { text-align:left; } th { color:var(--ink); }
+td.l, th.l { text-align:left; }
+.good { color:var(--good); font-weight:700; } .bad { color:var(--bad); font-weight:700; }
+.tag { display:inline-block; font-size:12px; font-weight:700; padding:1px 8px; border-radius:99px; background:var(--grey-soft); color:var(--ink); }
+.tag.ok { background:var(--blue-soft); } .tag.ng { background:var(--orange-soft); }
+nav a { color:var(--blue); } code { font-size:13px; }
+svg text { font-family:inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>11-19〜20 の整理：受け入れ・置き場所・書き直し・容量の配分</h1>
+<p class="small">Meta nha 全量（片のモード、SSD 240 GiB、DRAM 8 GiB）と人気が移り変わる合成負荷（W1 の形）。数字は CacheLib n=1（R=256 MiB、BMR 4.705%）との差。NAND は R=256 MiB に DLWA 1.4 を掛けた書き込み（CacheLib = 1）。</p>
+<nav class="small">1 全体像 ／ 2 確定した数字 ／ 3 書き直し n=cb ／ 4 容量の配分（下限） ／ 5 サイズ閾値 ／ 6 先行研究 ／ 7 途中で直したこと ／ 8 残っている問題と次の一手 ／ 9 ファイル</nav>
+
+<h2>1. 全体像：4 つの部品と、いま一番効いている所</h2>
+<svg viewBox="0 0 960 250" role="img" aria-label="DRAMからSSDへの流れ。受け入れ（篩）、置き場所（サイズ分類）、容量の配分（下限の山登り）、書き直し（n=cb）の4部品。ばらつきの大半は容量の配分の探し方から来る">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--mute)"/></marker></defs>
+  <rect x="10" y="90" width="120" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/><text x="70" y="130" text-anchor="middle" font-size="16" fill="var(--ink)" font-weight="700">DRAM</text>
+  <line x1="130" y1="125" x2="170" y2="125" stroke="var(--mute)" stroke-width="2.5" marker-end="url(#a)"/>
+  <rect x="170" y="80" width="170" height="90" rx="10" fill="var(--blue-soft)" stroke="var(--blue)"/>
+  <text x="255" y="112" text-anchor="middle" font-size="16" fill="var(--ink)" font-weight="700">① 受け入れ（篩）</text><text x="255" y="136" text-anchor="middle" font-size="13" fill="var(--body)">何を SSD に書くか</text><text x="255" y="156" text-anchor="middle" font-size="13" fill="var(--body)">S3-FIFO 型 admit=dram</text>
+  <line x1="340" y1="125" x2="380" y2="125" stroke="var(--mute)" stroke-width="2.5" marker-end="url(#a)"/>
+  <rect x="380" y="80" width="190" height="90" rx="10" fill="var(--blue-soft)" stroke="var(--blue)"/>
+  <text x="475" y="112" text-anchor="middle" font-size="16" fill="var(--ink)" font-weight="700">② 置き場所</text><text x="475" y="136" text-anchor="middle" font-size="13" fill="var(--body)">大きさの閾値 τ で 2 分類</text><text x="475" y="156" text-anchor="middle" font-size="13" fill="var(--body)">st / 大津 / 固定</text>
+  <line x1="570" y1="125" x2="610" y2="125" stroke="var(--mute)" stroke-width="2.5" marker-end="url(#a)"/>
+  <rect x="610" y="20" width="330" height="210" rx="12" fill="var(--card)" stroke="var(--line)"/>
+  <text x="775" y="48" text-anchor="middle" font-size="16" fill="var(--ink)" font-weight="700">SSD（Region の集まり）</text>
+  <rect x="630" y="64" width="290" height="70" rx="10" fill="var(--orange-soft)" stroke="var(--orange)" stroke-width="2"/>
+  <text x="775" y="92" text-anchor="middle" font-size="15" fill="var(--ink)" font-weight="700">③ 容量の配分（大の分類の下限）</text><text x="775" y="116" text-anchor="middle" font-size="13" fill="var(--body)">4N 窓で J を比べる山登り ← 不安定</text>
+  <rect x="630" y="146" width="290" height="70" rx="10" fill="var(--blue-soft)" stroke="var(--blue)"/>
+  <text x="775" y="174" text-anchor="middle" font-size="15" fill="var(--ink)" font-weight="700">④ 書き直し（n=cb）</text><text x="775" y="198" text-anchor="middle" font-size="13" fill="var(--body)">追い出す物をもう一度書くか</text>
+</svg>
+<div class="box orange"><b>いちばん大事な発見</b>：①・②・④ のどれをいじっても、結果のばらつきの大半は ③ の山登りが<b>どこに落ち着くか</b>で決まっていた（合成負荷で下限 0.45〜0.81 → BMR が最大 4 pt 変わる。下限を固定すると差はほぼ消える）。③ の理屈（配分の最適点）は正しいが、それを探す方法が不安定。</div>
+
+<h2>1b. 下限の探し方の解決（11-20 夜、追記）</h2>
+<div class="box blue"><b>名簿で各分類の限界の BHR を測り、そろう向きへ下限を動かす（<code>region-params=auto=2/w=0/ff=0</code>）。自然な配分（下限 0）から出発し、重みも出発点も決め打ちしない。</b> 3 本のトレースすべてで、閾値ごとの最良にほぼ届いた。</div>
+<table>
+<tr><th>トレース / 閾値</th><th>今の山登り（auto=1）</th><th>下限なし（自然な配分）</th><th>auto=2・w=0・出発点 0</th><th>下限の平均</th></tr>
+<tr><td>nha / st</td><td>−0.062</td><td>+0.7〜0.9</td><td class="good">−0.086</td><td>0.88</td></tr>
+<tr><td>nha / 32M</td><td>−0.157（最良）</td><td>+0.649</td><td class="good">−0.141</td><td>0.57</td></tr>
+<tr><td>w01 / st</td><td>+0.393（下限 0.5 で停止）</td><td>—</td><td class="good">−1.805</td><td>0.03</td></tr>
+<tr><td>w01 / 256K</td><td>—</td><td>−4.087（最良）</td><td class="good">−3.782</td><td>0.06</td></tr>
+<tr><td>Tencent / st</td><td>+0.701</td><td>—</td><td class="good">−0.874</td><td>0.28</td></tr>
+<tr><td>Tencent / 32K</td><td>—</td><td>−0.348</td><td class="good">−0.946</td><td>0.27</td></tr>
+</table>
+<p class="small">ΔBMR [pt]、CacheLib n=1 比。Tencent は Region を nha と同じ比率に縮めた版（10.8 / 26.5 MB）。名簿は片だけが追い出されて一部ヒットになった分も数える版。</p>
+<ul>
+<li><b>不安定さの原因（診断）</b>：前の窓と J を比べる山登りは、0.02 動かした効果に対して窓ごとの揺れが 2〜数百倍（信号対雑音比 0.001〜0.53）。下限が効かない範囲では J が平らで酔歩になる。行き先は出発点と偶然で決まっていた。</li>
+<li><b>直したこと 4 つ</b>：① 傾きを名簿で直接測る（前の窓と比べない）。② 片だけが追い出された分も名簿に数える（nha の大きな物が見えていなかった）。③ w=0（OHR の項が、リクエストの多い小の分類の価値を水増ししていた）。④ 出発点を自然な配分（0）に（w01 は SSD が約 3 周しか入れ替わらず、出発点がそのまま結果になっていた）。</li>
+<li><b>歩幅を縮める案（auto=3）は失敗</b>：平らな範囲から出発すると、傾き 0 のまま歩幅だけ縮んで抜け出せない。</li>
+<li><b>閾値と配分の関係</b>：w01 の 256K（OHW を分ける）は自然な配分が最良、nha の 32M は大の分類へ 0.6、Tencent の 32K は 0.27。向きも量も違うが、「限界の BHR をそろえる」一つの条件で説明できる。閾値が良くても配分は別に要る（nha で下限なしは +0.65 pt）。</li>
+<li>残る差：nha で 0 から登るぶん最良より 0.016〜0.02 pt 劣る。最良の閾値はトレースごとに大きく違い（256K / 32K / 32M）、st はどれも外す → 次は閾値を同じ名簿の価値で決める。</li>
+</ul>
+
+<h2>1c. 閾値を自動で決める（11-20 夜、追記）</h2>
+<p>容量の配分は 1b の auto=2/w=0/ff=0 に固定し、閾値の決め方だけを比べた（ΔBMR [pt]、CacheLib n=1 比。括弧内は選んだ閾値と動いた回数）。</p>
+<table>
+<tr><th>トレース</th><th>最良の固定閾値</th><th>st</th><th>名簿の限界の価値で大津</th><th>再利用率で大津（減衰あり）</th><th>再利用率で大津（累積）</th></tr>
+<tr><td>Tencent</td><td>−0.946（32K）</td><td>−0.874</td><td>−0.778（45K, 2）</td><td>−0.729（45K, 17）</td><td>−0.674（128K, 5）</td></tr>
+<tr><td>w01</td><td>−3.782（256K）</td><td>−1.805</td><td>−1.375（往復 29）</td><td>−2.338（往復 67）</td><td class="good">−3.785（256K, 4）</td></tr>
+<tr><td>nha</td><td>−0.141（32M）</td><td>−0.086</td><td>−0.044（往復 43）</td><td>+0.012（128M, 50）</td><td class="bad">+0.013（64M, 11）</td></tr>
+</table>
+<ul>
+<li><b>名簿の限界の価値は、分類には向かない</b>：容量の端で測る価値は信号が弱く（1 バイトあたり 0.00〜0.02）、共有 LRU では同じ年齢で追い出されるのでビンどうしの差が出にくい。閾値が往復した。<b>分類は「平均の価値」の違い、配分は「限界の価値」をそろえる問題</b>で、合う量が違う。</li>
+<li><b>再利用率（平均の価値）＋累積</b>：w01 で 256K をぴったり選び、最良と同じ −3.785。減衰ありは往復して悪い（累積で見る案が効いた）。</li>
+<li><b>nha は 1 オクターブ外す</b>：64M を選んだが、最良は 32M。nha は 32〜64M のビンにバイトの 38% が集まっていて、この塊をどちらに入れるかで結果が大きく変わる（32M なら −0.141、64M 以上では大の分類の容量が 0.1〜0.15 に縮み得が消える）。</li>
+<li>次の候補：境目の候補をいくつか持ち、実際の得（名簿で測る配分後の BHR）で選ぶ／大きな塊のあるビンの扱い。</li>
+</ul>
+<h3>解決：再利用の強さの対数（val=logreq、累積）</h3>
+<p>nha の外れの原因は、<b>ちょうど 50 MiB の物が 370 万リクエスト</b>（32〜64M のビンの書き込みの 34%）という大きな塊。再利用率（一度でも当たったか）では小さい物と区別がつかず小の組に入った。ビンの価値を「書いた 1 バイトが何回要求されたか」の対数にすると、この塊（1 バイトあたり 20 回）は大きい側（28〜86 回）と同じ組になる。</p>
+<table>
+<tr><th>トレース</th><th>最良の固定閾値</th><th>st</th><th>再利用率・累積</th><th><b>再利用の強さの対数・累積</b></th><th>選んだ閾値（動いた回数）</th></tr>
+<tr><td>Tencent</td><td>−0.946（32K）</td><td>−0.874</td><td>−0.674</td><td>−0.771</td><td>64K（2）</td></tr>
+<tr><td>w01</td><td>−3.782（256K）</td><td>−1.805</td><td>−3.785</td><td class="good">−3.588〜−3.631</td><td>256K〜512K（7〜14）</td></tr>
+<tr><td>nha</td><td>−0.141（32M）</td><td>−0.086</td><td class="bad">+0.013</td><td class="good">−0.126</td><td>16M（1）</td></tr>
+</table>
+<ul>
+<li><b>3 本とも最良の固定閾値から 0.2 pt 以内、閾値はほぼ動かない</b>（1〜14 回）。st と比べて w01 で +1.8 pt、nha で +0.04 pt 良く、Tencent で 0.1 pt 悪い。</li>
+<li>減衰ありは w01 で往復して悪化（−2.33、57 回）。<b>閾値は累積で見る</b>のがよい。</li>
+<li>完成形：<code>hint=st_otsu:val=logreq/bins=1/hold=4/band=2/ema_den=0</code> ＋ <code>region-params=auto=2/w=0/ff=0</code>。閾値は「再利用の強さ（平均の価値）が分かれる所」、配分は「限界の BHR がそろう所」。決め打ちの定数は、ビンの幅と hold・band（動きを抑えるだけ）。</li>
+</ul>
+
+<h2>1d. 新しい ru_auto（ru_auto_v2）：閾値・容量配分・書き直しを全部自動（11-20 夜、追記）</h2>
+<p>閾値 = 再利用の強さの対数で大津（累積）、容量 = 名簿の限界の BHR をそろえる（auto=2/w=0/ff=0）、書き直し = n=cb（基準も名簿の限界の価値、base=marg）。CacheLib n=1 との差（ΔBMR [pt] / ΔOHR [pt] / NAND）。</p>
+<table>
+<tr><th>構成</th><th>nha</th><th>w01</th><th>Tencent</th></tr>
+<tr><td>旧 ru_auto（st・前の山登り・n=auto）</td><td class="bad">+0.083 / −3.46 / 0.609</td><td>−0.377 / +0.29 / 0.708</td><td class="bad">+1.459 / −2.60 / 0.698</td></tr>
+<tr><td>新版＋n=1</td><td>−0.126 / −0.40 / 0.697</td><td>−3.588 / +7.76 / 0.673</td><td class="good">−0.771 / +1.91 / 0.696</td></tr>
+<tr><td>新版＋n=cb 初書き基準</td><td>−0.081 / −0.88 / <b>0.647</b></td><td class="good">−3.863 / +8.49 / 0.662</td><td>−0.565 / +1.68 / 0.687</td></tr>
+<tr class="hl"><td><b>ru_auto_v2</b>（新版＋n=cb 名簿基準）</td><td class="good">−0.127 / −0.47 / 0.696</td><td>−3.812 / +8.35 / 0.667</td><td>−0.750 / +1.88 / 0.695</td></tr>
+</table>
+<ul>
+<li><b>3 本とも CacheLib より BMR が良く、NAND は 0.67〜0.70 倍</b>。旧 ru_auto は nha と Tencent で CacheLib より悪かった。</li>
+<li>nha の −0.127 pt は SSD 約 1.19 倍相当（容量 2 倍で 0.5 pt）。旧 ru_auto より NAND は多い（0.609 → 0.696）。旧版は n=auto が書き直しを 0.76 TB まで削って BMR を失っていた。新版は 8.9 TB 書き直す。</li>
+<li>名簿基準の n=cb は n=1 とほぼ同じ判断（nha・Tencent で差 0.02 pt 以内）。書き込みを減らしたいなら初書き基準（nha で NAND 0.647、BMR は −0.081 に下がる）。</li>
+<li>w01 は SSD がほとんど入れ替わらず書き直しはほぼ 0。差は閾値と配分から来ている。</li>
+<li>残る確認：乱数の種 1 つ・篩なし。キットの zip にはまだ入っていない。</li>
+</ul>
+
+<h2>2. 確定した数字（nha、11-20 に今の版で回し直し済み）</h2>
+<table>
+<tr><th>構成</th><th>ΔBMR [pt]</th><th>ΔOHR [pt]</th><th>NAND</th><th>同じ BMR に要る SSD</th><th class="l">一言</th></tr>
+<tr><td>r256_auto_n1（分類＋下限、n=1）</td><td class="good">−0.093</td><td>−0.04</td><td>0.971</td><td>1.14 倍</td><td class="l">提案の中心。BMR・書き込みとも CacheLib より良く、OHR はほぼ同じ</td></tr>
+<tr><td>ru_auto_n1（同、R=RU）</td><td>−0.062</td><td>+0.26</td><td>0.708</td><td>1.10 倍</td><td class="l">11-19 の値 −0.079 は古かった</td></tr>
+<tr><td>ru_auto_cb（同、n=cb 初書き基準）</td><td>−0.064</td><td>−3.88</td><td>0.674</td><td>≈1.10 倍</td><td class="l">n=1 より BMR・書き込みとも良い（OHR は下限の寄りで低い）</td></tr>
+<tr><td>ru_auto＋n=cb 名簿・Thompson・半減</td><td>−0.075</td><td>−0.36</td><td>0.705</td><td>≈1.11 倍</td><td class="l">BMR は n=1 より良い、書き込みは同じ</td></tr>
+<tr><td>r256_adm_auto_n1（篩＋分類＋下限）</td><td>−0.074</td><td>−2.35</td><td>0.588</td><td>1.11 倍</td><td class="l"></td></tr>
+<tr><td>ru_adm_auto_n1（同、R=RU）</td><td>−0.064</td><td>−4.01</td><td><b>0.429</b></td><td>1.10 倍</td><td class="l">BMR が CacheLib より良い中で書き込み最少</td></tr>
+<tr><td>固定 τ = 16〜32M（ru、n=1）</td><td class="good">−0.155</td><td>−1.2</td><td>≈0.69</td><td>≈1.24 倍</td><td class="l">st（τ=1M）の約 2.5 倍の得。ただし固定値は後知恵</td></tr>
+<tr><td>ru_auto（n=auto）</td><td class="bad">+0.083</td><td>−3.46</td><td>0.609</td><td>0.89 倍</td><td class="l">n=auto は書き直しを消しすぎ</td></tr>
+</table>
+<p class="small">CacheLib は容量を 2 倍にしても BMR が約 0.5 pt しか下がらない（0.8〜1.5 倍で測定）ので、0.1 pt の差は SSD 約 15% に相当する。BMR が 4% 台と低いため、小さな差でもオリジン転送の割合では 1.3〜3.3% の削減になる。</p>
+
+<h2>3. 書き直し：n=cb（損得で決める再挿入）</h2>
+<div class="grid">
+<div class="box"><h3>規則</h3><p>書いてからのヒット回数の段（1〜8 以上）ごとに、書き直したバイトが<b>次の滞在で 1 バイトあたり何回当たったか</b>を実測する。それが「その場所を代わりに使う物の値 ＋ λ」以上なら書き直す。物の大きさは両辺から消える。閾値の定数を持たない（λ は書き込み 1 バイトの値段、0 なら場所の費用だけ）。物ごとのメモリは n=auto と同じ約 1 バイト。</p></div>
+<div class="box"><h3>比べる基準の 3 種</h3>
+<table>
+<tr><th>基準</th><th>nha 大の分類</th><th>結果</th></tr>
+<tr><td>全部の滞在の平均</td><td>0.50</td><td>高すぎて 1 回の物を捨てる。BMR 悪化</td></tr>
+<tr><td>初めて書いた物（既定）</td><td>0.40</td><td>1 回の物（0.44）と紙一重。書き込みを最も減らす</td></tr>
+<tr><td>名簿で測る限界の値</td><td>0.21</td><td>1 回以上を全部書き直す ≒ n=1</td></tr>
+</table></div>
+</div>
+<ul>
+<li><b>理屈の結論</b>：λ=0 で限界の値と比べると答えは「1 回以上当たったら書き直す」＝ CacheLib の n=1。n=1 を損得から導けた。書き込みを減らすのは λ（または初書き基準のような厳しめの基準）を払うとき。</li>
+<li><b>篩との併用</b>：篩の後に入る物は質が高いので、初書き基準は自動で上がる（合成負荷 0.64 → 3.8）。閾値を調整し直さずに組み合わさる。下限を固定した比較では、篩ありで<b>名簿の版が n=1 より BMR も書き込みも良い</b>（−4.4 対 −3.9〜−4.2 pt、書き込み 0.17〜0.19 対 0.20〜0.25）。初書き基準は書き込み最少（0.145）だが BMR は 0.6〜2.0 pt 悪い。</li>
+<li><b>Thompson sampling と半減</b>：下限を固定すると効果は見えず。Thompson 単独では、ポアソンの事後分布が自信過剰になり段が凍る弱点。<b>外してよい</b>。</li>
+<li><b>書き込み予算（dwpd から λ を動かす）</b>：効く向きに働くが、書き込み 1 単位あたり BMR 2.0 pt の損で効率が悪い。</li>
+<li><b>使い分け</b>：書き込みを最も減らしたい → 初書き基準。BMR を n=1 以上に保って減らしたい（特に篩と併用） → 名簿（メモリ約 15 MB）。</li>
+</ul>
+
+<h2>4. 容量の配分（大の分類の下限）</h2>
+<div class="grid">
+<div class="box"><h3>仕組み</h3><p>下限 ff ＝ 大の分類が最低限持てる Region の割合。大の分類が書いたバイトの割合から始め、4N 回の追い出しごとに J = BHR ＋ 0.1 × OHR を前の窓と比べ、上がった向きに 0.02 ずつ動かす。nha では 0.85〜0.93 に落ち着く。</p></div>
+<div class="box"><h3>0.8 は天井（ffmax）だった</h3><p>下限が 0.8 より上に行かないようにする上限。OHR は戻るが BMR の得が消え、導けない定数なので論文では使わない。OHR の低下の本当の原因は、篩が小さい物を断ること（小の分類の SSD ヒット 860 万 → 503 万）。</p></div>
+<div class="box orange"><h3>不安定さの証拠</h3>
+<ul>
+<li>合成負荷：書き直しの規則を変えると下限が 0.45〜0.81 に分かれ、BMR が最大 4 pt 変わる。下限を 0.8 に固定すると差は 0〜0.8 pt に縮む。</li>
+<li>nha：τ を 64M 以上にすると下限が 0.1〜0.16 に崩れ、得が −0.157 → −0.05〜−0.07 に落ちる。</li>
+<li>大津の規則をその場で動かすと、τ が動くたびに下限が崩れ（0.05）、CacheLib より悪化（+0.19〜+0.23）。</li>
+</ul></div>
+</div>
+<p><b>見立て（いま測っている）</b>：「前の窓より J が上がったか」で向きを決めるので、0.02 動かした効果より窓ごとの J の揺れ（人気の移り変わり・偶然）が大きいと、向きはほぼ偶然になり、下限は酔歩する。下限を固定して「1 歩の信号」と「窓どうしの差の雑音」を比べる実験を回している。</p>
+<p><b>w = 0.1 について</b>：「1 リクエストの価値を何バイト分と見るか」の換算。運用の費用から w ＝（1 回の固定費用 ÷ 1 バイトの費用）÷ 平均の大きさ と導ける。今の 0.1 は「ほぼ BMR、OHR が崩れたら止める」程度の重み。</p>
+
+<h2>5. サイズ閾値</h2>
+<ul>
+<li><b>st の規則（訂正）</b>：キットの既定は <code>lambda=0</code> ＝ 個数の中央値とバイトの中央値の、対数の上での中点（2 のべき乗に丸める）。前に書いた「min（バイト中央値, 消えたバイト中央値）」は <code>lambda=256</code> の別の規則だった。</li>
+<li><b>nha（BMR）</b>：最適は固定 τ = 16〜32M（−0.155）。st は 1M（−0.062）で、<b>最適から 4〜5 オクターブ下</b>。「最適から約 2 段以内」は OHR を目的にしたとき（以前の meta 256K など）の話と考えられる。BMR では巨大な物だけを分ける方が得。</li>
+<li><b>大津の式</b>：「2 組のバイトの割合の積 ×（再利用された割合の差）²」が最大の切れ目。容量配分を最適化した後の分類の得と同じ形。nha で 2^26〜2^27 を指し、最適域の近く。ただしその場で動かすと τ が 36〜263 回動き、下限が崩れて得が消えた。</li>
+<li><b>「約 2 段以内」の説明（仮説）</b>：得の山は頂上で傾き 0 なので、ずれの損は 2 乗でしか増えない。丸めで最大 1 段 ＋ 中点と最適のずれ約 1 段。</li>
+<li><b>w01（大きさの分布の変化が大きい）</b>：固定 τ・st・大津 3 種を回している（結果待ち）。</li>
+</ul>
+
+<h2>6. 先行研究（原典で確認済み）</h2>
+<table>
+<tr><th>研究</th><th class="l">自動で決めるもの</th><th class="l">n=cb・本研究との関係</th></tr>
+<tr><td>CacheLib BlockCache</td><td class="l">—（再挿入は hits / 割合を設定で固定）</td><td class="l">比較の基準。n=1 を損得から導けた</td></tr>
+<tr><td>CacheLib DynamicRandomAP</td><td class="l">受け入れ確率（書き込み速度の目標）</td><td class="l">書き込み予算で λ を動かす形の手本</td></tr>
+<tr><td>CacheSack（ATC'22）</td><td class="l">カテゴリごとの受け入れ（費用モデル＋ナップサック）</td><td class="l">SSD で費用を比べる最も近い先例（受け入れ側）</td></tr>
+<tr><td>Baleen（FAST'24）</td><td class="l">ML 受け入れの閾値（書き込み上限）</td><td class="l">受け入れ側</td></tr>
+<tr><td>AdaptSize（NSDI'17）・Darwin（SIGCOMM'23）</td><td class="l">大きさ・頻度の受け入れ閾値</td><td class="l">サイズ閾値の自動決定の先例（DRAM の CDN）</td></tr>
+<tr><td>LHD（NSDI'18）・EVA（HPCA'17）</td><td class="l">追い出しの順位（ヒット密度）</td><td class="l">n=cb の「1 バイトあたりの期待ヒット」と同じ考え方</td></tr>
+<tr><td>Adaptive W-TinyLFU（Middleware'18）</td><td class="l">窓の大きさ（山登り）</td><td class="l">下限の山登りと同じ形。同じ不安定さの論点</td></tr>
+<tr><td>Kangaroo・FairyWREN・Nemo（ASPLOS'26）</td><td class="l">—（閾値は固定）</td><td class="l">BigHash 系も自動決定なし</td></tr>
+</table>
+<p class="small">SSD キャッシュの再挿入を実測で決める研究は、探した範囲では見つからなかった（無いことの証明ではない）。容量配分の傾きを影の列で測る Cliffhanger（NSDI'16）は、4 節の安定化の候補の先例（未確認、これから原典を当たる）。</p>
+
+<h2>7. 途中で直したこと</h2>
+<ul>
+<li>nha の基準値の一部が古かった：15 時台に回した 3 構成だけ前の版の結果（ru_auto_n1 −0.079 → −0.062 など）。回し直して、キットの README・config、容量換算、スライドを更新。旧値は <code>nha_piece_1119.json</code>。</li>
+<li>st の規則の説明を訂正（中点の規則が既定）。</li>
+<li>「合成負荷では初書き基準が勝つ」→ 下限の山登りの行き先によるもので、規則の差ではなかった。</li>
+<li>「分類をまたいだ限界の値が必要」という仮説は外れ（gmarg は効かず、原因は山登りだった）。</li>
+</ul>
+
+<h2>8. 残っている問題と次の一手（優先順）</h2>
+<ol>
+<li><b>下限の探し方を安定させる</b>（最優先）。診断を実行中。候補：交互に上げ下げした区間の差で向きを決める（ディザ法）／名簿で各分類の限界の価値を直接測り、多い方へ容量を移す（Cliffhanger 型、理屈と直結）／歩幅を小さくして平均／窓を長く。</li>
+<li><b>BMR のための閾値</b>：nha の最適は st より 4〜5 オクターブ上。大津の式は位置を当てるが、その場で動かすと崩れる → ヒステリシス＋下限の安定化と組で。w01 の結果待ち。</li>
+<li><b>nha 以外での確認</b>：確定した数字は実トレース nha 1 本・種 1 つ。w01・Tencent などで同じ表を作る（キットで回せる）。</li>
+<li><b>n=cb の採用形</b>：初書き基準（キット既定）か名簿版か、目的で選ぶ。名簿版はまだキットの方式に入れていない。</li>
+<li><b>書き込みの値段を目的に入れる</b>：下限の J に −λ × 書き込みを足せば、配分・書き直し・篩が同じ物差しになる。</li>
+</ol>
+
+<h2>9. ファイル</h2>
+<table>
+<tr><th>内容</th><th class="l">場所</th></tr>
+<tr><td>n=cb の説明（スライド風）</td><td class="l"><code>docs/Che-sim/reinsert_cb_slides.html</code></td></tr>
+<tr><td>nha の基準値（回し直し済み）／旧値</td><td class="l"><code>tools/synth/results/nha_piece.json</code> ／ <code>nha_piece_1119.json</code></td></tr>
+<tr><td>同じ BMR に要る SSD</td><td class="l"><code>results/nha_cap_equiv.json</code></td></tr>
+<tr><td>n=cb（初版・改良）</td><td class="l"><code>results/nha_cb.json</code>・<code>nha_cb2.json</code>・<code>drift_cb.json</code></td></tr>
+<tr><td>サイズ閾値（nha）</td><td class="l"><code>results/nha_tau.json</code></td></tr>
+<tr><td>下限の診断・w01 の閾値（実行中）</td><td class="l"><code>results/floor_diag.json</code>・<code>w01_tau.json</code></td></tr>
+<tr><td>キット</td><td class="l"><code>experiment_kit_20261120.zip</code>（パッチ 95 ファイル）</td></tr>
+</table>
+</main>
+</body>
+</html>

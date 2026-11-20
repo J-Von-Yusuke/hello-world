@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n=cb 損得による書き直し</title>
+<style>
+:root { --ink:#14213D; --body:#3D4656; --mute:#6B7486; --paper:#F7F6F2; --paper2:#ECEAE3; --card:#FBFBF8; --line:#CFCBBF;
+  --blue:#2F6FB0; --orange:#D9692A; --blue-soft:#DCE7F3; --orange-soft:#F6E0D2; --good:#2E7D4F; --bad:#B23A2E; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --paper2:#1C2433; --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --good:#6CC08F; --bad:#E07A6E; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper2); color:var(--body); font-family:"Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif; line-height:1.7; }
+.deck { max-width:1120px; margin:0 auto; padding:24px 16px 80px; display:flex; flex-direction:column; gap:28px; }
+.slide { background:var(--paper); border:1px solid var(--line); border-radius:14px; padding:44px 56px; min-height:600px; display:flex; flex-direction:column; gap:18px; position:relative; }
+.slide.dark { background:#14213D; color:#D7DCE6; border-color:#14213D; }
+.slide.dark h1, .slide.dark h2 { color:#F7F6F2; }
+.num { position:absolute; right:24px; bottom:14px; font-size:13px; color:var(--mute); }
+.eyebrow { font-size:13px; font-weight:700; letter-spacing:.12em; color:var(--orange); text-transform:uppercase; }
+h1 { font-size:42px; line-height:1.25; margin:0; color:var(--ink); }
+h2 { font-size:30px; line-height:1.3; margin:0; color:var(--ink); }
+h3 { font-size:19px; margin:0 0 6px; color:var(--ink); }
+p, li { font-size:17px; margin:0; }
+ul { margin:0; padding-left:1.3em; display:flex; flex-direction:column; gap:6px; }
+.lead { font-size:20px; }
+.row { display:flex; gap:18px; flex-wrap:wrap; }
+.row > * { flex:1 1 260px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 22px; }
+.card.blue { background:var(--blue-soft); border-color:var(--blue); }
+.card.orange { background:var(--orange-soft); border-color:var(--orange); }
+.big { font-size:40px; font-weight:700; color:var(--ink); line-height:1.1; }
+.formula { background:var(--card); border-left:6px solid var(--orange); padding:16px 22px; font-size:20px; font-weight:500; color:var(--ink); }
+.small { font-size:14px; color:var(--mute); }
+table { border-collapse:collapse; width:100%; font-size:15px; font-variant-numeric:tabular-nums; }
+th, td { padding:7px 10px; border-bottom:1px solid var(--line); text-align:right; }
+th:first-child, td:first-child { text-align:left; }
+th { color:var(--ink); font-weight:700; }
+tr.hl td { background:var(--orange-soft); }
+.good { color:var(--good); font-weight:700; } .bad { color:var(--bad); font-weight:700; }
+svg text { font-family:inherit; }
+.nav { position:fixed; right:16px; bottom:16px; font-size:12px; color:var(--mute); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 10px; }
+@media (max-width:700px) { .slide { padding:28px 20px; min-height:0; } h1 { font-size:30px; } h2 { font-size:23px; } .big { font-size:30px; } }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<!-- 1 -->
+<section class="slide dark" style="justify-content:center;">
+<div class="eyebrow">RegionFlash ・ 書き直し（reinsertion）の閾値</div>
+<h1>書き直しを損得で決める ― n=cb</h1>
+<p class="lead">「次に SSD にいる間に何回当たるか」を実測し、その場所を別の物に使った場合と比べて書き直す。閾値を決め打ちしない再挿入。</p>
+<p class="small" style="color:#9AA4B8">Meta nha 全量・片のモード（chunk-mode=piece）・CacheLib n=1 との比較 ／ 人気が移り変わる合成負荷 ／ 2026-11-20</p>
+<span class="num">1</span>
+</section>
+
+<!-- 2 -->
+<section class="slide">
+<div class="eyebrow">問題</div>
+<h2>書き直しの閾値は、どれも決め打ちだった</h2>
+<div class="row">
+<div class="card"><h3>CacheLib（n=1）</h3><p>SSD で 1 回以上当たった物は、追い出すときに書き直す。閾値は設定で固定。</p></div>
+<div class="card"><h3>n=auto（以前の提案）</h3><p>「書き直した物が次も当たる割合が 0.5 以上」になる最小の回数を閾値に。<b>0.5 が決め打ち</b>。</p></div>
+<div class="card orange"><h3>n=auto は消しすぎた</h3><p>nha では書き直しを 9.0 → 0.6 TB に減らし、人気の大きい物の片が欠けたまま残って <b>BMR +0.084 pt</b>（CacheLib より悪い）。</p></div>
+</div>
+<p>先行研究（AdaptSize・CacheSack・Baleen・CacheLib の DynamicRandomAP・LHD など）は、<b>受け入れ</b>や<b>追い出しの順位</b>を自動で決める。SSD キャッシュの<b>書き直し</b>を実測で決めるものは見つからなかった（CacheLib・Kangaroo・FairyWREN・Nemo はどれも固定）。</p>
+<span class="num">2</span>
+</section>
+
+<!-- 3 -->
+<section class="slide">
+<div class="eyebrow">考え方</div>
+<h2>書き直しは「場所と書き込みを使う投資」</h2>
+<svg viewBox="0 0 1000 300" role="img" aria-label="書き直しの得と費用の図">
+  <rect x="20" y="90" width="230" height="120" rx="12" fill="var(--card)" stroke="var(--line)"/>
+  <text x="135" y="140" text-anchor="middle" font-size="20" fill="var(--ink)" font-weight="700">追い出される物</text>
+  <text x="135" y="172" text-anchor="middle" font-size="16" fill="var(--mute)">書いてから h 回当たった</text>
+  <line x1="250" y1="150" x2="350" y2="150" stroke="var(--mute)" stroke-width="3" marker-end="url(#a)"/>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--mute)"/></marker></defs>
+  <rect x="350" y="20" width="300" height="110" rx="12" fill="var(--blue-soft)" stroke="var(--blue)"/>
+  <text x="500" y="62" text-anchor="middle" font-size="20" fill="var(--ink)" font-weight="700">得</text>
+  <text x="500" y="94" text-anchor="middle" font-size="16" fill="var(--ink)">次の滞在で当たる回数 × その大きさ</text>
+  <text x="500" y="116" text-anchor="middle" font-size="14" fill="var(--mute)">（オリジンへ運ばずに済むバイト）</text>
+  <rect x="350" y="170" width="300" height="110" rx="12" fill="var(--orange-soft)" stroke="var(--orange)"/>
+  <text x="500" y="212" text-anchor="middle" font-size="20" fill="var(--ink)" font-weight="700">費用</text>
+  <text x="500" y="244" text-anchor="middle" font-size="16" fill="var(--ink)">① 場所：その間ほかの物が使えない</text>
+  <text x="500" y="266" text-anchor="middle" font-size="16" fill="var(--ink)">② 書き込み：その大きさを NAND に書く</text>
+  <line x1="650" y1="150" x2="740" y2="150" stroke="var(--mute)" stroke-width="3" marker-end="url(#a)"/>
+  <rect x="740" y="90" width="240" height="120" rx="12" fill="var(--card)" stroke="var(--line)"/>
+  <text x="860" y="140" text-anchor="middle" font-size="20" fill="var(--ink)" font-weight="700">得 ≥ 費用 なら</text>
+  <text x="860" y="172" text-anchor="middle" font-size="20" fill="var(--ink)" font-weight="700">書き直す</text>
+</svg>
+<ul>
+<li>① 場所の費用 = その場所を、代わりに入る物が使っていたら稼いだはずのヒット（<b>機会費用</b>）。</li>
+<li>② 書き込みの費用 = 運用者が決める「NAND に 1 バイト書く値段を、オリジン転送のバイトで測った値」λ。書き込み予算や TCO から決まる量で、0 にすれば場所だけで判断する。</li>
+</ul>
+<span class="num">3</span>
+</section>
+
+<!-- 4 -->
+<section class="slide">
+<div class="eyebrow">判定の式</div>
+<h2>物の大きさは両辺から消え、「1 バイトあたり」の比較になる</h2>
+<div class="formula">書き直す ⇔ その段の物が次の滞在で稼ぐ「1 バイトあたりのヒット」 ≥ その場所を代わりに使う物の「1 バイトあたりのヒット」 ＋ λ</div>
+<div class="row">
+<div class="card"><h3>なぜ大きさが消えるか</h3><p>得も、場所の費用も、書き込みの費用も、どれも物の大きさに比例する。比べるときに同じ大きさで割れるので、残るのは「1 バイトあたり」の値だけ。</p></div>
+<div class="card"><h3>なぜバイトで重みを付けるか</h3><p>目的が BMR（運ばずに済んだバイト）なので、1 回のヒットはその大きさ分の価値を持つ。OHR を目的にするなら物の数で数え直せばよい。</p></div>
+<div class="card blue"><h3>閾値が「出てくる」</h3><p>何回当たった物から書き直すかは、この比較の結果として決まる。0.5 のような目標値も、回数の閾値も設定しない。</p></div>
+</div>
+<span class="num">4</span>
+</section>
+
+<!-- 5 -->
+<section class="slide">
+<div class="eyebrow">事後の実測から推定する</div>
+<h2>分類 × 「書いてから何回当たったか」の段ごとに、結果を数える</h2>
+<div class="row">
+<div class="card"><h3>何を数えるか</h3>
+<ul>
+<li>書き直すとき、その物が書いてから何回当たったか（1〜8 以上の 8 段）と、決めた分類を覚えておく。</li>
+<li>次に追い出されたとき、その滞在で何回当たったかを、その段に足す（バイトで重み）。</li>
+<li>段の値 = その段から書き直したバイトが、次の滞在で当たった回数の合計 ÷ そのバイトの合計。</li>
+</ul></div>
+<div class="card"><h3>事後確率としての読み方</h3>
+<p>「h 回当たった物は、次にどれだけ当たるか」の条件付きの期待値を、実際に起きた結果の平均で推定している。観測が増えるほど推定は締まり、判定は「この段の物の、観測の上での期待」に従う。</p></div>
+</div>
+<div class="card orange"><h3>まだ推定が無い段の扱い（決め打ちが残る所）</h3>
+<p>結果が 32 件たまるまではその段を書き直して学ぶ。基準を下回った段も 0.02 の確率で書き直して測り続ける（書き直さない段は結果が得られず、推定が固まってしまうため）。</p></div>
+<span class="num">5</span>
+</section>
+
+<!-- 6 -->
+<section class="slide">
+<div class="eyebrow">基準をどこに取るか</div>
+<h2>比べる相手は「平均」ではなく「代わりに入る物」</h2>
+<div class="row">
+<div class="card"><h3>全部の滞在の平均（base=all）</h3><p>何度も当たる書き直し（8 回以上の段で 1 バイトあたり 4.7 回）まで含むので、<b>基準が高すぎる</b>。nha 大の分類で 0.504。1 回当たった物（0.45）を書き直さなくなり、BMR +0.067 pt。</p></div>
+<div class="card blue"><h3>初めて書いた物（base=first、採用）</h3><p>書き直さなければ、その場所は新しく書く物が使う。その価値で比べる。nha 大の分類で 0.398。1 回当たった物（0.44）は書き直す。</p></div>
+<div class="card"><h3>本当の正解：限界の値</h3><p>場所を少し足したときに増えるヒット。容量を 2 倍にしても BMR は約 0.5 pt しか下がらないので、初書きの値よりさらに低い。今の実装はその<b>高めの近似</b>。</p></div>
+</div>
+<p class="small">数字は nha 全量・ru_auto（RU、サイズ分類＋下限）、大の分類。</p>
+<span class="num">6</span>
+</section>
+
+<!-- 7 -->
+<section class="slide">
+<div class="eyebrow">nha で学んだ値</div>
+<h2>当たった回数が多いほど次も当たる。1 回の物は新しい物とほぼ同じ</h2>
+<svg viewBox="0 0 1000 380" role="img" aria-label="段ごとの次の滞在のヒット数の棒グラフ。1回 0.44、2回 0.87、3回 1.24、4回 1.50、5回 1.61、6回 2.39、7回 2.32、8回以上 4.97。初書きの基準 0.398、平均 0.502">
+  <g transform="translate(70,20)">
+    <line x1="0" y1="300" x2="880" y2="300" stroke="var(--line)"/>
+    <g font-size="14" fill="var(--mute)" text-anchor="end">
+      <text x="-10" y="304">0</text><text x="-10" y="244">1</text><text x="-10" y="184">2</text><text x="-10" y="124">3</text><text x="-10" y="64">4</text><text x="-10" y="4">5</text>
+    </g>
+    <g fill="var(--blue)">
+      <rect x="20" y="273.6" width="70" height="26.4"/><rect x="130" y="247.8" width="70" height="52.2"/><rect x="240" y="225.6" width="70" height="74.4"/>
+      <rect x="350" y="210" width="70" height="90"/><rect x="460" y="203.4" width="70" height="96.6"/><rect x="570" y="156.6" width="70" height="143.4"/>
+      <rect x="680" y="160.8" width="70" height="139.2"/><rect x="790" y="1.8" width="70" height="298.2"/>
+    </g>
+    <g font-size="14" fill="var(--ink)" text-anchor="middle">
+      <text x="55" y="266">0.44</text><text x="165" y="240">0.87</text><text x="275" y="218">1.24</text><text x="385" y="202">1.50</text>
+      <text x="495" y="196">1.61</text><text x="605" y="149">2.39</text><text x="715" y="153">2.32</text><text x="825" y="20" fill="#fff">4.97</text>
+    </g>
+    <g font-size="14" fill="var(--mute)" text-anchor="middle">
+      <text x="55" y="322">1 回</text><text x="165" y="322">2</text><text x="275" y="322">3</text><text x="385" y="322">4</text><text x="495" y="322">5</text><text x="605" y="322">6</text><text x="715" y="322">7</text><text x="825" y="322">8 以上</text>
+    </g>
+    <line x1="0" y1="276.1" x2="880" y2="276.1" stroke="var(--orange)" stroke-width="2.5" stroke-dasharray="7 5"/>
+    <line x1="0" y1="269.9" x2="880" y2="269.9" stroke="var(--mute)" stroke-width="1.5" stroke-dasharray="3 4"/>
+    <line x1="20" y1="20" x2="60" y2="20" stroke="var(--orange)" stroke-width="2.5" stroke-dasharray="7 5"/>
+    <text x="70" y="25" font-size="15" fill="var(--orange)">初めて書いた物の値（基準、base=first）0.398</text>
+    <line x1="20" y1="46" x2="60" y2="46" stroke="var(--mute)" stroke-width="1.5" stroke-dasharray="3 4"/>
+    <text x="70" y="51" font-size="15" fill="var(--mute)">全部の滞在の平均（base=all）0.502</text>
+    <text x="440" y="352" text-anchor="middle" font-size="15" fill="var(--body)">書いてから当たった回数（書き直すときの段）→ 縦：次の滞在で 1 バイトあたり何回当たったか</text>
+  </g>
+</svg>
+<p>全量では段の値はきれいに右上がり。<b>1 回の段（0.44）は、初めて書いた物（0.398）とほぼ同じ</b>で、判定は紙一重になる。1 回の当たりからはほとんど何も分からない、という実測。</p>
+<span class="num">7</span>
+</section>
+
+<!-- 8 -->
+<section class="slide">
+<div class="eyebrow">nha 全量の結果</div>
+<h2>n=auto より、同じ書き込み削減を小さな BMR の損で得る</h2>
+<table>
+<tr><th>構成（CacheLib n=1 との差）</th><th>n=1</th><th>n=auto</th><th>n=cb 平均基準</th><th>n=cb 初書き基準</th></tr>
+<tr class="hl"><td>ru_auto（RU・サイズ分類＋下限）</td><td>−0.062 / 0.708</td><td>+0.083 / 0.609</td><td>−0.012 / 0.641</td><td><b>−0.064 / 0.674</b></td></tr>
+<tr><td>r256_auto（256 MiB）</td><td>−0.093 / 0.971</td><td>—</td><td>−0.027 / 0.890</td><td>−0.028 / 0.891</td></tr>
+<tr><td>ru_adm_auto（篩つき）</td><td>−0.064 / 0.429</td><td>+0.112 / 0.354</td><td>+0.002 / 0.381</td><td>−0.002 / 0.381</td></tr>
+<tr><td>r256_base（CacheLib に n=cb だけ）</td><td>0 / 1.000</td><td>—</td><td>+0.079 / 0.913</td><td>+0.011 / 0.989</td></tr>
+</table>
+<p class="small">各欄 = ΔBMR [pt] / NAND 書き込み（CacheLib = 1、R=256 MiB に DLWA 1.4）。λ = 0。</p>
+<div class="row">
+<div class="card"><p class="small">n=1 から書き込みを減らしたときの BMR の変化（ru_auto、11-20 回し直した n=1 と比べて）</p>
+<p><b>n=cb 初書き：BMR −0.002・NAND −0.034（両方良い）</b>　／　n=cb 平均：+0.050・−0.067　／　n=auto：+0.145・−0.099</p></div>
+<div class="card blue"><p>11-20 に n=1 の基準を今の版で回し直したところ（−0.079 → −0.062）、<b>nha の ru_auto では n=cb（初書き基準）が n=1 より BMR・書き込みとも良い</b>。前の版の「n=1 がまだ最良」は古い基準値によるものだった。</p></div>
+</div>
+<span class="num">8</span>
+</section>
+
+<!-- 9 -->
+<section class="slide">
+<div class="eyebrow">篩（admit=dram）との併用</div>
+<h2>篩を付けると、基準が自動で上がる</h2>
+<div class="row">
+<div class="card blue"><h3>仕組み</h3><p>篩の後に初めて書かれる物は「DRAM で当たった」「断られた後にまた来た」物だけになる。初めて書いた物の価値が上がるので、書き直しの基準も勝手に上がり、書き直しは本当に当たる物だけに絞られる。<b>篩の強さに合わせて閾値を調整し直す必要がない。</b></p></div>
+<div class="card"><h3>人気が移り変わる合成負荷（τ = 500 万要求）</h3>
+<p>初書きの基準：篩なし 0.64 → <b>篩あり 3.8</b>（大の分類、1 バイトあたり）</p>
+<p>篩あり＋サイズ分類で、n=1 に比べ <span class="good">BMR −0.89 pt・書き込み −34%</span></p></div>
+</div>
+<p>n=auto は「次も当たる割合 0.5」で判定するので、篩で入る物の質が変わっても基準は変わらない。n=cb は「代わりに入る物」と比べるので、受け入れの方針と自然に組み合わさる。</p>
+<span class="num">9</span>
+</section>
+
+<!-- 10 -->
+<section class="slide">
+<div class="eyebrow">人気が時間とともに変わる場合</div>
+<h2>移り変わりでも崩れない。速いときは篩なしで +1 pt の損</h2>
+<table>
+<tr><th>BMR の差 [pt] / 書き込み（基準 n=1 = 1）</th><th>n=1</th><th>n=auto</th><th>n=cb</th></tr>
+<tr><td colspan="4" style="text-align:left;color:var(--mute)">ゆっくり（一巡 2,000 万要求）</td></tr>
+<tr><td>分類なし</td><td>0 / 1.000</td><td>+1.55 / 0.858</td><td>−0.00 / 1.000</td></tr>
+<tr><td>サイズ分類＋下限</td><td>+2.26 / 1.008</td><td>+1.24 / 0.849</td><td class="good">+0.02 / 0.963</td></tr>
+<tr class="hl"><td>篩＋サイズ分類＋下限</td><td>−3.82 / 0.207</td><td>−3.88 / 0.206</td><td class="good">−4.11 / 0.144</td></tr>
+<tr><td colspan="4" style="text-align:left;color:var(--mute)">速い（一巡 500 万要求）</td></tr>
+<tr><td>分類なし</td><td>0 / 1.000</td><td>+1.64 / 0.846</td><td class="bad">+0.99 / 0.876</td></tr>
+<tr><td>サイズ分類＋下限</td><td>+5.11 / 1.059</td><td>+1.28 / 0.837</td><td>+1.48 / 0.876</td></tr>
+<tr class="hl"><td>篩＋サイズ分類＋下限</td><td>−0.43 / 0.272</td><td>−0.45 / 0.272</td><td class="good">−1.32 / 0.180</td></tr>
+</table>
+<p class="small">W1 の形（3.6 万個 × 200 KB 75% ／ 100 万個 × 20 KB 25%、Zipf 0.9）、2,000 万要求（温め 500 万）、SSD 2.83 GB、DRAM = SSD/30。一巡ごとに新しい物が 1 位に生まれ、他は順位を 1 つ下げる。</p>
+<p>速い場合の +0.99 pt は時間とともに増えない（100 万要求ごとにずっと +0.9〜+1.1）。<b>古い統計が溜まって遅れるのではなく</b>、1 回の段（0.60）が初書きの基準（0.66）をわずかに下回って書き直さなくなる、nha と同じ紙一重が原因。</p>
+<span class="num">10</span>
+</section>
+
+<!-- 11 -->
+<section class="slide">
+<div class="eyebrow">弱点 1：メモリと計算</div>
+<h2>物ごとに約 1 バイト。n=auto と同じで、n=1 よりは多い</h2>
+<div class="row">
+<div class="card"><h3>物ごと</h3><p>書き直したときの段（1〜8：4 ビット）と、決めた分類（2 分類なら 1 ビット）。シミュレータでは 2 バイト（re_b・re_c）、片のモードでは片ごとにも 2 バイト。n=auto が既に持つ欄をそのまま使うので、<b>n=auto に比べた増分は 0</b>。CacheLib の n=1 に比べると、索引の 1 項目あたり 1 バイト前後が増える。</p></div>
+<div class="card"><h3>全体</h3><p>分類 × 8 段の和（ヒット×バイト、バイト、件数）と、分類ごとの初書きの和。分類 2 なら 1 KB 未満。判定は表を 1 回引くだけで、追い出しの処理量は変わらない。</p></div>
+</div>
+<div class="card orange"><p>実機で効くのは物ごとの 1 バイト。物の数が 10 億なら約 1 GB の DRAM になる。段を 2 ビット（1・2・3〜4・5 以上）に縮める、片では親の物の値を使う、などで減らせるが、まだ試していない。<br>限界の値を測る名簿（base=marg、11-20）は追加で、追い出してから平均滞在の 5% 以内の物だけを持つ。nha で最大 36 万項目（約 15 MB）。</p></div>
+<span class="num">11</span>
+</section>
+
+<!-- 12 -->
+<section class="slide">
+<div class="eyebrow">弱点 2：正直な一覧</div>
+<h2>理屈はきれいだが、まだ近似と定数が残っている</h2>
+<ul>
+<li><b>基準は限界の値の近似。</b>初書きの値は本当の機会費用より高めで、1 回の段が紙一重になる（nha・速い移り変わりの両方で観測）。nha では BMR だけなら n=1 が最良のまま。</li>
+<li><b>探索の定数が残る。</b>32 件・確率 0.02 は事後分布とは無関係な決め打ち。</li>
+<li><b>結果が分かるまで 1 滞在かかる。</b>書き直した物の成否は次に追い出されるまで分からない（SSD 1 周分の遅れ）。統計は累積で、忘れる仕組みが無い。今回の移り変わりでは害は出なかったが、急な切り替わりは試していない。</li>
+<li><b>滞在時間を段ごとに同じとみなしている。</b>region-evict=lru ではよく当たる物ほど長く残るので、厳密には「ヒット ÷（バイト × 時間）」で比べるべき。</li>
+<li><b>次の 1 滞在だけを見る。</b>書き直しが連鎖して生む価値は数えない。</li>
+<li><b>下限の山登りと干渉する。</b>ru_auto_cb では下限が大の分類に寄り（平均 0.87 → 0.95）OHR −3.9 pt。書き直しの規則そのものの性質ではない。</li>
+<li><b>確かめた範囲が狭い。</b>実トレースは nha の 1 本、種も 1 つ。</li>
+</ul>
+<span class="num">12</span>
+</section>
+
+<!-- 13 -->
+<section class="slide">
+<div class="eyebrow">研究全体の中での位置</div>
+<h2>受け入れ・置き場所・書き直しが、互いを邪魔せず組み合わさる</h2>
+<div class="row">
+<div class="card"><h3>置き場所</h3><p>回数別の管理が分類として最も良かったが、篩を付けるとその効果は篩と重なって減る。サイズという<b>別の軸</b>で分けると、篩の後も効果が残り、通常の管理より少ない書き込みで同等の BMR を出せる。</p></div>
+<div class="card"><h3>受け入れ</h3><p>S3-FIFO 型の篩で書き込みを大きく減らす（SSD が最初に埋まるまでは篩わない）。</p></div>
+<div class="card blue"><h3>書き直し（今回）</h3><p>n=cb は受け入れの質に合わせて基準が動くので、篩と組み合わせてもう一段書き込みを削れる。n=auto の「消しすぎ」を、目標値なしで避ける。</p></div>
+</div>
+<div class="card orange"><h3>効果が小さくなる条件（分かっていること）</h3>
+<ul>
+<li>局所性が高いトレース（Zipf α 1〜1.4）では、サイズ分類の得が小さくなる（α ≈ 1.6 で向きが逆転）。</li>
+<li>BlockCache や KV のように物の大きさがそろった負荷では、サイズで分ける意味が薄れる。</li>
+<li>大きさの分布が時間とともに変わると、分類の境界が追いつかない（窓をランダムにする、累積と窓の両方を見る、などの対処が考えられる）。</li>
+</ul></div>
+<span class="num">13</span>
+</section>
+
+<!-- 14 -->
+<section class="slide">
+<div class="eyebrow">次の一手</div>
+<h2>残る定数を、事後分布と運用の単位に置き換える</h2>
+<div class="row">
+<div class="card"><h3>1. Thompson sampling</h3><p>段ごとの事後分布から値を 1 つ引いて判定する。データの少ない段は自然に試され、32 件・0.02 が要らなくなる。</p></div>
+<div class="card"><h3>2. 限界の値を測る</h3><p>追い出される直前の中身の 1 バイトあたりヒット（LHD の考え方）を基準にする。1 回の段の紙一重を解消できる見込み。</p></div>
+</div>
+<div class="row">
+<div class="card"><h3>3. 忘れ方を SSD の 1 周に結ぶ</h3><p>古い観測を SSD が入れ替わる時間で薄める。定数を増やさずに急な変化に追従する。</p></div>
+<div class="card"><h3>4. λ を書き込み予算から</h3><p>DynamicRandomAP と同じく、書き込み速度の上限を守るよう λ を動かす（ラグランジュ乗数）。残る値は運用者の単位だけになる。</p></div>
+</div>
+<p class="small">結果：tools/synth/results/nha_cb.json、drift_cb.json ／ 実装：ssd/rf_ssd.c（rf_re_cb_ok・rf_re_learn） ／ キット：r256_base_cb・r256_auto_cb・ru_auto_cb・ru_adm_auto_cb</p>
+<span class="num">14</span>
+</section>
+
+<!-- 15 -->
+<section class="slide alt" style="background:var(--paper2)">
+<div class="eyebrow">次の一手を全部試した（11-20）</div>
+<h2>限界の値で比べると、答えは CacheLib の n=1 になった</h2>
+<table>
+<tr><th>nha 全量（CacheLib n=1 との差）</th><th>ΔBMR [pt]</th><th>ΔOHR [pt]</th><th>NAND</th><th>大の分類の基準</th></tr>
+<tr><td>n=1（ru_auto_n1、11-20 回し直し）</td><td>−0.062</td><td>+0.26</td><td>0.708</td><td>—</td></tr>
+<tr><td>n=cb 初書き基準（前回）</td><td>−0.064</td><td>−3.88</td><td>0.674</td><td>0.40</td></tr>
+<tr><td>＋限界の値（名簿, base=marg）</td><td>−0.069</td><td>+0.28</td><td>0.707</td><td>0.21</td></tr>
+<tr><td>＋Thompson sampling だけ</td><td class="bad">+0.045</td><td>−3.38</td><td>0.627</td><td>0.49</td></tr>
+<tr><td>＋SSD 1 周ごとに半減だけ</td><td>−0.061</td><td>−1.59</td><td>0.673</td><td>0.51</td></tr>
+<tr class="hl"><td>＋3 つ全部（mtd）</td><td>−0.075</td><td>−0.36</td><td>0.705</td><td>0.27</td></tr>
+<tr><td>＋3 つ全部＋書き込み予算 20 DWPD</td><td class="bad">+0.052</td><td>+0.35</td><td>0.641</td><td>0.35＋λ 0.63</td></tr>
+<tr><td>篩つき＋3 つ全部（n=1 は −0.064 / 0.429）</td><td>−0.063</td><td>−2.87</td><td>0.428</td><td>0.31</td></tr>
+<tr><td>CacheLib＋3 つ全部</td><td>+0.004</td><td>−0.00</td><td>1.000</td><td>0.22</td></tr>
+</table>
+<ul>
+<li><b>限界の値（名簿で測る）は 0.21 ヒット/バイト</b>で、初書き（0.40）の約半分。1 回当たった物（0.43）は基準を十分上回り、全部書き直される → <b>n=1 と同じ判定・同じ結果</b>。「1 回以上当たったら書き直す」という CacheLib の規則が、λ=0 の損得からそのまま導けた。</li>
+<li><b>Thompson sampling だけでは悪化</b>：ヒット数は裾が重いのに事後分布をポアソンで置いたため自信過剰になり、早い段階で運悪く外れた段（大の分類の 3・5・8 回）が二度と試されず凍った。半減と組み合わせると件数が減って試し直され、凍らない。</li>
+<li><b>書き込み予算</b>は効く向きに働くが（NAND 0.705 → 0.641）、BMR の損は書き込み 1 単位あたり約 2.0 pt で、初書き基準（0.5 pt）より効率が悪い。小の分類の 1・2 回の段が丸ごと止まった。</li>
+</ul>
+<span class="num">15</span>
+</section>
+
+<!-- 16 -->
+<section class="slide alt" style="background:var(--paper2)">
+<div class="eyebrow">人気が移り変わる場合（改良版 mtd）</div>
+<h2>速い移り変わりの損は消えた。サイズ分類の合成負荷では逆に悪化</h2>
+<table>
+<tr><th>BMR の差 [pt] / 書き込み（n=1 = 1）</th><th>n=1</th><th>n=cb 初書き</th><th>改良版 mtd</th></tr>
+<tr><td colspan="4" style="text-align:left;color:var(--mute)">ゆっくり（一巡 2,000 万）</td></tr>
+<tr><td>分類なし</td><td>0 / 1.000</td><td>−0.00 / 1.000</td><td>−0.02 / 1.000</td></tr>
+<tr><td>サイズ分類＋下限</td><td>+2.26 / 1.008</td><td class="good">+0.02 / 0.963</td><td class="bad">+4.29 / 1.045</td></tr>
+<tr><td>篩＋サイズ分類＋下限</td><td>−3.82 / 0.207</td><td class="good">−4.11 / 0.144</td><td class="bad">−1.49 / 0.192</td></tr>
+<tr><td colspan="4" style="text-align:left;color:var(--mute)">速い（一巡 500 万）</td></tr>
+<tr><td>分類なし</td><td>0 / 1.000</td><td class="bad">+0.99 / 0.876</td><td class="good">−0.00 / 1.000</td></tr>
+<tr><td>サイズ分類＋下限</td><td>+5.11 / 1.059</td><td class="good">+1.48 / 0.876</td><td>+4.93 / 1.051</td></tr>
+<tr><td>篩＋サイズ分類＋下限</td><td>−0.43 / 0.272</td><td>−1.32 / 0.180</td><td class="good">−4.67 / 0.180</td></tr>
+</table>
+<p>改良版は、限界の値が低いのでほぼ n=1 のように書き直す。<b>n=1 が良い負荷（nha・分類なし）では n=1 に追いつき、n=1 が悪い負荷（合成負荷のサイズ分類）では n=1 と一緒に悪くなる</b>。初書き基準が合成負荷で勝ったのは「たまたま厳しかった」ためで、理屈の上の正しさからではない可能性が高い。</p>
+<p class="small">仮説（未検証）：名簿は分類ごとの限界の値を測るが、Region LRU の追い出しは分類をまたぐ（書き直した場所は、全体の LRU の末尾の Region、つまり別の分類から来ることがある）。比べるべきは「追い出される側の分類」の限界の値。サイズ分類で小の分類の限界の値が大と大きく違うときに、ここがずれる。</p>
+<span class="num">16</span>
+</section>
+
+<!-- 16b -->
+<section class="slide alt" style="background:var(--paper2)">
+<div class="eyebrow">悪化の原因（11-20 確認）</div>
+<h2>移り変わりでの差は、書き直しの規則ではなく下限の山登りの行き先だった</h2>
+<div class="row">
+<div class="card"><h3>山登りあり（前のスライド）</h3><p>一巡 2,000 万・サイズ分類で、下限の平均と BMR の差：<br>
+初書き 0.81 → +0.02 ／ Thompson だけ 0.79 → +0.26 ／ 半減 0.80 → +0.04 ／ n=1 0.58 → +2.26 ／ 名簿だけ 0.55 → +2.94 ／ 3 つ全部 0.45 → +4.29<br>
+<b>下限が低く落ち着いた構成ほど悪い。</b>書き直しの判定はどれもほぼ「1 回以上なら書き直す」で同じだった。</p></div>
+<div class="card blue"><h3>下限を 0.8 に固定すると</h3>
+<table>
+<tr><th>BMR / 書き込み</th><th>n=1</th><th>初書き</th><th>名簿</th><th>3 つ全部</th></tr>
+<tr><td>2,000 万・サイズ</td><td>+0.40/0.976</td><td>+0.38/0.975</td><td>+0.40/0.975</td><td>+0.39/0.976</td></tr>
+<tr><td>2,000 万・篩＋サイズ</td><td>−4.17/0.204</td><td>−3.76/0.145</td><td>−4.35/0.169</td><td>−4.42/0.171</td></tr>
+<tr><td>500 万・サイズ</td><td>+0.49/0.982</td><td>+1.25/0.874</td><td>+0.48/0.981</td><td>+0.50/0.982</td></tr>
+<tr><td>500 万・篩＋サイズ</td><td>−3.86/0.248</td><td>−2.38/0.148</td><td>−4.42/0.191</td><td>−4.34/0.183</td></tr>
+</table></div>
+</div>
+<ul>
+<li>差は 4 pt から 0.0 pt に縮んだ。<b>名簿の版は n=1 と同じか（篩なし）、BMR も書き込みも n=1 より良い（篩あり）</b>。理屈どおり。</li>
+<li>初書き基準は書き込みを最も減らすが、BMR は名簿より悪い（篩ありで +0.6〜+2.0 pt）。合成負荷で「勝って見えた」のは、たまたま山登りが良い所に落ち着いたため。</li>
+<li>残る問題は<b>下限の山登りが行き先によって大きく結果を変えること</b>（同じ負荷で下限 0.45〜0.81）。書き直しの小さな違いが、J の測定の揺れを通じて山登りの行き先を変える。</li>
+</ul>
+<span class="num">16b</span>
+</section>
+
+<!-- 17 -->
+<section class="slide">
+<div class="eyebrow">質問への答え 1：下限（floor）</div>
+<h2>下限は 0.8 ではなく、山登りで動く値。0.8 はその天井</h2>
+<div class="row">
+<div class="card"><h3>下限 ff とは</h3><p>大の分類が最低限持てる Region の割合。LRU の末尾が大の分類で、大がすでに ff × N 以下しか持っていなければ、代わりに別の分類の最古の Region を追い出す。</p></div>
+<div class="card blue"><h3>山登り（auto=1）</h3><p>大の分類が書いたバイトの割合から始め、4N 回の追い出しごとに J = BHR ＋ 0.1 × OHR を測り、J が上がった向きに 0.02 ずつ動かす。nha では平均 0.87〜0.93 に落ち着く。</p></div>
+<div class="card orange"><h3>0.8 は天井（ffmax）</h3><p>山登りが上がりすぎないよう上限をかける値。これを 0.8 にすると OHR は戻るが BMR の得が消える。導けない定数なので、論文では使わない。</p></div>
+</div>
+<p>今の山登りは<b>書き込みの費用を見ていない</b>（目的は BHR と OHR だけ）。n=cb と同じ値段 λ を使って J − λ × 書き込みバイト とすれば、下限・書き直し・篩が同じ物差しで動く。これは次の候補。</p>
+<span class="num">17</span>
+</section>
+
+<!-- 18 -->
+<section class="slide">
+<div class="eyebrow">質問への答え 2：サイズ閾値（仮説）</div>
+<h2>st が最適から「約 2 段」以内に入る理由</h2>
+<svg viewBox="0 0 1000 300" role="img" aria-label="閾値と分類の得の関係。山の頂上付近は平らで、2 のべき乗の目盛りと中央値のずれを合わせて約 2 段以内に入る">
+  <g transform="translate(60,20)">
+    <line x1="0" y1="240" x2="880" y2="240" stroke="var(--line)"/>
+    <path d="M0,232 C180,225 300,60 440,40 C580,60 700,225 880,232" fill="none" stroke="var(--blue)" stroke-width="4"/>
+    <rect x="330" y="20" width="220" height="220" fill="var(--blue-soft)" opacity="0.6"/>
+    <path d="M0,232 C180,225 300,60 440,40 C580,60 700,225 880,232" fill="none" stroke="var(--blue)" stroke-width="4"/>
+    <line x1="440" y1="40" x2="440" y2="240" stroke="var(--ink)" stroke-dasharray="4 4"/>
+    <line x1="385" y1="40" x2="385" y2="240" stroke="var(--orange)" stroke-width="3"/>
+    <g font-size="15" fill="var(--body)">
+      <text x="448" y="34">得が最大の閾値（大津の最適）</text>
+      <text x="200" y="120" fill="var(--orange)">st = min(書いたバイトの中央値,</text>
+      <text x="215" y="140" fill="var(--orange)">消えたバイトの中央値)</text>
+      <text x="440" y="275" text-anchor="middle">閾値（大きさ、2 のべき乗の目盛り）→ 網掛け＝±2 段で得の 9 割以上が残る範囲（模式図）</text>
+    </g>
+  </g>
+</svg>
+<div class="row">
+<div class="card"><h3>山の頂上は平ら</h3><p>容量の配分を最適化した後の分類の得は、「2 組のバイトの割合の積 ×（1 バイトあたりの価値の差）²」の形（画像の二値化の大津の方法と同じ形）。頂上では傾きが 0 なので、閾値のずれによる損は<b>ずれの 2 乗</b>でしか増えない。大きさは何十オクターブにも広がるので、1 段ずらして組をまたぐバイトは 1 割前後。</p></div>
+<div class="card"><h3>中央値が頂上の近くに来る</h3><p>割合の積はバイトを半々に分けたとき最大（書いたバイトの中央値）。価値の差は「当たらずに消えるバイト」の境目で大きい（消えたバイトの中央値）。st はその小さい方なので、大津の最適の安い近似。<b>2 のべき乗への丸めで最大 1 段 ＋ 中央値と最適のずれ約 1 段 ＝ 約 2 段</b>。</p></div>
+</div>
+<p class="small">数値ではまだ確かめていない説明。崩れる条件：価値が大きさに対して単調でない（山が 2 つ）、局所性が強い（Zipf α 1〜1.4、山そのものが低い）、大きさがそろっている（st は幅 2 オクターブ未満なら分けない）。</p>
+<span class="num">18</span>
+</section>
+
+<!-- 19 -->
+<section class="slide">
+<div class="eyebrow">サイズ閾値の改良案</div>
+<h2>目的と同じ物差しで閾値を選ぶ</h2>
+<div class="row">
+<div class="card blue"><h3>1. 大津の式を直接</h3><p>今あるヒストグラム（個数・バイト・消えたバイト、2 のべき乗 48 個）で、各候補の「割合の積 ×（価値の差）²」を計算して最大を採る。計算は再計算ごとに 48 回、メモリは増えない。中央値の近似のずれ（約 1 段）が消える見込み。</p></div>
+<div class="card"><h3>2. 目盛りを細かく</h3><p>半オクターブ（√2 刻み）にして、丸めの 1 段を半分に。ヒストグラムが 2 倍（約 2.4 KB）。</p></div>
+</div>
+<div class="row">
+<div class="card"><h3>3. 時間変化への追従</h3><p>速い移動平均と累積（または長い窓）の 2 つを持ち、両者の閾値がずれたら速い方へ寄せる。ご提案の「窓をランダムに」「累積でも見る」を両方持つ形。今の st は 15/16 の減衰（実効約 160 万物）1 本だけ。</p></div>
+<div class="card orange"><h3>4. n=cb の名簿と統一</h3><p>n=cb の名簿（限界の値）を大きさのビンごとに数え、隣り合うビンの「1 バイトあたりの限界の価値」が最も離れる所を閾値にする。書き直しと分類が同じ量で決まる。名簿のメモリ（nha で最大 36 万項目、ハッシュ表と順番の輪で約 15 MB）は共有できる。</p></div>
+</div>
+<span class="num">19</span>
+</section>
+
+</div>
+<div class="nav">↑↓ / PageUp・PageDown で 1 枚ずつ</div>
+<script>
+document.addEventListener('keydown', e => {
+  const s = [...document.querySelectorAll('.slide')], y = window.scrollY + 10;
+  let i = s.findIndex(x => x.offsetTop + x.offsetHeight > y + 40); if (i < 0) i = 0;
+  if (['ArrowDown','PageDown',' '].includes(e.key)) { e.preventDefault(); s[Math.min(i + 1, s.length - 1)].scrollIntoView({behavior:'smooth'}); }
+  if (['ArrowUp','PageUp'].includes(e.key)) { e.preventDefault(); s[Math.max(i - 1, 0)].scrollIntoView({behavior:'smooth'}); }
+});
+</script>
+</body>
+</html>

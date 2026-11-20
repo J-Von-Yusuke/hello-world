@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Region の中身を厳密に数える</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#222;--mut:#666;--card:#fff;--line:#ddd;--a:#c9683a;--b:#1f4e8c;--g:#3f9a64}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17181a;--fg:#e8e6e1;--mut:#a0a0a0;--card:#202225;--line:#3a3c40;--a:#e08a5c;--b:#7fa8e0;--g:#7cc79a}}
+:root[data-theme="dark"]{--bg:#17181a;--fg:#e8e6e1;--mut:#a0a0a0;--card:#202225;--line:#3a3c40;--a:#e08a5c;--b:#7fa8e0;--g:#7cc79a}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;line-height:1.75;margin:0}
+main{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.5rem}h2{font-size:1.15rem;margin-top:2.2em;border-bottom:1px solid var(--line);padding-bottom:.2em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0}
+.mut{color:var(--mut);font-size:.92em}table{border-collapse:collapse;width:100%;font-size:.92em}
+td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:right}td:first-child,th:first-child{text-align:left}
+svg{width:100%;height:auto}code{font-size:.9em}
+</style></head><body><main>
+<h1>Region の中身を厳密に数える（synth_model、2026-11-19）</h1>
+<p class="mut">症状：分類なし（大小の物が同じ Region に混ざる）の Region LRU（rlru[0]）が、縮小した SSD 想定の負荷（scaled.py の条件）で収束せず、
+容量の取り分の合計が 1 にならなかった（旧版 1.0027、高速化後 0.9958）。</p>
+
+<h2>1. 何が起きていたか</h2>
+<div class="card">
+<p>モデルは「Region に何がどれだけ入っているか（組成）」で、Region の寿命を計算します。組成は、挿入されるコンテンツの流れ（1K と 512K がどんな割合で来るか）から決まります。
+以前の版はこれを <b>決まった乱数で 400 個の Region を作って平均</b>していました。</p>
+<p>困るのは、割合が少し変わっても、乱数で作った Region の中の 512K の個数は <b>急に 1 つ増えたり減ったり</b>することです（階段）。しかも寿命の計算は、
+大きい物が多く入った少数の Region に強く引っ張られるので、その段差が大きく効きます。</p>
+<p>反復は「今の答え → 組成 → 新しい答え」を繰り返して止まる点を探しますが、写し方に段差があると、止まる点の両側を行き来して止まれません。
+実際、ある T では占有が 4 回ごとに同じ値に戻る周期解（4.050 → 4.046 → 4.048 → 4.045 GB）に落ち、減衰を最大にしても抜けませんでした。</p>
+</div>
+
+<svg viewBox="0 0 820 300" role="img" aria-label="組成の割合に対する、標本の平均（階段）と厳密な期待値（なめらか）">
+  <g font-size="13" fill="currentColor">
+  <text x="20" y="22">標本で数えると階段（左）、厳密に数えるとなめらか（右）</text>
+  <g transform="translate(40,40)">
+    <rect x="0" y="0" width="340" height="200" fill="none" stroke="var(--line)"/>
+    <polyline fill="none" stroke="var(--a)" stroke-width="2.5" points="0,180 40,180 40,160 95,160 95,152 130,152 130,120 175,120 175,112 220,112 220,70 265,70 265,62 300,62 300,30 340,30"/>
+    <text x="0" y="222">512K の割合（挿入の流れ） →</text>
+    <text x="0" y="-6" fill="var(--a)">標本 400 個の平均</text>
+  </g>
+  <g transform="translate(450,40)">
+    <rect x="0" y="0" width="340" height="200" fill="none" stroke="var(--line)"/>
+    <path d="M0,182 C80,165 160,130 230,95 S310,40 340,28" fill="none" stroke="var(--g)" stroke-width="2.5"/>
+    <text x="0" y="222">512K の割合（挿入の流れ） →</text>
+    <text x="0" y="-6" fill="var(--g)">すべての組成の確率で重みを付けた和</text>
+  </g></g>
+</svg>
+<p class="mut">模式図。縦は Region の寿命に効く量（組成ごとの重みの対数和 lW）。</p>
+
+<h2>2. 直し方：組成を全部、確率つきで数える</h2>
+<div class="card">
+<p>Region は、最初の物のあとに流れから 1 つずつ物を引き、入らない物を引いた時点で封じます。詰まった量は増える一方なので、
+<b>同じ物の集まりは、どの順で引いても途中で溢れません</b>。だから、ある組成で終わる確率は順番を数えずに書けます：</p>
+<p style="text-align:center">（並べ方の数）×（各物を引く確率の積）×（次に引く物が入らない確率）</p>
+<p>scaled の条件（1K と 512K、Region 4 MiB）では組成は最大 3 万通りほどなので、全部数えられます。寿命に効く量は「詰まった量ごとに、残りを上から足していく」計算で、
+乱数を使わずに求めます。どれも割合についてなめらかなので、反復は止まる点に素直に近づきます。
+1 つの分類に 1 サイズしかない場合（分類あり）は組成が 1 通りなので、前と同じ答えになります。</p>
+</div>
+
+<h2>3. 結果</h2>
+<svg viewBox="0 0 820 330" role="img" aria-label="T に対する占有 / 容量。前は初期値で 2% ずれ、後は 1 本のなめらかな線">
+  <g font-size="12" fill="currentColor">
+  <text x="20" y="20" font-size="13">T を固定した占有 ÷ 容量（5 通りの初期値）。1.0 になる T を探す</text>
+  <g transform="translate(60,40)">
+    <rect x="0" y="0" width="700" height="240" fill="none" stroke="var(--line)"/>
+    <line x1="0" y1="110.8" x2="700" y2="110.8" stroke="var(--mut)" stroke-dasharray="4 4"/><text x="705" y="115">1.0</text>
+    <!-- x: T 12000..15000 -> 0..700 ; y: occ/C 0.86..1.12 -> 240..0 -->
+    <polyline fill="none" stroke="var(--a)" stroke-width="2" points="0,226.4 233.3,140.3 326.7,122.9 373.3,91.7 466.7,69.1 700,10"/>
+    <circle cx="326.7" cy="122.9" r="4" fill="var(--a)"/><circle cx="326.7" cy="104.9" r="4" fill="var(--a)"/>
+    <text x="150" y="98" fill="var(--a)">前：T=13400 で 0.987 と 1.006</text>
+    <polyline fill="none" stroke="var(--g)" stroke-width="2.5" points="0,219.8 233.3,152.8 326.7,126.0 373.3,112.7 466.7,85.9 700,19.4"/>
+    <text x="420" y="160" fill="var(--g)">後：5 通りの初期値が 1 本に重なる</text>
+    <text x="0" y="258">T = 12000</text><text x="640" y="258">15000</text>
+  </g></g>
+</svg>
+<p class="mut">model_scan.sh の値（立ち上がりの隔離なし）。前は 300 回の反復で止まらず、打ち切った所の値（初期値 −1。点 2 つは同じ T の初期値 −1 と 1）。
+前の線が T=13000〜13600 で急に立つのも、段差のある写し方のため。</p>
+
+<div class="card">
+<table>
+<tr><th>scaled（1K / 512K、R 256M/64、-H 2e8）の rlru[0]</th><th>OHR</th><th>BHR</th><th>取り分の和</th><th>時間</th></tr>
+<tr><td>旧版（高速化の前）</td><td>0.4892</td><td>0.7159</td><td>1.0027</td><td>—</td></tr>
+<tr><td>高速化後（標本 400）</td><td>0.4890</td><td>0.7148</td><td>0.9958</td><td>117 s</td></tr>
+<tr><td>厳密な組成</td><td>0.4901</td><td>0.7154</td><td>0.9995（＝書き込み中の Region の半分を除いて 1）</td><td>17 s</td></tr>
+<tr><td>実測（RegionFlash、分類なし）</td><td>0.4994</td><td>0.7250</td><td></td><td></td></tr>
+</table>
+<p class="mut">ほかの 3 条件（w3、w4、w1d）でも、動いたのは大小が混ざる行だけ（OHR で最大 0.13pt、BHR で 0.06pt）。1 サイズの分類の行は変わらない。
+実測との差（BHR 約 1pt）は組成の数え方では埋まらない別の誤差。</p>
+</div>
+
+<h2>4. 残っていること</h2>
+<div class="card">
+<p>静的分割（rpart）の 1K だけの区画で、区画がほぼ全部を持てる大きさ（足跡の 8〜9 割）になると、追い出しの間隔が T より何十倍も長くなり、
+占有が T にほとんど反応しなくなって、T の探索が定まりません（768 Region の区画で占有が容量の 1.037 倍）。rpartO の配分が版で変わったのはこのため。
+scaled.py は rpart を使わないので、今回の結果には効きません。別の直しが要ります。</p>
+</div>
+<p class="mut">道具：tools/synth/model_diag.sh（DIAG=1：外側の反復ごとの占有と残差）、model_scan.sh（T を固定し初期値を変える）、model_mix_check.sh（4 条件の比較）。
+DIAGIT=1 で内側の反復ごとの残差・占有、MIXSAMPLE=1 で前の標本の数え方に戻せます。</p>
+</main></body></html>

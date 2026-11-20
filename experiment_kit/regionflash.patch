@@ -39,10 +39,10 @@ index 4b36a6f..5c7e5ff 100644
        params->block_size = (int)(strtol(value, &end, 0));
      } else if (strcasecmp(key, "header") == 0 ||
 diff --git a/libCacheSim/cache/CMakeLists.txt b/libCacheSim/cache/CMakeLists.txt
-index 49968ff..995b392 100644
+index 49968ff..e48451d 100644
 --- a/libCacheSim/cache/CMakeLists.txt
 +++ b/libCacheSim/cache/CMakeLists.txt
-@@ -71,6 +71,51 @@ set(eviction_sources_c
+@@ -71,6 +71,52 @@ set(eviction_sources_c
          eviction/S3FIFOd.c
          eviction/other/flashProb.c
          eviction/other/S3LRU.c
@@ -67,6 +67,7 @@ index 49968ff..995b392 100644
 +        eviction/flash/hint/rf_hint.c
 +        eviction/flash/hint/basic.c
 +        eviction/flash/hint/split_threshold.c
++        eviction/flash/hint/st_otsu.c
 +        eviction/flash/hint/mini.c
 +        eviction/flash/hint/ghost.c
 +        eviction/flash/hint/split_threshold_req.c
@@ -94,7 +95,7 @@ index 49968ff..995b392 100644
  )
  
  # C++ eviction algorithms
-@@ -150,6 +195,7 @@ set(cache_sources_c
+@@ -150,6 +196,7 @@ set(cache_sources_c
      plugin.c
  )
  
@@ -520,10 +521,10 @@ index 9c32668..fdeb31f 100644
  #ifdef __cplusplus
 diff --git a/libCacheSim/cache/eviction/flash/RegionFlash.c b/libCacheSim/cache/eviction/flash/RegionFlash.c
 new file mode 100644
-index 0000000..f572184
+index 0000000..7f6f20e
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/RegionFlash.c
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,525 @@
 +//
 +//  RegionFlash.c — DRAM (object unit) + SSD two-tier flash cache, ported from
 +//  cachesim (docs/re-DESIGN.md §1, §6).
@@ -685,6 +686,7 @@ index 0000000..f572184
 +  rf_hint_req(p, p->hops->on_find, req->obj_id, s, rc, HINT_MISS);
 +  CNT(p, misses, rc, 1);
 +  CNT(p, miss_bytes, rc, s);
++  if (p->re_base >= 2 || p->ghost_on) rf_re_ghost_miss(p, req->obj_id, s);  // reinsert n=cb base=marg
 +  {  // 計測用：RF_MISSLOG=<file> でミスごとに 時刻 物ID
 +    static FILE *ml = (FILE *)1;
 +    if (ml == (FILE *)1) ml = getenv("RF_MISSLOG") ? fopen(getenv("RF_MISSLOG"), "w") : NULL;
@@ -802,8 +804,10 @@ index 0000000..f572184
 +    MD(o).flags |= RF_SEEN;
 +  }
 +  p->t++;
-+  if (p->interval && (uint64_t)p->t - p->ival_start == p->interval)
++  if (p->interval && (uint64_t)p->t - p->ival_start == p->interval) {
++    if (p->re_dwpd > 0) rf_re_budget(p);  // reinsert n=cb dwpd=X
 +    rf_interval_end(p);
++  }
 +  cache_set_remove_hook(NULL, NULL);
 +  rf_cur = NULL;
 +  rf_check(p);
@@ -894,6 +898,8 @@ index 0000000..f572184
 +  free_request(p->req_re);
 +  free(p->rebuf);
 +  free(p->rebuf_pc);
++  if (p->ghost.cap) hm_free(&p->ghost);
++  free(p->gq_id), free(p->gq_t);
 +  free(p);
 +  cache_struct_free(cache);
 +}
@@ -927,6 +933,7 @@ index 0000000..f572184
 +  p->re_p = 1.0;
 +  p->re_frac = 0.5;
 +  p->re_target = 0.5, p->re_eps = 0.02;
++  p->re_gfrac = 0.05, p->re_kappa = 0.25;
 +  p->amp_key = 1, p->amp_size = 1.0;
 +  p->R = 16 * MiB;
 +  p->inclusion = INC_CACHELIB;
@@ -979,7 +986,7 @@ index 0000000..f572184
 +  rng_seed(&p->rng_h, p->seed * 6 + 5);
 +  rng_seed(&p->rng_re, p->seed * 6 + 6);
 +  uint32_t envk = RF_KMAX - (p->re_ii ? 1 : 0);
-+  hint_env_t he = {envk, p->ssd_mode == SSD_REGION ? p->R : 0, &p->rng_h, p->ssd_cap};
++  hint_env_t he = {envk, p->ssd_mode == SSD_REGION ? p->R : 0, &p->rng_h, p->ssd_cap, p->gz_h, p->gz_e, &p->ghost_on};
 +  p->hops = rf_plugin(1, spec, &p->pv[1]);
 +  if (p->hops->create(&p->hint, &p->pv[1], &he) != 0) rf_die("RegionFlash: cannot create hint\n");
 +  p->khint = p->hops->max_classes(p->hint);
@@ -1281,10 +1288,10 @@ index 0000000..e6945e7
 +                                       &adm_tinylfu_ops,   &adm_budget_ops,     NULL};
 diff --git a/libCacheSim/cache/eviction/flash/admit/admit.h b/libCacheSim/cache/eviction/flash/admit/admit.h
 new file mode 100644
-index 0000000..91440b2
+index 0000000..085fec1
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/admit/admit.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,44 @@
 +/* admit.h — the admission policies (admit=NAME:k=v/...): before an object is
 + * written to the SSD, accept() decides whether it is. One file per policy,
 + * listed in ADMISSIONS (admit.c). */
@@ -1302,6 +1309,7 @@ index 0000000..91440b2
 +  uint8_t source;  // SRC_DRAM_EVICT | SRC_MISS | SRC_REINSERT
 +  uint8_t dram_hits;
 +  uint64_t clock;  // the trace time (seconds) of the request that causes the write
++  uint8_t ssd_evicted;  // the SSD has evicted something (it has been full); 0 while it is filling for the first time
 +} admit_info_t;
 +
 +typedef struct {
@@ -1330,10 +1338,10 @@ index 0000000..91440b2
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/admit/basic.c b/libCacheSim/cache/eviction/flash/admit/basic.c
 new file mode 100644
-index 0000000..5c72001
+index 0000000..1a09031
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/admit/basic.c
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,133 @@
 +/* basic.c — SSD 受け入れ方針 all / prob / sizemax / sizeexp / seen（§8.2）/ dram（11-18）
 + * dram: DRAM から出る物は、DRAM にいた間のヒット数が min 以上のときだけ SSD に書く（min=1 なら「DRAM で一度も当たらなかった物は
 + *   書かない」）。S3-FIFO（SOSP'23）の小さな DRAM の FIFO を flash の受け入れの篩にする使い方、Flashield（NSDI'19）の
@@ -1343,7 +1351,11 @@ index 0000000..5c72001
 + *   また DRAM から出たら（= 断られた後にもう一度リクエストされた）、DRAM で当たっていなくても受け入れて名簿から消す。
 + *   S3-FIFO を flash の篩に使うときの「DRAM（ghost を含む）で 2 回以上リクエストされた物を書く」に当たる（S3-FIFO の ghost は
 + *   ghost で当たった時点で main に入れるが、ここでは次に DRAM から出る時に書く。その間は DRAM の写しが当たる）。
-+ *   S3-FIFO の既定の ghost の大きさは 0.9（キャッシュ容量に対する割合）。0 = 覚えない（ghost の経路なし）。 */
++ *   S3-FIFO の既定の ghost の大きさは 0.9（キャッシュ容量に対する割合）。0 = 覚えない（ghost の経路なし）。
++ *   fill=1（既定、11-19）: SSD が一度も追い出していない間（最初に埋まるまで）は篩わずに全部書く。S3-FIFO も、まだ何も追い出して
++ *   いない間は小さな FIFO から溢れた物を main に直接入れる（S3FIFO.c の has_evicted）ので、キャッシュに空きを残さない。
++ *   これが無いと、再利用の少ないトレース（w01、msr_usr_1）では SSD が最後まで埋まらず（受け入れ 0.35 / 0.36 × SSD）、BMR が
++ *   篩なしより 3〜4pt 悪くなっていた。fill=0 で 11-19 以前と同じ。 */
 +#include "admit.h"
 +#include "../util/hashmap.h"
 +
@@ -1352,6 +1364,7 @@ index 0000000..5c72001
 +    uint64_t *ring, m, head, len; hmap_t cnt;      /* seen: 直近 m 件の id と出現回数 */
 +    /* dram の ghost: 断った物の FIFO（循環配列、gq 個分の枠）。gmap = id → その物の一番新しい記録の通し番号 */
 +    double gfrac; uint64_t gcap, gbytes, gq, ghead, glen, gseq0, g_admit; uint64_t *gid; uint32_t *gsz; hmap_t gmap;
++    uint64_t fill, f_admit;  /* dram: fill=1 なら SSD が一度も追い出す前は全部受け入れる（S3-FIFO の has_evicted）。その数 */
 +};
 +enum { A_ALL, A_PROB, A_SIZEMAX, A_SIZEEXP, A_SEEN, A_DRAM };
 +static const param_spec_t P_NONE[] = {{NULL}};
@@ -1360,7 +1373,8 @@ index 0000000..5c72001
 +static const param_spec_t P_SEXP[] = {{"c", P_BYTES, "64K", NULL, "確率 exp(−s/c)"}, {NULL}};
 +static const param_spec_t P_SEEN[] = {{"m", P_UINT, "100000", NULL, "記憶する直近の件数"}, {NULL}};
 +static const param_spec_t P_DRAM[] = {{"min", P_UINT, "1", NULL, "DRAM にいた間のヒット数がこれ以上なら受け入れ"},
-+                                      {"ghost", P_DOUBLE, "0", NULL, "断った物を覚える量（SSD 容量に対する割合。0 = 覚えない、S3-FIFO は 0.9）"}, {NULL}};
++                                      {"ghost", P_DOUBLE, "0", NULL, "断った物を覚える量（SSD 容量に対する割合。0 = 覚えない、S3-FIFO は 0.9）"},
++                                      {"fill", P_UINT, "1", NULL, "1 = SSD が一度も追い出す前（埋まる前）は篩をかけない（S3-FIFO と同じ）。0 = 最初から篩う（11-19 以前）"}, {NULL}};
 +
 +static admission_t *mk(int kind, const admission_env_t *e) { admission_t *a = xcalloc(1, sizeof(*a)); a->kind = kind; a->rng = e->rng; return a; }
 +static int c_all(admission_t **a, const param_vals_t *v, const admission_env_t *r) { (void)v; *a = mk(A_ALL, r); return 0; }
@@ -1381,7 +1395,7 @@ index 0000000..5c72001
 +}
 +static int c_dram(admission_t **a, const param_vals_t *v, const admission_env_t *r) {
 +    admission_t *x = mk(A_DRAM, r);
-+    x->dmin = (uint64_t)pv_int(v, "min"); x->gfrac = pv_dbl(v, "ghost");
++    x->dmin = (uint64_t)pv_int(v, "min"); x->gfrac = pv_dbl(v, "ghost"); x->fill = (uint64_t)pv_int(v, "fill");
 +    if (!(x->gfrac >= 0)) die("dram: ghost must be >= 0");
 +    x->gcap = (uint64_t)(x->gfrac * (double)r->ssd_bytes);
 +    if (x->gcap) { x->gq = 1024; x->gid = xmalloc(x->gq * sizeof(*x->gid)); x->gsz = xmalloc(x->gq * sizeof(*x->gsz)); hm_init(&x->gmap, 2048); }
@@ -1439,6 +1453,7 @@ index 0000000..5c72001
 +        return 1;
 +    case A_DRAM:
 +        if (in->source != SRC_DRAM_EVICT || (uint64_t)in->dram_hits >= a->dmin) return 1;
++        if (a->fill && !in->ssd_evicted) { a->f_admit++; return 1; }  /* 埋まるまでは篩わない（空きを残さない） */
 +        if (!a->gcap) return 0;
 +        if (ghost_take(a, in->id)) { a->g_admit++; return 1; }  /* 断った後にもう一度リクエストされた */
 +        ghost_push(a, in->id, in->size);
@@ -1454,9 +1469,10 @@ index 0000000..5c72001
 +const admission_ops_t adm_sizeexp_ops = {"sizeexp", P_SEXP, c_sexp, destroy, accept, NULL, NULL, NULL};
 +const admission_ops_t adm_seen_ops    = {"seen",    P_SEEN, c_seen, destroy, accept, on_dram_evict, NULL, NULL};
 +static void dram_report(admission_t *a, FILE *f) {
-+    fprintf(f, "{\"min\": %llu, \"ghost\": %g, \"ghost_cap_bytes\": %llu, \"ghost_admits\": %llu, \"ghost_ids\": %llu, \"ghost_bytes\": %llu}",
-+            (unsigned long long)a->dmin, a->gfrac, (unsigned long long)a->gcap, (unsigned long long)a->g_admit,
-+            (unsigned long long)a->gmap.n, (unsigned long long)a->gbytes);
++    fprintf(f, "{\"min\": %llu, \"ghost\": %g, \"fill\": %llu, \"fill_admits\": %llu, \"ghost_cap_bytes\": %llu, \"ghost_admits\": %llu, "
++               "\"ghost_ids\": %llu, \"ghost_bytes\": %llu}",
++            (unsigned long long)a->dmin, a->gfrac, (unsigned long long)a->fill, (unsigned long long)a->f_admit,
++            (unsigned long long)a->gcap, (unsigned long long)a->g_admit, (unsigned long long)a->gmap.n, (unsigned long long)a->gbytes);
 +}
 +const admission_ops_t adm_dram_ops    = {"dram",    P_DRAM, c_dram, destroy, accept, NULL, NULL, dram_report};
 diff --git a/libCacheSim/cache/eviction/flash/admit/budget.c b/libCacheSim/cache/eviction/flash/admit/budget.c
@@ -2277,10 +2293,10 @@ index 0000000..b0dfdd1
 +#endif /* REGIONFLASH_STATS_H */
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_params.c b/libCacheSim/cache/eviction/flash/core/rf_params.c
 new file mode 100644
-index 0000000..4d53ee3
+index 0000000..212159d
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_params.c
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,122 @@
 +//
 +//  rf_params.c — parsing RegionFlash's -e parameters (see RegionFlash.c).
 +//
@@ -2332,6 +2348,14 @@ index 0000000..4d53ee3
 +    if (val == NULL) rf_die("RegionFlash: reinsert %s has no value\n", kv);
 +    *val++ = '\0';
 +    if (strcasecmp(kv, "n") == 0 && strcasecmp(val, "auto") == 0) p->re_auto = true, p->re_n = 1, p->re_n_set = true;
++    else if (strcasecmp(kv, "n") == 0 && strcasecmp(val, "cb") == 0) p->re_auto = p->re_cb = true, p->re_n = 1, p->re_n_set = true;
++    else if (strcasecmp(kv, "lambda") == 0) p->re_lambda = strtod(val, NULL);
++    else if (strcasecmp(kv, "base") == 0) p->re_base = rf_enum(val, (const char *const[]){"all", "first", "marg", "gmarg"}, 4, kv);
++    else if (strcasecmp(kv, "ts") == 0) p->re_ts = atoi(val) != 0;
++    else if (strcasecmp(kv, "decay") == 0) p->re_decay = (uint32_t)atoi(val);
++    else if (strcasecmp(kv, "gfrac") == 0) p->re_gfrac = strtod(val, NULL);
++    else if (strcasecmp(kv, "dwpd") == 0) p->re_dwpd = strtod(val, NULL);
++    else if (strcasecmp(kv, "kappa") == 0) p->re_kappa = strtod(val, NULL);
 +    else if (strcasecmp(kv, "n") == 0) p->re_n = (uint32_t)atoi(val), p->re_n_set = true;
 +    else if (strcasecmp(kv, "target") == 0) p->re_target = strtod(val, NULL);
 +    else if (strcasecmp(kv, "eps") == 0) p->re_eps = strtod(val, NULL);
@@ -2397,10 +2421,10 @@ index 0000000..4d53ee3
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_report.c b/libCacheSim/cache/eviction/flash/core/rf_report.c
 new file mode 100644
-index 0000000..f83544e
+index 0000000..adef7f4
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_report.c
-@@ -0,0 +1,382 @@
+@@ -0,0 +1,391 @@
 +//
 +//  rf_report.c — RegionFlash's counters out: the end-of-run table, P.json,
 +//  P.class.csv, P.sizebin.csv, the per-interval CSVs, and the size-bin views
@@ -2679,6 +2703,15 @@ index 0000000..f83544e
 +      for (int h = 1; h <= 8; h++) fprintf(g, "%s%llu", h > 1 ? ", " : "", (unsigned long long)p->re_hit[c][h]);
 +      fprintf(g, "], \"n_used\": [");  // decisions made while n = 1..9 (9: none)
 +      for (int n = 1; n <= 9; n++) fprintf(g, "%s%llu", n > 1 ? ", " : "", (unsigned long long)p->re_auto_n[c][n]);
++      if (p->re_cb) {  // n_used = rewrites allowed by bucket; hits per byte in the next stay by bucket vs the class mean
++        fprintf(g, "], \"lambda\": %g, \"lambda_mean\": %g, \"base\": \"%s\", \"ts\": %d, \"decay\": %d, \"n_decay\": %llu, "
++                "\"ghost_max\": %llu, \"gh_b\": %g, \"gh_n\": %g, \"ev_b\": %g, \"ghost_win\": %g, \"bar\": %g, \"stay_mean\": %g, \"first_mean\": %g, \"next_stay_hits_per_byte\": [",
++                p->re_lambda, p->lam_n > 0 ? p->lam_sum / p->lam_n : p->re_lambda,
++                p->re_base == 3 ? "gmarg" : p->re_base == 2 ? "marg" : p->re_base ? "first" : "all", p->re_ts, (int)p->re_decay,
++                (unsigned long long)p->n_decay, (unsigned long long)p->gq_max, p->gh_b[c], p->gh_n[c], p->ev_b[c], rf_re_ghost_win(p, c), rf_re_base(p, c),
++                p->st_b[c] > 0 ? p->st_hb[c] / p->st_b[c] : 0.0, p->fs_b[c] > 0 ? p->fs_hb[c] / p->fs_b[c] : 0.0);
++        for (int h = 1; h <= 8; h++) fprintf(g, "%s%g", h > 1 ? ", " : "", p->re_sb[c][h] > 0 ? p->re_hb[c][h] / p->re_sb[c][h] : 0.0);
++      }
 +      fprintf(g, "]}");
 +    }
 +    fprintf(g, "]}\n");
@@ -2785,7 +2818,7 @@ index 0000000..f83544e
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_tier.c b/libCacheSim/cache/eviction/flash/core/rf_tier.c
 new file mode 100644
-index 0000000..212351a
+index 0000000..18fa17b
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_tier.c
 @@ -0,0 +1,127 @@
@@ -2839,7 +2872,7 @@ index 0000000..212351a
 +    if (t == T_DRAM) {
 +      p->dram_used -= (uint64_t)o->obj_size;
 +      rf_victim(p, o);
-+    } else if (!rf_obj_reinsert(p, o)) {
++    } else if (p->ssd_evicted = true, !rf_obj_reinsert(p, o)) {  // the SSD tier evicted: it has been full
 +      p->ssd_used -= (uint64_t)o->obj_size;
 +      rf_evict_account(p, o);
 +    }
@@ -2918,10 +2951,10 @@ index 0000000..212351a
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_basic.c b/libCacheSim/cache/eviction/flash/evict/region_basic.c
 new file mode 100644
-index 0000000..608933b
+index 0000000..89e428e
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_basic.c
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,407 @@
 +//
 +//  region_basic.c — the Region eviction policies ported from cachesim
 +//  (rpolicy/reg_basic.c):
@@ -2934,6 +2967,15 @@ index 0000000..608933b
 +//  When the LRU tail belongs to class fc and fc holds no more than ff * N
 +//  sealed regions, the oldest region of another class is evicted instead
 +//  (ff = 0, the default, is plain lru).
++//  11-20: auto=2 moves ff by the measured gradient instead: the ghost of objects that left the SSD (ssd/rf_ssd.c) counts,
++//  per class, the misses that 5% more of that class's capacity would have turned into hits; over a window, class c's
++//  marginal value per byte of capacity is m_c = (ghost-hit bytes / requested bytes + w * ghost hits / requests) / C_c
++//  (C_c its regions). g = (m_fc - m_other) / (m_fc + m_other) is smoothed (half each window) and ff += 2 * step * g:
++//  the KKT point (equal marginal values) is where g = 0. No window-to-window difference of J, so the drift of the
++//  workload between windows does not decide the direction; its window defaults to N/2 evictions (a direct measurement
++//  needs less averaging, and on w01 the SSD turns over only ~3 times: 4N windows never completed). auto=3 is auto=1 with a step that shrinks as
++//  step * max(0.25, (20 / (20 + k))^0.602) after k windows (Robbins-Monro / SPSA gain). wl (any auto) subtracts
++//  wl * NAND bytes written / requested bytes from J (the price of a written byte, as n=cb's lambda).
 +//  auto=1 moves ff while running (perturb and observe): every `win` evictions
 +//  (default 4N: a window must outlast the time a large object evicted now
 +//  takes to come back as a miss, or lowering ff looks good because the small
@@ -2943,7 +2985,8 @@ index 0000000..608933b
 +//  way again if J rose, the other way if it fell; ff starts at the given ff,
 +//  or else at class fc's share of the bytes admitted in the first window in
 +//  which class fc admits anything (the condition C_fc/C >= B_fc/B; again after
-+//  the warm-up reset), and stays in [0, 0.99]. J is concave in the split (static
++//  the warm-up reset), and stays in [0, ffmax] (ffmax = 0.99 by default; 11-19:
++//  a lower cap keeps capacity for the other class, the OHR side). J is concave in the split (static
 +//  partition, d mu / dT = -Var_w(lambda)), so ff climbs to the best split and
 +//  then wanders by about one step around it. It needs no estimate of the
 +//  marginal value, which the LRU tail of a class with many objects per region
@@ -3001,13 +3044,19 @@ index 0000000..608933b
 +struct rf_rpol {
 +  const rf_rview_t *v;
 +  int mode;
-+  double beta, fc, ff;  // lru: class fc keeps at least ff * N sealed regions
++  double beta, fc, ff, ffmax;  // lru: class fc keeps at least ff * N sealed regions; auto=1 keeps ff <= ffmax
 +  uint64_t *useq, cnt;  // lru / beta: order of the last seal or SSD hit
 +  /* lru auto=1: window length, step, OHR weight, direction, the last J, the
 +   * counters at the window start, picks in this window, sum of ff over picks */
 +  double step, w, dir, jprev, ffsum;
 +  uint64_t win, np, picks, r0, rb0, h0, hb0, ab0[256];
 +  bool on, ffstart, pend;  // ffstart: no ff given, start from the admitted byte share; pend: not started yet
++  int alg;                 // auto=1 perturb and observe, 2 ghost gradient, 3 shrinking step
++  double wl, gs, gb0[64], gn0[64], move;  // move: auto=2 steps from fc's share (1) or from the floor (0)
++  uint64_t nw0, nwin;
++  /* 11-20 計測用: 窓ごとの (その窓の ff, J)。report の "trace"（最大 TR_MAX 窓）。step=0 なら ff を固定したまま J の揺れを測れる */
++  float tr_ff[4096], tr_j[4096], tr_ml[4096], tr_mo[4096], tr_cl[4096];  // auto=2: also the two marginal values, fc's regions
++  uint32_t ntr;
 +  rf_gate_t g;             // auto=1/gate=1
 +};
 +
@@ -3033,18 +3082,23 @@ index 0000000..608933b
 +}
 +
 +static rf_rpol_t *lru_create(const rf_rview_t *v, const char *params) {
-+  double fc = 1, ff = -1, on = 0, w = 0, win = 0, step = 0.02;
++  double fc = 1, ff = -1, on = 0, w = 0, win = 0, step = 0.02, ffmax = 0.99, wl = 0, move = 0;
 +  double gate = 0, gd = 0.05, gm = 0.5, gz = 2, gneed = 2, gk = 2, gkmax = 32, gback = 8;
 +  rf_rpol_parse("lru", params,
 +                (const rf_kv_t[]){{"fc", &fc, NULL, 0}, {"ff", &ff, NULL, 0}, {"auto", &on, NULL, 0}, {"w", &w, NULL, 0},
 +                                  {"win", &win, NULL, 0}, {"step", &step, NULL, 0}, {"gate", &gate, NULL, 0},
 +                                  {"gd", &gd, NULL, 0}, {"gm", &gm, NULL, 0}, {"gz", &gz, NULL, 0}, {"gneed", &gneed, NULL, 0},
-+                                  {"gk", &gk, NULL, 0}, {"gkmax", &gkmax, NULL, 0}, {"gback", &gback, NULL, 0},
++                                  {"gk", &gk, NULL, 0}, {"gkmax", &gkmax, NULL, 0}, {"gback", &gback, NULL, 0}, {"ffmax", &ffmax, NULL, 0},
++                                  {"wl", &wl, NULL, 0}, {"move", &move, NULL, 0},
 +                                  {NULL, NULL, NULL, 0}});
 +  rf_rpol_t *x = mk(v, M_LRU, 0);
-+  x->on = on != 0;
-+  x->fc = fc, x->ff = ff >= 0 ? ff : x->on ? 0.5 : 0, x->ffstart = x->pend = x->on && ff < 0;
-+  x->w = w, x->win = win > 0 ? (uint64_t)win : 4 * (uint64_t)v->N, x->step = step, x->dir = 1, x->jprev = NAN;
++  x->on = on != 0, x->alg = (int)on, x->wl = wl, x->move = move;
++  if (x->alg == 2) *v->ghost_on = 1;
++  if (x->alg < 0 || x->alg > 3) rf_die("region-evict lru: auto must be 0..3\n");
++  if (!(ffmax > 0 && ffmax <= 0.99)) rf_die("region-evict lru: ffmax must be in (0, 0.99]\n");
++  x->ffmax = ffmax;
++  x->fc = fc, x->ff = ff >= 0 ? ff : x->on ? fmin(0.5, ffmax) : 0, x->ffstart = x->pend = x->on && ff < 0;
++  x->w = w, x->win = win > 0 ? (uint64_t)win : on == 2 ? (v->N / 2 > 0 ? v->N / 2 : 1) : 4 * (uint64_t)v->N, x->step = step, x->dir = 1, x->jprev = NAN;
 +  if (gate != 0) {
 +    if (!x->on) rf_die("region-evict lru: gate=1 needs auto=1\n");
 +    if (!(gd > 0 && gd < 1) || !(gm >= 0 && gm <= 1) || !(gz >= 0) || gneed < 1 || gk < 1 || gkmax < gk || gback < 1)
@@ -3101,7 +3155,7 @@ index 0000000..608933b
 +      }
 +      g->jlast2 = g->jlast, g->jlast = j, g->nst++, g->bs = bshare;
 +      if (j == j && g->nst >= g->kint && g->s2n >= 2)  // a step big enough to be seen: part of the way to where the climb would start
-+        g->jA = j, x->ff = fmin(0.99, g->aw + fmax(g->d, g->m * (g->bs - g->aw))), g->st = G_PROBE, g->probes++;
++        g->jA = j, x->ff = fmin(x->ffmax, g->aw + fmax(g->d, g->m * (g->bs - g->aw))), g->st = G_PROBE, g->probes++;
 +      break;
 +    case G_PROBE:
 +      g->jP = j, x->ff = 0, g->st = G_AFTER;
@@ -3117,7 +3171,7 @@ index 0000000..608933b
 +      g->jlast = g->jlast2 = NAN, g->nst = 0;  // the window after a probe still carries it: no noise sample from it
 +      if (g->pos >= g->need) {  // climb from just above the natural share, or the admitted byte share if higher
 +        g->st = G_CLIMB, g->pos = 0, g->idle = 0, g->to_climb++;
-+        x->ff = fmin(0.99, fmax(g->aw + g->d, bshare)), x->dir = 1, x->jprev = NAN;
++        x->ff = fmin(x->ffmax, fmax(g->aw + g->d, bshare)), x->dir = 1, x->jprev = NAN;
 +      } else {
 +        g->st = G_ST;
 +        g->kint = up ? 1 : (2 * g->kint < g->kmax ? 2 * g->kint : g->kmax);
@@ -3133,7 +3187,7 @@ index 0000000..608933b
 +      }
 +      if (j == j && x->jprev == x->jprev && j < x->jprev) x->dir = -x->dir;
 +      x->jprev = j;
-+      x->ff = fmin(0.99, fmax(0, x->ff + x->dir * x->step));
++      x->ff = fmin(x->ffmax, fmax(0, x->ff + x->dir * x->step));
 +      break;
 +  }
 +  g->skips = 0;
@@ -3149,6 +3203,8 @@ index 0000000..608933b
 +  if (x->np++ == 0) {
 +    x->r0 = *v->reqs, x->rb0 = *v->req_bytes, x->h0 = *v->ssd_hits + *v->dram_hits, x->hb0 = *v->hit_bytes;
 +    for (uint32_t c = 0; c < v->kmax && c < 256; c++) x->ab0[c] = v->admit_b[c];
++    for (uint32_t c = 0; c < v->kmax && c < 64; c++) x->gb0[c] = v->gh_b[c], x->gn0[c] = v->gh_n[c];
++    x->nw0 = *v->nand_write_bytes;
 +    return;
 +  }
 +  if (x->pend) {
@@ -3157,13 +3213,42 @@ index 0000000..608933b
 +    if (x->np <= x->win) return;
 +    uint64_t s = 0, a = v->admit_b[(uint32_t)x->fc] - x->ab0[(uint32_t)x->fc];
 +    for (uint32_t c = 0; c < v->kmax && c < 256; c++) s += v->admit_b[c] - x->ab0[c];
-+    if (a && s) x->ff = fmin(0.99, (double)a / (double)s), x->pend = false, x->jprev = NAN;
++    if (a && s) x->ff = fmin(x->ffmax, (double)a / (double)s), x->pend = false, x->jprev = NAN;
 +    x->np = 0;
 +    return;
 +  }
 +  if (x->np <= x->win || *v->reqs == x->r0 || *v->req_bytes == x->rb0) return;
 +  double j = (double)(*v->hit_bytes - x->hb0) / (double)(*v->req_bytes - x->rb0) +
 +             x->w * (double)(*v->ssd_hits + *v->dram_hits - x->h0) / (double)(*v->reqs - x->r0);
++  if (x->wl) j -= x->wl * (double)(*v->nand_write_bytes - x->nw0) / (double)(*v->req_bytes - x->rb0);
++  if (x->alg == 2) {  // the ghost's gradient: class fc against the others, per byte of capacity
++    double rb = (double)(*v->req_bytes - x->rb0), rq = (double)(*v->reqs - x->r0), nl = 0, no = 0, cl = 0, co = 0;
++    for (uint32_t r = 0; r < v->N; r++)
++      if (v->reg[r].state != RF_R_SEALED) continue;  // as the floor counts (a freed region keeps its old class)
++      else if (v->reg[r].cls == (uint32_t)x->fc) cl += 1; else co += 1;
++    for (uint32_t c = 0; c < v->kmax && c < 64; c++) {
++      double m = (v->gh_b[c] - x->gb0[c]) / rb + x->w * (v->gh_n[c] - x->gn0[c]) / rq;
++      if (c == (uint32_t)x->fc) nl += m; else no += m;
++    }
++    double ml = cl > 0 ? nl / cl : 0, mo = co > 0 ? no / co : 0, g = ml + mo > 0 ? (ml - mo) / (ml + mo) : 0;
++    x->gs = x->nwin ? 0.5 * x->gs + 0.5 * g : g, x->nwin++;
++    if (x->ntr < 4096)
++      x->tr_ff[x->ntr] = (float)x->ff, x->tr_ml[x->ntr] = (float)ml, x->tr_mo[x->ntr] = (float)mo, x->tr_cl[x->ntr] = (float)cl,
++      x->tr_j[x->ntr++] = (float)x->gs;
++    x->np = 0;
++    /* 11-20, move=1: step from fc's share now (its regions / all), both ways, instead of from the floor. A floor below the share
++     * changes nothing (from 0 up to the natural split the climb idles: ~20 windows on the size-drift synthetic, phase A lost); a
++     * negative step puts the floor under the share, which leaves the natural split to shrink fc by itself. (Jumping to the share only
++     * when the gradient is positive was tried first: one early positive window locked w01's floor at the early share and lost 3.6 pt.)
++     * move=0 (default) is the original: step from the floor. */
++    /* move=2: as move=0, but while the floor idles below fc's share and the smoothed gradient is strongly positive (> 0.5), it also
++     * closes half the gap to the share each window (the idle climb takes ~log2 steps instead of share / 0.04; move=1 lost w01
++     * because a floor just under the share still binds during evictions and shrinks fc only 0.03 a window). */
++    double share = cl / (double)v->N, from = x->move == 1 ? share : x->ff;  // the floor's own unit: fc's sealed regions / N
++    if (x->move == 2 && x->gs > 0.5 && x->ff < share) from += 0.5 * (share - x->ff);
++    x->ff = fmin(x->ffmax, fmax(0, from + 2 * x->step * x->gs));
++    return;
++  }
 +  if (x->g.on) {
 +    uint32_t fc = (uint32_t)x->fc;
 +    uint64_t s = 0, a = v->admit_b[fc] - x->ab0[fc];
@@ -3172,9 +3257,12 @@ index 0000000..608933b
 +    gate_step(x, j, s ? (double)a / (double)s : 0);
 +    return;
 +  }
++  if (x->ntr < 4096) x->tr_ff[x->ntr] = (float)x->ff, x->tr_j[x->ntr++] = (float)j;
 +  if (j == j && x->jprev == x->jprev && j < x->jprev) x->dir = -x->dir;
 +  x->jprev = j, x->np = 0;
-+  x->ff = fmin(0.99, fmax(0, x->ff + x->dir * x->step));
++  double a = x->alg == 3 ? x->step * fmax(0.25, pow(20.0 / (20.0 + (double)x->nwin), 0.602)) : x->step;
++  x->nwin++;
++  x->ff = fmin(x->ffmax, fmax(0, x->ff + x->dir * a));
 +}
 +
 +static void jnum(FILE *f, double v) {  // a JSON number, null if not finite
@@ -3189,8 +3277,15 @@ index 0000000..608933b
 +    fputs("null", f);
 +    return;
 +  }
-+  fprintf(f, "{\"auto\": %d, \"w\": %g, \"win\": %llu, \"step\": %g, \"ff_end\": %.4f, \"ff_mean\": %.4f, \"picks\": %llu", x->on,
++  fprintf(f, "{\"auto\": %d, \"w\": %g, \"win\": %llu, \"step\": %g, \"ff_end\": %.4f, \"ff_mean\": %.4f, \"picks\": %llu", x->alg,
 +          x->w, (unsigned long long)x->win, x->step, x->ff, x->picks ? x->ffsum / x->picks : x->ff, (unsigned long long)x->picks);
++  fputs(", \"trace\": [", f);
++  for (uint32_t i = 0; i < x->ntr; i++)
++    if (x->alg == 2)  // [ff, smoothed g, marginal value of fc, of the others (per region), fc's regions]
++      fprintf(f, "%s[%.4f, %.4f, %.3e, %.3e, %.0f]", i ? ", " : "", x->tr_ff[i], x->tr_j[i], x->tr_ml[i], x->tr_mo[i], x->tr_cl[i]);
++    else
++      fprintf(f, "%s[%.4f, %.6f]", i ? ", " : "", x->tr_ff[i], x->tr_j[i]);
++  fputs("]", f);
 +  if (x->g.on) {
 +    const rf_gate_t *g = &x->g;
 +    static const char *const S[] = {"st", "probe", "after", "climb"};
@@ -4140,10 +4235,10 @@ index 0000000..471465b
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_policy.h b/libCacheSim/cache/eviction/flash/evict/region_policy.h
 new file mode 100644
-index 0000000..b145966
+index 0000000..e64a1b7
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_policy.h
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,99 @@
 +//
 +//  region_policy.h — which sealed Region RegionFlash evicts next.
 +//
@@ -4179,6 +4274,12 @@ index 0000000..b145966
 +  const uint64_t *admit_n, *admit_b;   // [kmax] objects / bytes admitted, all time
 +  const uint64_t *reqs, *req_bytes;    // requests / requested bytes so far (since the warm-up reset)
 +  const uint64_t *ssd_hits, *dram_hits, *hit_bytes; // SSD hits / DRAM hits / hit bytes (DRAM and SSD) so far
++  /* 11-20: the ghost of objects that left the SSD (ssd/rf_ssd.c rf_re_ghost_*), per class, all time: bytes and number of
++   * misses on objects that left less than 5% of their class's mean residence ago, and bytes that left. A policy that
++   * wants it sets *ghost_on = 1 at create. nand_write_bytes: NAND writes so far (since the warm-up reset) */
++  const double *gh_b, *gh_n, *ev_b;
++  uint8_t *ghost_on;
++  const uint64_t *nand_write_bytes;
 +} rf_rview_t;
 +
 +typedef struct rf_rpol rf_rpol_t;
@@ -6060,10 +6161,10 @@ index 0000000..4ebae27
 +    .epoch = epoch, .bounds = bounds, .max_classes = max_classes};
 diff --git a/libCacheSim/cache/eviction/flash/hint/regionflash_hint.h b/libCacheSim/cache/eviction/flash/hint/regionflash_hint.h
 new file mode 100644
-index 0000000..1d8bfba
+index 0000000..74be3f7
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/regionflash_hint.h
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,102 @@
 +//
 +//  regionflash_hint.h — RegionFlash's hint interface: a hint provider sees
 +//  the cache's operations and gives each SSD write its class (write stream,
@@ -6126,7 +6227,13 @@ index 0000000..1d8bfba
 +  uint64_t region_size;  // R (0 in ssd-mode=object)
 +  rng_t *rng;            // the provider's random numbers (seed * 6 + 5)
 +  uint64_t ssd_cap;      // SSD capacity in bytes
++  /* 11-20: the ghost of what left the SSD (ssd/rf_ssd.c), by object size, RF_GZ_NB bins of a quarter octave
++   * (bin = floor(4 log2 size)), all time: ghost-hit bytes (misses that 5% more capacity of the class would have made
++   * hits) and bytes that left the SSD. A provider that wants them sets *ghost_on = 1 at create. */
++  const double *gz_h, *gz_e;
++  uint8_t *ghost_on;
 +} hint_env_t;
++#define RF_GZ_NB 192
 +
 +typedef struct {
 +  const char *name;
@@ -6162,7 +6269,7 @@ index 0000000..1d8bfba
 +#endif /* REGIONFLASH_HINT_H */
 diff --git a/libCacheSim/cache/eviction/flash/hint/rf_hint.c b/libCacheSim/cache/eviction/flash/hint/rf_hint.c
 new file mode 100644
-index 0000000..2038825
+index 0000000..7374ffa
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/rf_hint.c
 @@ -0,0 +1,148 @@
@@ -6192,7 +6299,7 @@ index 0000000..2038825
 +    rf_hint_st_recursive_ops, rf_hint_split_threshold_req_ops, rf_hint_st_hitrate_ops,
 +    rf_hint_st_hr_refine_ops, rf_hint_hr_segment_ops, rf_hint_profile_ops, rf_hint_oracle_gdt_ops,
 +    rf_hint_key_ops, rf_hint_oracle_key_ops, rf_hint_oracle_keyinfo_ops, rf_hint_value_ops,
-+    rf_hint_pdens_ops, rf_hint_mini_ops, rf_hint_ghost_ops;
++    rf_hint_pdens_ops, rf_hint_mini_ops, rf_hint_ghost_ops, rf_hint_st_otsu_ops;
 +static const rf_hint_ops_t *const RF_HINTS[] = {
 +    &rf_hint_none_ops,           &rf_hint_fixed_ops,
 +    &rf_hint_split_threshold_ops, &rf_hint_st_recursive_ops,
@@ -6202,7 +6309,7 @@ index 0000000..2038825
 +    &rf_hint_key_ops,            &rf_hint_oracle_key_ops,
 +    &rf_hint_oracle_keyinfo_ops, &rf_hint_value_ops,
 +    &rf_hint_pdens_ops,         &rf_hint_mini_ops,
-+    &rf_hint_ghost_ops,
++    &rf_hint_ghost_ops,          &rf_hint_st_otsu_ops,
 +    NULL};
 +
 +/* spec "name:k=v/k=v" -> the ops of an admission policy (kind 0) or a hint
@@ -6316,10 +6423,10 @@ index 0000000..2038825
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/hint/split_threshold.c b/libCacheSim/cache/eviction/flash/hint/split_threshold.c
 new file mode 100644
-index 0000000..409d3a1
+index 0000000..65027d7
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/split_threshold.c
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,100 @@
 +/* split_threshold.c — 物を大きさの閾値 τ で分類するヒント（hint=split_threshold）。
 + * τ は研究者の SplitThreshold の規則（../util/sst.h）で、書いた物の大きさの分布から
 + * recalc 回ごとに決め直す。st_recursive は同じ規則を範囲ごとに繰り返し、最大 2^depth 分類にする。
@@ -6340,6 +6447,8 @@ index 0000000..409d3a1
 + * 書き込み中の Region を封じる（seal-on-repartition）。区間で決まらないヒントは bounds が 0 個、
 + * epoch は 0 のまま（例 key.c）。
 + * ───────────────────────────────────────────────────────────────────── */
++#include <math.h>
++
 +#include "../util/sst_wrap.h"
 +#include "regionflash_hint.h"
 +
@@ -6348,6 +6457,7 @@ index 0000000..409d3a1
 +  int depth;                 // 1: split_threshold、2 以上: st_recursive
 +  uint32_t kmax, n, ep;      // 使える分類数、τ の数、エポック（τ が変わるたびに 1 進む）
 +  int64_t taus[KMAX_LIMIT];  // 今の τ（昇順）。大きさ s の分類 = s を超える τ の数
++  double lsum, lcnt;         // 11-20 報告用: 書いた物ごとの log2(τ_1 + 1) の和と数（分けていない間は数えない）
 +};
 +
 +static const param_spec_t P_ST[] = {ST_PARAM_SPECS, {NULL}};
@@ -6384,6 +6494,7 @@ index 0000000..409d3a1
 +      memcpy(h->taus, nt, n * sizeof(int64_t));
 +    }
 +  }
++  if (h->n > 0 && h->taus[0] >= 0) h->lsum += log2((double)h->taus[0] + 1), h->lcnt++;
 +  return class_of_taus(h->taus, h->n, e->size);
 +}
 +
@@ -6403,10 +6514,15 @@ index 0000000..409d3a1
 +  return m < h->kmax ? m : h->kmax;
 +}
 +
++static void report(rf_hint_t *h, FILE *f) {  // 11-20: 最後の τ（最初の境界）と、書いた物で平均した log2 τ
++  fprintf(f, "{\"tau\": %lld, \"changes\": %u, \"tau_log2_mean\": %g}", (long long)(h->n ? h->taus[0] : -1), h->ep,
++          h->lcnt > 0 ? h->lsum / h->lcnt : 0.0);
++}
++
 +const rf_hint_ops_t rf_hint_split_threshold_ops = {
 +    .name = "split_threshold", .params = P_ST, .create = create, .destroy = destroy,
 +    .on_insert = on_insert, .on_evict = on_evict,
-+    .epoch = epoch, .bounds = bounds, .max_classes = max_classes};
++    .epoch = epoch, .bounds = bounds, .max_classes = max_classes, .report = report};
 +const rf_hint_ops_t rf_hint_st_recursive_ops = {
 +    .name = "st_recursive", .params = P_REC, .create = create_rec, .destroy = destroy,
 +    .on_insert = on_insert, .on_evict = on_evict,
@@ -6515,6 +6631,187 @@ index 0000000..baf18a3
 +const rf_hint_ops_t rf_hint_split_threshold_req_ops = {
 +    "split_threshold_req", P,      create, destroy, on_get,      NULL,  on_insert,
 +    NULL,                  epoch,  bounds, NULL,    max_classes, report};
+diff --git a/libCacheSim/cache/eviction/flash/hint/st_otsu.c b/libCacheSim/cache/eviction/flash/hint/st_otsu.c
+new file mode 100644
+index 0000000..d9d4bb6
+--- /dev/null
++++ b/libCacheSim/cache/eviction/flash/hint/st_otsu.c
+@@ -0,0 +1,175 @@
++/* st_otsu.c — 物を大きさの閾値 τ で 2 分類するヒント（hint=st_otsu、2026-11-20）。
++ * τ は大津の二値化と同じ規則で選ぶ: 大きさのビン b ごとに、書いたバイト A_b と、書いてから一度も当たらずに
++ * 追い出されたバイト K_b を数え、ビンの価値 v_b = 1 − K_b / A_b（書いたバイトのうち再利用された割合）とする。
++ * 切れ目の候補ごとに、2 組のバイトの割合 W_S・W_L と、組の（バイトで重みを付けた）平均の価値 m_S・m_L から
++ *   得点 = W_S × W_L × (m_S − m_L)^2      （組の間の分散。容量配分を最適化した後の分類の得と同じ形）
++ * を計算し、最大の切れ目を τ にする。大の組のバイトが no_split_pct % 未満の切れ目は使わない（st と同じ門）。
++ * 追い出しのデータがまだ無い間は、書いたバイトの中央値で切る。
++ * 11-20 val=ghost: ビンの価値を「名簿の当たりのバイト ÷ そのビンから SSD を出たバイト」（容量を少し足したときに
++ * 増えるヒットの、1 バイトあたりの限界の価値。下限の auto=2 と同じ量）にし、重みも出たバイトにする。前回の再計算からの
++ * 増分を ema_den で減衰させながら積む。容量配分（auto=2）が限界の価値をそろえるので、閾値は価値の違う組を分ける所に置く。
++ * 11-20 val=logreq: ビンの価値を log（要求されたバイト ÷ 書いたバイト）＝書いた 1 バイトが何回要求されるか（再利用の強さ）の
++ * 対数にする。重みは書いたバイト。再利用の強さは桁で違うので対数で比べる。オフラインの試算（tools/synth/otsu_offline.py）で
++ * w01 2^18・Tencent 2^15 にぴったり、nha は 2^24（最良 2^25 の 1 つ下）。再利用率（reuse）は nha の 50 MiB の物の塊
++ * （書いたバイトの 34%）を小の組に入れて 64M を選び、外した。
++ * 引数: bins（1 オクターブあたりのビン数。1 = st と同じ 2 のべき乗、2 = 半オクターブ）、recalc（再計算の間隔、
++ * 書いた物の数）、ema_den（再計算ごとに (ema_den−1)/ema_den を残す。0 = 減衰なし＝累積）、no_split_pct、
++ * hold・band（11-20 ヒステリシス: 今の τ から band ビン未満の候補は無視し、同じ向きの候補が hold 回続いたら採用。
++ * τ が動くたびに Region を封じ、容量の配分の山登りも揺れるので、動きを抑える）。 */
++#include <math.h>
++
++#include "regionflash_hint.h"
++
++#define OT_NB 192  // 48 octaves × up to 4 bins
++
++struct rf_hint {
++  uint32_t bins, recalc, ema_den, nosplit, n, ep, nchg, hold, band, pend;
++  int pdir;
++  uint64_t nobs;
++  double A[OT_NB], K[OT_NB], lsum, lcnt, GH[OT_NB], GE[OT_NB], gh0[RF_GZ_NB], ge0[RF_GZ_NB];
++  const double *gz_h, *gz_e;
++  int ghost, logreq;
++  double Q[OT_NB];  // val=logreq: requested bytes per bin
++  int64_t tau;  // < 0: no split
++};
++
++static const param_spec_t P_OT[] = {
++    {"bins", P_UINT, "2", NULL, "1 オクターブあたりのビン数（1〜4）"},
++    {"recalc", P_UINT, "100000", NULL, "再計算の間隔（書いた物の数）"},
++    {"ema_den", P_UINT, "16", NULL, "減衰 v ← v×(ema_den−1)/ema_den（0 = 減衰なし）"},
++    {"no_split_pct", P_UINT, "5", NULL, "大の組のバイトがこの % 未満の切れ目は使わない"},
++    {"hold", P_UINT, "1", NULL, "同じ向きの候補がこの回数続いたら採用（1 = 即時）"},
++    {"band", P_UINT, "0", NULL, "今の τ からこのビン数未満の変化は無視（0 = 無効）"},
++    {"val", P_ENUM, "reuse", "reuse|ghost|logreq", "ビンの価値: reuse（再利用された割合）| ghost（名簿で測る限界の価値）"},
++    {NULL}};
++
++static int create(rf_hint_t **out, const param_vals_t *v, const hint_env_t *env) {
++  rf_hint_t *h = xcalloc(1, sizeof(*h));
++  const char *val = pv_str(v, "val");
++  if (strcmp(val, "ghost") == 0) h->ghost = 1, h->gz_h = env->gz_h, h->gz_e = env->gz_e, *env->ghost_on = 1;
++  else if (strcmp(val, "logreq") == 0) h->logreq = 1;
++  else if (strcmp(val, "reuse") != 0) die("st_otsu: val must be reuse, ghost or logreq");
++  h->bins = (uint32_t)pv_int(v, "bins"), h->recalc = (uint32_t)pv_int(v, "recalc");
++  h->ema_den = (uint32_t)pv_int(v, "ema_den"), h->nosplit = (uint32_t)pv_int(v, "no_split_pct");
++  h->hold = (uint32_t)pv_int(v, "hold"), h->band = (uint32_t)pv_int(v, "band");
++  if (!h->hold) die("st_otsu: hold must be >= 1");
++  if (h->bins < 1 || h->bins > 4 || !h->recalc) die("st_otsu: bins must be 1..4 and recalc > 0");
++  h->tau = -1;
++  *out = h;
++  return 0;
++}
++static void destroy(rf_hint_t *h) { free(h); }
++
++static int ot_bin(const rf_hint_t *h, uint64_t s) {
++  int b = (int)floor(log2((double)(s ? s : 1)) * h->bins);
++  return b < 0 ? 0 : b >= OT_NB ? OT_NB - 1 : b;
++}
++
++static void ot_recompute_ghost(rf_hint_t *h);
++static void ot_set(rf_hint_t *h, int64_t t);
++static void ot_recompute(rf_hint_t *h) {
++  if (h->ghost) { ot_recompute_ghost(h); return; }
++  double At = 0, Kt = 0, wv = 0;
++  for (int b = 0; b < OT_NB; b++) At += h->A[b], Kt += h->K[b];
++  if (At <= 0) return;
++  int best = -1;
++  if (Kt <= 0 && !h->logreq) {  // no evictions yet: the byte median
++    double c = 0;
++    for (int b = 0; b < OT_NB && best < 0; b++)
++      if ((c += h->A[b]) * 2 >= At) best = b + 1;
++  } else {
++    double v[OT_NB], s = 0, sv = 0, bestsc = 0;
++    for (int b = 0; b < OT_NB; b++) {
++      v[b] = h->logreq ? (h->A[b] > 0 && h->Q[b] > 0 ? log(h->Q[b] / h->A[b]) : 0)
++                       : h->A[b] > 0 ? fmax(0.0, 1.0 - h->K[b] / h->A[b]) : 0;
++      wv += h->A[b] * v[b];
++    }
++    for (int k = 1; k < OT_NB; k++) {  // small = bins < k
++      s += h->A[k - 1], sv += h->A[k - 1] * v[k - 1];
++      double L = At - s;
++      if (s <= 0 || L * 100 < At * h->nosplit) continue;
++      double d = sv / s - (wv - sv) / L, sc = (s / At) * (L / At) * d * d;
++      if (sc > bestsc) bestsc = sc, best = k;
++    }
++  }
++  ot_set(h, best < 0 ? -1 : (int64_t)ceil(exp2((double)best / h->bins)) - 1);  // s > t <=> bin >= best
++}
++
++/* adopt candidate t through the hysteresis (hold, band) */
++static void ot_set(rf_hint_t *h, int64_t t) {
++  if (t == h->tau) { h->pend = 0; return; }
++  if (t >= 0 && h->tau >= 0 && fabs(log2((double)t + 1) - log2((double)h->tau + 1)) * h->bins < h->band) { h->pend = 0; return; }
++  int dir = t < 0 ? 3 : h->tau < 0 ? 4 : t > h->tau ? 1 : 2;
++  h->pend = dir == h->pdir ? h->pend + 1 : 1, h->pdir = dir;
++  if (h->pend >= h->hold || (h->tau < 0 && h->nchg == 0)) h->tau = t, h->ep++, h->nchg++, h->pend = 0;
++}
++
++/* val=ghost: the cut that best separates the marginal value per byte (ghost-hit bytes / bytes that left), weighted by
++ * the bytes that left; the new counts since the last recalc are added to decaying sums */
++static void ot_recompute_ghost(rf_hint_t *h) {
++  double d = h->ema_den > 1 ? (h->ema_den - 1.0) / h->ema_den : 1.0, Et = 0, Ht = 0;
++  for (int i = 0; i < OT_NB; i++) h->GH[i] *= d, h->GE[i] *= d;
++  for (int z = 0; z < RF_GZ_NB; z++) {
++    int b = z * (int)h->bins / 4;
++    h->GH[b] += h->gz_h[z] - h->gh0[z], h->GE[b] += h->gz_e[z] - h->ge0[z], h->gh0[z] = h->gz_h[z], h->ge0[z] = h->gz_e[z];
++  }
++  for (int b = 0; b < OT_NB; b++) Et += h->GE[b], Ht += h->GH[b];
++  if (Et <= 0 || Ht <= 0) return;  // nothing has left the SSD yet: keep the current tau (none at the start)
++  int best = -1;
++  double s = 0, sv = 0, bestsc = 0;
++  for (int k = 1; k < OT_NB; k++) {
++    s += h->GE[k - 1], sv += h->GH[k - 1];
++    double L = Et - s;
++    if (s <= 0 || L * 100 < Et * h->nosplit) continue;
++    double dd = sv / s - (Ht - sv) / L, sc = (s / Et) * (L / Et) * dd * dd;
++    if (sc > bestsc) bestsc = sc, best = k;
++  }
++  ot_set(h, best < 0 ? -1 : (int64_t)ceil(exp2((double)best / h->bins)) - 1);
++}
++
++static uint32_t on_insert(rf_hint_t *h, const rf_hint_ev_t *e) {
++  int b = ot_bin(h, e->size);
++  h->A[b] += (double)e->size;
++  if (++h->nobs % h->recalc == 0) {
++    ot_recompute(h);
++    if (h->ema_den > 1 && !h->ghost)
++      for (int i = 0; i < OT_NB; i++)
++        h->A[i] *= (h->ema_den - 1.0) / h->ema_den, h->K[i] *= (h->ema_den - 1.0) / h->ema_den, h->Q[i] *= (h->ema_den - 1.0) / h->ema_den;
++  }
++  if (h->tau > 0) h->lsum += log2((double)h->tau + 1), h->lcnt++;
++  return h->tau < 0 ? 0 : (int64_t)e->size > h->tau;
++}
++
++/* val=logreq: every request, by its size */
++static void on_get(rf_hint_t *h, const rf_hint_ev_t *e) {
++  if (h->logreq) h->Q[ot_bin(h, e->size)] += (double)e->size;
++}
++
++/* 書いてから一度も当たらずに出た物（freq ≤ 1）のバイト */
++static void on_evict(rf_hint_t *h, const rf_hint_ev_t *e) {
++  if (e->freq <= 1) h->K[ot_bin(h, e->size)] += (double)e->size;
++}
++
++static uint32_t epoch(const rf_hint_t *h) { return h->ep; }
++static uint32_t bounds(const rf_hint_t *h, int64_t *out, uint32_t max) {
++  if (h->tau < 0 || max == 0) return 0;
++  out[0] = h->tau;
++  return 1;
++}
++static uint32_t max_classes(const rf_hint_t *h) { (void)h; return 2; }
++static void report(rf_hint_t *h, FILE *f) {
++  fprintf(f, "{\"tau\": %lld, \"changes\": %u, \"tau_log2_mean\": %g, \"bins\": %u, \"ema_den\": %u", (long long)h->tau,
++          h->nchg, h->lcnt > 0 ? h->lsum / h->lcnt : 0.0, h->bins, h->ema_den);
++  if (h->ghost) {  // the last decayed sums per bin: [log2 of the bin's lower edge, bytes that left, ghost-hit bytes per byte]
++    fputs(", \"ghost_bins\": [", f);
++    for (int b = 0, n = 0; b < OT_NB; b++)
++      if (h->GE[b] > 0) fprintf(f, "%s[%g, %g, %g]", n++ ? ", " : "", (double)b / h->bins, h->GE[b], h->GH[b] / h->GE[b]);
++    fputs("]", f);
++  }
++  fputs("}", f);
++}
++
++const rf_hint_ops_t rf_hint_st_otsu_ops = {
++    .name = "st_otsu", .params = P_OT, .create = create, .destroy = destroy,
++    .on_get = on_get, .on_insert = on_insert, .on_evict = on_evict,
++    .epoch = epoch, .bounds = bounds, .max_classes = max_classes, .report = report};
 diff --git a/libCacheSim/cache/eviction/flash/hint/value.c b/libCacheSim/cache/eviction/flash/hint/value.c
 new file mode 100644
 index 0000000..8cd7a6a
@@ -6777,10 +7074,10 @@ index 0000000..8cd7a6a
 +    on_evict, epoch, bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/regionflash_internal.h b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 new file mode 100644
-index 0000000..7a9fd20
+index 0000000..f7131a4
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/regionflash_internal.h
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,353 @@
 +//
 +//  regionflash_internal.h — RegionFlash's state and the functions its modules
 +//  share. Not for use outside cache/eviction/flash/.
@@ -6831,6 +7128,7 @@ index 0000000..7a9fd20
 +
 +#include "dataStructure/hashtable/hashtable.h"
 +#include "ssd/fdp.h"
++#include "util/hashmap.h"
 +#include "libCacheSim/evictionAlgo.h"
 +#include "evict/region_policy.h"
 +#include "hint/regionflash_hint.h"
@@ -6903,6 +7201,7 @@ index 0000000..7a9fd20
 +   * rest (miss bytes); leaving DRAM writes only the missing pieces; reinsertion decides piece by piece.
 +   * object (default): losing one piece drops the whole object. */
 +  bool pmode;
++  bool ssd_evicted;  // the SSD has evicted something since the start (admit_info_t.ssd_evicted)
 +  uint32_t N, kmax, khint, ntau;  // kmax = khint (+1: the hot class of re ii)
 +  int64_t warmup;
 +  /* trace amplification (CacheLib cachebench's ampFactor / ampSizeFactor): every request is
@@ -6937,6 +7236,40 @@ index 0000000..7a9fd20
 +  bool re_auto;
 +  double re_target, re_eps;
 +  uint64_t re_try[RF_KMAX][9], re_hit[RF_KMAX][9], re_auto_n[RF_KMAX][10];
++  /* n=cb (2026-11-19; re_auto is set too, for its bookkeeping): rewrite a victim with b = min(h, 8) SSD hits when
++   * the bytes rewritten from bucket b earned, in their next stay, at least (class mean + re_lambda) hits per byte:
++   *   re_hb[c][b] / re_sb[c][b] >= st_hb[c] / st_b[c] + re_lambda
++   * class mean = SSD hits per written byte over every stay of class c that ended (first writes and rewrites): the
++   * space a rewrite holds would otherwise hold an average write of its class (the opportunity cost, as LHD's hit
++   * density); re_lambda = the price of writing a byte in origin bytes saved (0: space only, no constant).
++   * Byte-weighted, so a hit counts its bytes (BMR). Below 32 outcomes a bucket is rewritten (learning); a bucket that
++   * fails is still rewritten with probability re_eps. re_auto_n[c][b] counts the rewrites it allowed.
++   * base=first: the class mean over first-write stays only (fs_*): a rewrite not made frees space that new writes
++   * take, not an average stay (the mean over all stays includes the best rewrites and set the bar too high on nha)
++   * 11-20, the four refinements (each an option; none set = the rule above, bit-identical):
++   *  base=marg  the bar is the marginal value of space: a ghost of the objects that left the SSD; a miss on one that
++   *             left less than gfrac (0.05) of its class's mean residence ago is a hit that gfrac more capacity would
++   *             have made. Hits per byte per stay = ghost-hit bytes / (gfrac × evicted bytes) (Little's law: the
++   *             capacity cancels). First-write mean until the class has evicted something.
++   *  ts=1       Thompson sampling instead of the 32 outcomes and re_eps: a bucket's mean next-stay hits per byte has
++   *             the posterior Gamma(1 + n·m, 1/bar + n) (n outcomes, mean m; prior mean = the bar); one draw per
++   *             decision, rewrite if it is >= the bar. A bucket with little data is tried on its own.
++   *  decay=K    every K SSD capacities of bytes leaving the SSD (K turnovers), all the counts above are halved.
++   *  dwpd=X     re_lambda is moved to keep NAND writes at X SSD capacities per trace day: at each interval end
++   *             lambda += kappa (0.25) × first-write mean × (write rate / target − 1), at least 0 (as CacheLib's
++   *             DynamicRandomAP moves its admission probability). */
++  bool re_cb, re_ts;
++  uint32_t re_decay;  // decay=K: halve every K SSD turnovers (0 = never; 1 = the 11-20 default)
++  uint32_t re_base;  // 0 all, 1 first, 2 marg, 3 gmarg (11-20: the ghost pooled over classes, since Region LRU
++                     // evicts across classes: the space a rewrite takes may come from another class)
++  double re_lambda, re_hb[RF_KMAX][9], re_sb[RF_KMAX][9], st_hb[RF_KMAX], st_b[RF_KMAX], fs_hb[RF_KMAX], fs_b[RF_KMAX];
++  double re_gfrac, re_dwpd, re_kappa, gh_b[RF_KMAX], ev_b[RF_KMAX], tr_s[RF_KMAX], tr_b[RF_KMAX], dec_b;
++  double bud_t0, bud_w0, lam_sum, lam_n;
++  hmap_t ghost;
++  double gh_n[RF_KMAX];  // ghost-hit count per class (gh_b: their bytes)
++  double gz_h[192], gz_e[192];  // the same by object size (hint_env_t.gz_*)
++  uint8_t ghost_on;      // a region policy wants the ghost (region-params auto=2)
++  uint64_t *gq_id, *gq_t, gq_h, gq_n, gq_cap, gq_max, n_decay;
 +  uint64_t re_max_size;
 +  double re_p, re_frac;
 +  cache_obj_t **rebuf;  // candidates of the region evictions in progress
@@ -7033,6 +7366,13 @@ index 0000000..7a9fd20
 +void rf_evict_account_b(rf_params_t *p, cache_obj_t *o, bool bytes);
 +bool rf_reinsert_ok(rf_params_t *p, const cache_obj_t *o);
 +bool rf_reinsert_ok_h(rf_params_t *p, uint32_t c, uint32_t h, uint64_t size);
++void rf_re_learn(rf_params_t *p, uint32_t c, uint32_t rc, uint32_t b, uint32_t h, uint64_t s);
++void rf_re_ghost_miss(rf_params_t *p, uint64_t id, uint64_t s);
++double rf_re_ghost_win(const rf_params_t *p, uint32_t c);
++void rf_re_ghost_add(rf_params_t *p, uint64_t id, uint32_t c, uint64_t s, uint64_t res, bool bytes);
++static inline int rf_gz_bin(uint64_t s) { int b = (int)floor(4.0 * log2((double)(s ? s : 1))); return b < 0 ? 0 : b > 191 ? 191 : b; }
++void rf_re_budget(rf_params_t *p);
++double rf_re_base(const rf_params_t *p, uint32_t c);
 +bool rf_obj_reinsert(rf_params_t *p, cache_obj_t *o);
 +
 +/* rf_region.c */
@@ -7294,10 +7634,10 @@ index 0000000..fc9592e
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_piece.c b/libCacheSim/cache/eviction/flash/ssd/rf_piece.c
 new file mode 100644
-index 0000000..4b16997
+index 0000000..97cc189
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_piece.c
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,254 @@
 +//
 +//  rf_piece.c — piece-wise writes: an object larger than chunk is kept as a list of chunk-sized pieces (p->pc, the
 +//  first piece at MD(o).loc), which may span regions. The Region store (rf_region.c) places and evicts entries; this
@@ -7377,7 +7717,7 @@ index 0000000..4b16997
 +  for (uint32_t k = 0; k < n && !p->wab[w]; k++) {
 +    uint64_t psz = k + 1 < n ? p->chunk : s - p->chunk * (n - 1);
 +    uint32_t q = rf_piece_alloc(p);
-+    p->pc[q] = (rf_piece_t){o, RF_NONE, 0, RF_NONE, (uint32_t)psz, false, MD(o).ssd_hits, 0, 0, 0};
++    p->pc[q] = (rf_piece_t){o, RF_NONE, 0, RF_NONE, (uint32_t)psz, false, MD(o).ssd_hits, 0, 0, 0, 0};
 +    uint32_t r = rf_place(p, o, q, psz, c, &pos);  // may evict regions (and grow p->pc): index again after it
 +    p->pc[q].region = r;
 +    p->pc[q].pos = pos;
@@ -7422,6 +7762,11 @@ index 0000000..4b16997
 +  for (uint32_t q = MD(o).loc; q != RF_NONE; q = p->pc[q].next) {
 +    if (p->pc[q].valid) continue;
 +    p->pc[q].h0 = MD(o).ssd_hits, p->pc[q].re_b = 0;
++    if (p->pc[q].et) {  // the ghost: a piece evicted alone is missed now; within the class's window it is a ghost hit
++      if ((double)(uint32_t)((uint32_t)p->t + 1 - p->pc[q].et) <= rf_re_ghost_win(p, MD(o).cls))
++        p->gh_b[MD(o).cls] += (double)p->pc[q].size, p->gz_h[rf_gz_bin((uint64_t)o->obj_size)] += (double)p->pc[q].size;
++      p->pc[q].et = 0;
++    }
 +    uint32_t r = rf_place(p, o, q, p->pc[q].size, c, &pos);
 +    p->pc[q].region = r, p->pc[q].pos = pos, p->pc[q].valid = true;
 +  }
@@ -7470,9 +7815,8 @@ index 0000000..4b16997
 +  uint32_t piece = p->reg[r].ent[i].piece, c = p->reg[r].cls, w = rf_writing(p, o);
 +  uint64_t ps = p->pc[piece].size;
 +  uint32_t h = (uint16_t)(MD(o).ssd_hits - p->pc[piece].h0);  // its own hits, as if it were its own key
-+  if (p->pc[piece].re_b && w == 0) {  // n=auto: was its last rewrite hit again (credited to the deciding class)
-+    p->re_try[p->pc[piece].re_c][p->pc[piece].re_b]++;
-+    if (h) p->re_hit[p->pc[piece].re_c][p->pc[piece].re_b]++;
++  if (p->re_auto && w == 0) {  // n=auto: was its last rewrite hit again (credited to the deciding class)
++    rf_re_learn(p, c, p->pc[piece].re_c, p->pc[piece].re_b, h, ps);
 +    p->pc[piece].re_b = 0;
 +  }
 +  bool keep = w == 0 && ps <= *budget && rf_reinsert_ok_h(p, c, h, ps) &&
@@ -7492,6 +7836,8 @@ index 0000000..4b16997
 +  }
 +  p->pc[piece].valid = false;
 +  if (w == 0) p->pc[MD(o).loc].vb -= ps;  // a write in progress recounts at its end
++  if (p->re_base >= 2 || p->ghost_on)  // the ghost (rf_fill_missing); bytes left, by the object's size
++    p->pc[piece].et = (uint32_t)p->t + 1, p->gz_e[rf_gz_bin((uint64_t)o->obj_size)] += (double)ps;
 +  CNT(p, piece_evict_bytes, c, ps);
 +  CNT(p, ssd_evict_bytes, c, ps);
 +  if (h == 0) CNT(p, dead_evict_bytes, c, ps);
@@ -7548,7 +7894,7 @@ index 0000000..4b16997
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_region.c b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
 new file mode 100644
-index 0000000..9a1d4fe
+index 0000000..8c5bdb2
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_region.c
 @@ -0,0 +1,381 @@
@@ -7729,6 +8075,7 @@ index 0000000..9a1d4fe
 +  rf_region_t *g = &p->reg[r];
 +  uint32_t base = p->nre;  // candidates of this eviction: rebuf[base, end)
 +  uint64_t budget = p->re_on ? (uint64_t)((double)p->R * p->re_frac) : 0;
++  p->ssd_evicted = true;  // the SSD has been full (admit=dram:fill=1 filters from now on)
 +  CNT(p, regions_evicted, g->cls, 1);
 +  /* rewrites may fill every region an eviction frees: with n=0 every object
 +   * is a candidate, so a region whose valid bytes fit the budget is kept
@@ -7754,10 +8101,8 @@ index 0000000..9a1d4fe
 +      if (rf_piece_evict_obj(p, r, i)) continue;  // its write aborts
 +    }
 +    rf_ssd_invalidate(p, o);
-+    if (MD(o).re_b) {  // n=auto: was its last rewrite hit again before this eviction (credited to the deciding class)
-+      uint32_t c = MD(o).re_c, b = MD(o).re_b;
-+      p->re_try[c][b]++;
-+      if (MD(o).ssd_hits) p->re_hit[c][b]++;
++    if (p->re_auto) {  // n=auto: was its last rewrite hit again before this eviction (credited to the deciding class)
++      rf_re_learn(p, p->reg[r].cls, MD(o).re_c, MD(o).re_b, MD(o).ssd_hits, (uint64_t)o->obj_size);
 +      MD(o).re_b = 0;
 +    }
 +    /* admit=budget: a rewrite also spends the write budget (admit.h charge); no room = not rewritten */
@@ -7914,7 +8259,8 @@ index 0000000..9a1d4fe
 +    p->fdp.counting = &p->counting;
 +    rf_fdp_init(&p->fdp, p->N, p->R, p->kmax);
 +  }
-+  p->rview = (rf_rview_t){p->reg, p->N, p->kmax, p->R, &p->t, p->admit_n, p->admit_b, &p->tot.reqs, &p->tot.req_bytes, &p->tot.ssd_hits, &p->tot.dram_hits, &p->tot.hit_bytes};
++  p->rview = (rf_rview_t){p->reg, p->N, p->kmax, p->R, &p->t, p->admit_n, p->admit_b, &p->tot.reqs, &p->tot.req_bytes, &p->tot.ssd_hits, &p->tot.dram_hits, &p->tot.hit_bytes,
++                           p->gh_b, p->gh_n, p->ev_b, &p->ghost_on, &p->tot.nand_write_bytes};
 +  if (p->rops != NULL) p->rpol = p->rops->create(&p->rview, rparams);
 +}
 +
@@ -7935,10 +8281,10 @@ index 0000000..9a1d4fe
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_region.h b/libCacheSim/cache/eviction/flash/ssd/rf_region.h
 new file mode 100644
-index 0000000..3428cb2
+index 0000000..81b1551
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_region.h
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,76 @@
 +//
 +//  rf_region.h — the SSD's Regions as RegionFlash keeps them: what a Region
 +//  eviction policy (region_policy.h) may read.
@@ -7985,6 +8331,7 @@ index 0000000..3428cb2
 +   * if each piece were its own key), and reinsert n=auto's record of its last rewrite (as re_b / re_c) */
 +  uint16_t h0;
 +  uint8_t re_b, re_c;
++  uint32_t et;  // 11-20, the ghost (rf_ssd.c) on: request number + 1 (mod 2^32) when this piece was evicted alone, 0 = not
 +  uint64_t vb;  // chunk-mode=piece, the object's first piece only: bytes of its pieces that are valid (on the SSD or
 +                // waiting to be rewritten), so that "lost entirely?" and "missing bytes" need no walk of the pieces
 +} rf_piece_t;
@@ -8016,10 +8363,10 @@ index 0000000..3428cb2
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c b/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c
 new file mode 100644
-index 0000000..33be16e
+index 0000000..c4d7d08
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/ssd/rf_ssd.c
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,305 @@
 +//
 +//  rf_ssd.c — the SSD tier as the request flow sees it: admission (admit ->
 +//  hint -> write), hits, invalidation, eviction accounting and reinsertion's
@@ -8062,6 +8409,7 @@ index 0000000..33be16e
 +  CNT(p, ssd_evict_objs, c, 1);
 +  if (bytes) CNT(p, ssd_evict_bytes, c, s);
 +  CNT(p, res_sum, c, (uint64_t)(p->t - MD(o).admit_t));
++  if (p->re_base >= 2 || p->ghost_on) rf_re_ghost_add(p, o->obj_id, c, s, (uint64_t)(p->t - MD(o).admit_t), bytes);
 +  if (MD(o).ssd_hits == 0) {
 +    CNT(p, dead_evict_objs, c, 1);
 +    if (bytes) CNT(p, dead_evict_bytes, c, s);
@@ -8091,6 +8439,114 @@ index 0000000..33be16e
 +  return 9;
 +}
 +
++/* n=cb: the bar of class c in hits per byte per stay, without lambda (< 0: no data yet) */
++double rf_re_base(const rf_params_t *p, uint32_t c) {
++  if (p->re_base == 3) {  // gmarg: the pooled ghost of every class (Region LRU evicts across classes)
++    double g = 0, e = 0;
++    for (uint32_t k = 0; k < p->kmax; k++) g += p->gh_b[k], e += p->ev_b[k];
++    if (e > 0) return g / (p->re_gfrac * e);
++  }
++  if (p->re_base == 2 && p->ev_b[c] > 0) return p->gh_b[c] / (p->re_gfrac * p->ev_b[c]);
++  double hb = p->re_base ? p->fs_hb[c] : p->st_hb[c], sb = p->re_base ? p->fs_b[c] : p->st_b[c];
++  return sb > 0 ? hb / sb : -1;
++}
++
++/* Gamma(a, 1) for a >= 1 (Marsaglia & Tsang), normals by Box-Muller */
++static double rf_gamma(rng_t *r, double a) {
++  double d = a - 1.0 / 3.0, k = 1.0 / sqrt(9.0 * d);
++  for (;;) {
++    double x = sqrt(-2.0 * log(rng_double(r) + 1e-300)) * cos(2.0 * M_PI * rng_double(r)), v = 1.0 + k * x;
++    if (v <= 0) continue;
++    v = v * v * v;
++    if (log(rng_double(r) + 1e-300) < 0.5 * x * x + d - d * v + d * log(v)) return d * v;
++  }
++}
++
++/* n=cb: is bucket b of class c worth a rewrite (regionflash_internal.h) */
++static bool rf_re_cb_ok(rf_params_t *p, uint32_t c, uint32_t b) {
++  double v = rf_re_base(p, c);
++  if (v < 0) return true;  // nothing to compare with yet
++  if (p->re_ts) {          // one draw from the bucket's posterior
++    double n = (double)p->re_try[c][b], m = p->re_sb[c][b] > 0 ? p->re_hb[c][b] / p->re_sb[c][b] : 0;
++    return rf_gamma(&p->rng_re, 1.0 + n * m) / (1.0 / fmax(v, 1e-9) + n) >= v + p->re_lambda;
++  }
++  if (p->re_try[c][b] < 32) return true;  // still learning
++  return p->re_hb[c][b] >= (v + p->re_lambda) * p->re_sb[c][b];
++}
++
++/* decay=1: one SSD turnover has left, every count is halved */
++static void rf_re_halve(rf_params_t *p) {
++  for (uint32_t c = 0; c < RF_KMAX; c++) {
++    for (int b = 0; b < 9; b++)
++      p->re_try[c][b] >>= 1, p->re_hit[c][b] >>= 1, p->re_hb[c][b] *= 0.5, p->re_sb[c][b] *= 0.5;
++    p->st_hb[c] *= 0.5, p->st_b[c] *= 0.5, p->fs_hb[c] *= 0.5, p->fs_b[c] *= 0.5;
++    p->gh_b[c] *= 0.5, p->gh_n[c] *= 0.5, p->ev_b[c] *= 0.5, p->tr_s[c] *= 0.5, p->tr_b[c] *= 0.5;
++  }
++  p->dec_b = 0, p->n_decay++;
++}
++
++/* n=auto / n=cb: s bytes of class c leave the SSD (evicted or rewritten) after h SSD hits in this stay; b > 0: the
++ * stay began with a rewrite that class rc decided at b hits */
++void rf_re_learn(rf_params_t *p, uint32_t c, uint32_t rc, uint32_t b, uint32_t h, uint64_t s) {
++  if (b) {
++    p->re_try[rc][b]++;
++    if (h) p->re_hit[rc][b]++;
++    p->re_hb[rc][b] += (double)h * (double)s, p->re_sb[rc][b] += (double)s;
++  } else
++    p->fs_hb[c] += (double)h * (double)s, p->fs_b[c] += (double)s;
++  p->st_hb[c] += (double)h * (double)s, p->st_b[c] += (double)s;
++  if (p->re_decay && (p->dec_b += (double)s) >= (double)p->re_decay * (double)p->ssd_cap) rf_re_halve(p);
++}
++
++/* base=marg: the window of class c, in requests: gfrac of its mean residence */
++double rf_re_ghost_win(const rf_params_t *p, uint32_t c) {
++  return p->tr_b[c] > 0 ? p->re_gfrac * p->tr_s[c] / p->tr_b[c] : 0;
++}
++
++/* base=marg: o (class c, s bytes, res requests on the SSD) left the SSD: into the ghost */
++void rf_re_ghost_add(rf_params_t *p, uint64_t id, uint32_t c, uint64_t s, uint64_t res, bool bytes) {
++  if (p->ghost.cap == 0) hm_init(&p->ghost, 1 << 16);
++  if (bytes) p->gz_e[rf_gz_bin(s)] += (double)s;  // piece-wise: each piece was counted when it left (rf_piece.c)
++  p->ev_b[c] += (double)s, p->tr_s[c] += (double)res * (double)s, p->tr_b[c] += (double)s;
++  hm_put(&p->ghost, id, ((uint64_t)p->t << 8) | c);
++  if (p->gq_n == p->gq_cap) {  // the ring of (id, time) in eviction order, grown in place
++    uint64_t nc = p->gq_cap ? 2 * p->gq_cap : 1 << 16, *ni = malloc(nc * 8), *nt = malloc(nc * 8);
++    for (uint64_t i = 0; i < p->gq_n; i++) ni[i] = p->gq_id[(p->gq_h + i) % p->gq_cap], nt[i] = p->gq_t[(p->gq_h + i) % p->gq_cap];
++    free(p->gq_id), free(p->gq_t);
++    p->gq_id = ni, p->gq_t = nt, p->gq_h = 0, p->gq_cap = nc;
++  }
++  p->gq_id[(p->gq_h + p->gq_n) % p->gq_cap] = id, p->gq_t[(p->gq_h + p->gq_n) % p->gq_cap] = (uint64_t)p->t, p->gq_n++;
++  double w = 0;  // forget what is older than every class's window
++  for (uint32_t k = 0; k < p->kmax; k++) w = fmax(w, rf_re_ghost_win(p, k));
++  while (p->gq_n && (double)((uint64_t)p->t - p->gq_t[p->gq_h]) > w) {
++    uint64_t *v = hm_get(&p->ghost, p->gq_id[p->gq_h]);
++    if (v && (*v >> 8) == p->gq_t[p->gq_h]) hm_del(&p->ghost, p->gq_id[p->gq_h]);
++    p->gq_h = (p->gq_h + 1) % p->gq_cap, p->gq_n--;
++  }
++  if (p->gq_n > p->gq_max) p->gq_max = p->gq_n;
++}
++
++/* base=marg: a miss of s bytes; a hit gfrac more capacity of its class would have made? */
++void rf_re_ghost_miss(rf_params_t *p, uint64_t id, uint64_t s) {
++  uint64_t *v = p->ghost.cap ? hm_get(&p->ghost, id) : NULL;
++  if (v == NULL) return;
++  uint32_t c = (uint32_t)(*v & 0xff);
++  if ((double)((uint64_t)p->t - (*v >> 8)) <= rf_re_ghost_win(p, c)) p->gh_b[c] += (double)s, p->gh_n[c] += 1, p->gz_h[rf_gz_bin(s)] += (double)s;
++  hm_del(&p->ghost, id);
++}
++
++/* dwpd=X: at an interval end, move lambda toward the write budget */
++void rf_re_budget(rf_params_t *p) {
++  double t = (double)p->req_local->clock_time, w = (double)p->tot.nand_write_bytes, hb = 0, sb = 0;
++  if (p->bud_t0 > 0 && t > p->bud_t0) {
++    for (uint32_t c = 0; c < p->kmax; c++) hb += p->fs_hb[c], sb += p->fs_b[c];
++    double rate = (w - p->bud_w0) / (t - p->bud_t0), target = p->re_dwpd * (double)p->ssd_cap / 86400.0;
++    if (sb > 0 && w > 0) p->re_lambda = fmax(0, p->re_lambda + p->re_kappa * (hb / sb) * (rate / target - 1));
++  }
++  p->bud_t0 = t > 0 ? t : 1, p->bud_w0 = w;
++  p->lam_sum += p->re_lambda, p->lam_n++;
++}
++
 +bool rf_reinsert_ok(rf_params_t *p, const cache_obj_t *o) {
 +  return rf_reinsert_ok_h(p, MD(o).cls, MD(o).ssd_hits, (uint64_t)o->obj_size);
 +}
@@ -8098,9 +8554,16 @@ index 0000000..33be16e
 +/* the same rule for c = class, h = SSD hits since written, size (chunk-mode=piece: one piece's) */
 +bool rf_reinsert_ok_h(rf_params_t *p, uint32_t c, uint32_t h, uint64_t size) {
 +  if (p->re_on && p->re_auto) {
-+    uint32_t n = rf_re_auto_n(p, c);
-+    p->re_auto_n[c][n]++;
-+    if (h == 0 || (h < n && rng_double(&p->rng_re) >= p->re_eps)) return false;
++    bool yes;
++    if (p->re_cb) {
++      uint32_t b = h < 8 ? h : 8;
++      if ((yes = h && rf_re_cb_ok(p, c, b))) p->re_auto_n[c][b]++;
++    } else {
++      uint32_t n = rf_re_auto_n(p, c);
++      p->re_auto_n[c][n]++;
++      yes = h >= n;
++    }
++    if (h == 0 || (!yes && (p->re_ts || rng_double(&p->rng_re) >= p->re_eps))) return false;
 +    return !(p->re_max_size && size > p->re_max_size);
 +  }
 +  if (!p->re_on || h < p->re_n) return false;
@@ -8167,7 +8630,7 @@ index 0000000..33be16e
 +    }
 +  }
 +  admit_info_t ai = {(uint64_t)p->t, o->obj_id, rf_u32(s), (uint8_t)src,
-+                     MD(o).dram_hits, (uint64_t)p->req_local->clock_time};
++                     MD(o).dram_hits, (uint64_t)p->req_local->clock_time, p->ssd_evicted};
 +  if (!p->aops->accept(p->adm, &ai)) {
 +    CNT(p, admit_reject_objs, MD(o).cls, 1);
 +    return;

@@ -30,13 +30,14 @@ from figures import Fig, Ax, PAL, INK, fmt, span, to_png, tw
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext/）を足した比較。図と表は work/paper/ext/ に出す
-FINAL = "--final" in sys.argv   # paper-final: work/paper と work/paper/ext の結果から final/methods.tsv の方式だけ。図と表は work/paper/final/
+FINAL2 = "--final2" in sys.argv   # paper-final2: 同じ読み方で、図と表は work/paper/final2/
+FINAL = "--final" in sys.argv or FINAL2   # paper-final: work/paper と work/paper/ext の結果から final/methods.tsv の方式だけ。図と表は work/paper/final/
 COND = sys.argv[sys.argv.index("--cond") + 1] if "--cond" in sys.argv else ""   # 頑健性の条件（c0 / f1 / s2 / s3）
 if COND:   # work/paper/robust の <構成>_<条件> だけを <構成> として読み、work/paper/robust/<条件>/ に同じ一式を出す
     SRC = [f"{WORK}/paper/robust"]; D = f"{WORK}/paper/robust/{COND}"
 else:
     SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT or FINAL else [])   # 結果を読む場所（同じ構成は後の場所が優先）
-    D = f"{WORK}/paper/final" if FINAL else SRC[-1]                             # 図と表を書く場所
+    D = f"{WORK}/paper/final2" if FINAL2 else f"{WORK}/paper/final" if FINAL else SRC[-1]                             # 図と表を書く場所
 BASE = "r256_base"
 ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto",
           "r256_adm", "ru_adm_none_auto", "ru_adm_auto"] if EXT else   # ext: CacheLib の閾値違いと提案、篩（S3-FIFO 型の受け入れ）
@@ -71,12 +72,25 @@ NAME = {
     "ru_adm_dram2_auto": ("R=RU＋篩＋DRAM ヒット 1 回以下 / 2 回以上（自動）", "R=RU + admission + DRAM-hit split (<=1 / >=2)"),
     "r256_auto_n1": ("R=256MiB＋分類（自動）＋n=1", "R=256MiB + class. (auto) + n=1"),
     "ru_auto_n1": ("R=RU＋分類（自動）＋n=1", "R=RU + class. (auto) + n=1"),
+    "r256_adm_auto_n1": ("R=256MiB＋篩＋分類（自動）＋n=1", "R=256MiB + admission + class. (auto) + n=1"),
+    "ru_adm_auto_n1": ("R=RU＋篩＋分類（自動）＋n=1", "R=RU + admission + class. (auto) + n=1"),
+    "r256_base_cb": ("CacheLib＋書き直しを損得で（n=cb）", "CacheLib + cost-benefit rewrite (n=cb)"),
+    "r256_auto_cb": ("R=256MiB＋分類（自動）＋n=cb", "R=256MiB + class. (auto) + n=cb"),
+    "ru_auto_cb": ("R=RU＋分類（自動）＋n=cb", "R=RU + class. (auto) + n=cb"),
+    "ru_adm_auto_cb": ("R=RU＋篩＋分類（自動）＋n=cb", "R=RU + admission + class. (auto) + n=cb"),
+    "ru_v2_n1": ("R=RU＋分類・配分 新版＋n=1", "R=RU + class./alloc. v2 + n=1"),
+    "r256_v2_n1": ("R=256MiB＋分類・配分 新版＋n=1", "R=256MiB + class./alloc. v2 + n=1"),
+    "ru_adm_v2_n1": ("R=RU＋篩＋分類・配分 新版＋n=1", "R=RU + admission + class./alloc. v2 + n=1"),
+    "ru_v2_cb": ("R=RU＋分類・配分 新版＋n=cb", "R=RU + class./alloc. v2 + n=cb"),
+    "ru_auto_v2": ("R=RU＋全部自動 新版（閾値・配分・書き直し）", "R=RU + all auto v2 (tau, alloc., rewrite)"),
 }
 COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
        "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a", "ru_auto_w0": "#5b3a8c", "r256_auto_w0": "#8c3a5b",
        "ru_auto_ii": "#2a9d8f", "ru_dram_auto": "#6a994e", "ru_dram1_auto": "#a7c957", "ru_st_nauto": "#e9c46a", "ru_st_n0": "#f4a261",
        "ru_gate": "#264653", "r256_adm": "#b5838d", "ru_adm_none_auto": "#9d8189", "ru_adm_auto": "#6d597a", "ru_adm_dram2_auto": "#b56576",
-       "r256_auto_n1": "#e76f51", "ru_auto_n1": "#0b6e4f"}
+       "r256_auto_n1": "#e76f51", "ru_auto_n1": "#0b6e4f", "r256_adm_auto_n1": "#f4845f", "ru_adm_auto_n1": "#40916c",
+       "r256_base_cb": "#6c757d", "r256_auto_cb": "#9c6644", "ru_auto_cb": "#3a86ff", "ru_adm_auto_cb": "#8338ec",
+       "ru_v2_n1": "#d62828", "r256_v2_n1": "#f77f00", "ru_adm_v2_n1": "#2a9d8f", "ru_v2_cb": "#7209b7", "ru_auto_v2": "#03045e"}
 # run.sh が残した選択（methods.tsv: id・図の名前・指定）。paper はその順と名前で並べ、選ばなかった方式は出さない。
 # ext / 条件ごとは上の並びに、選んだ方式のうち並びに無いものを後ろへ足す。名前が空なら上の NAME（無ければ id）
 SEL = []
@@ -87,7 +101,7 @@ if os.path.exists(_m):
         if COND and c == r[0]: continue   # 別の条件の方式
         SEL.append(c)
         if len(r) > 1 and r[1]: NAME[c] = (r[1], r[1])
-if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（./run.sh paper-final で作る）")
+if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（./run.sh paper-final{'2' if FINAL2 else ''} で作る）")
 if SEL and not EXT and not COND: ORDER = SEL
 else: ORDER = ORDER + [c for c in SEL if c not in ORDER]
 nm = lambda c: NAME.get(c, (c, c))[EN]
@@ -362,7 +376,9 @@ for n in names:
 #   縦の位置を n=0（書き直しなし）の点と比べると、篩が帯域（BMR）と引き換えにどれだけ書き込みを減らしたかが分かる
 CURVE = [("r256_n0", "n=0"), ("r256_base", "n=1"), ("r256_n2", "n=2"), ("r256_n3", "n=3")]
 PTS = [("r256_auto_n1", 11, False), ("ru_auto_n1", 10, False), ("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True),
-       ("r256_adm", 10, False), ("ru_adm_auto", 10, False), ("ru_adm_none_auto", 8, True)]
+       ("r256_adm", 10, False), ("ru_adm_auto", 10, False), ("ru_adm_none_auto", 8, True), ("r256_adm_auto_n1", 10, False), ("ru_adm_auto_n1", 11, False),
+       ("r256_base_cb", 9, False), ("r256_auto_cb", 9, False), ("ru_auto_cb", 10, False), ("ru_adm_auto_cb", 9, False),
+       ("ru_v2_n1", 12, False), ("r256_v2_n1", 12, False), ("ru_adm_v2_n1", 11, False), ("ru_v2_cb", 9, False), ("ru_auto_v2", 12, False)]
 if FINAL:   # final は選んだ方式を全部（CacheLib の n=0〜3 の線以外）点で
     PTS = [p for p in PTS if p[0] in SEL] + [(c, 9, False) for c in SEL if c not in {p[0] for p in PTS} | {c for c, _ in CURVE}]
 
@@ -478,7 +494,7 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 <style>:root{{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}}@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
-<h1>{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
+<h1>{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final2：ru_auto を ru_auto_v2 に）" if FINAL2 else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
 """ + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
        "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
        "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"

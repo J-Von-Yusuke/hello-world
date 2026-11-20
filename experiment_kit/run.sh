@@ -5,23 +5,25 @@
 # 準備
 #   setup                  libCacheSim の取得・パッチ・cachesim のビルドと C ツールのコンパイル
 #   check                  traces.tsv の検査（パスが読めるか、名前の重複）
-#   methods                paper の方式のカタログと、paper / paper-ext / paper-robust で選んだもの（config.sh）
+#   methods                paper の方式のカタログと、組ごとに選んだもの（config.sh）
 # 実験
 #   validity [name..]      トレース実験（分類方法 HINTS × 再挿入 × 書き込み予算）  → work/out/
 #   synth                  合成負荷                                              → work/synth/
 #   tune [name..]          自動推定の実験（TUNE_JOBS のうち TUNE_METHODS）          → work/tune/
 #   tune-synth             同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷）    → work/tune/
 #   che [name..]           Zipf の傾きと分類の利得（付録 §N.5）                     → work/che/
-#   paper [name..]         論文用の比較（PAPER_METHODS）                           → work/paper/
-#   paper-ext [name..]     CacheLib の書き直しの閾値違い（PAPER_EXT_METHODS）        → work/paper/ext/
+#   paper-final2 [name..]  論文の本番：CacheLib と現在の提案 ru_auto_v2 ほか（PAPER_FINAL2_METHODS）→ work/paper/final2/
+#   paper-final [name..]   同じ組で提案を以前の ru_auto にしたもの（PAPER_FINAL_METHODS）     → work/paper/final/
 #   paper-robust [name..]  頑健性の確認（PAPER_ROBUST_METHODS）                    → work/paper/robust/
-#   paper-final [name..]   論文の本番用に絞った比較（PAPER_FINAL_METHODS。結果は paper・ext と共有）→ work/paper/final/
+#   paper [name..]         検討用の全部（PAPER_METHODS）                           → work/paper/
+#   paper-ext [name..]     CacheLib の書き直しの閾値違い（PAPER_EXT_METHODS）        → work/paper/ext/
+#                          （final 系は paper・ext の場所に回して結果を共有し、図と表だけ final*/ に出す）
 #   all                    setup → validity → synth → aggregate
 # 図と表だけ作り直す（回さない）
 #   aggregate [--by category,source]   validity・tune の集計（CSV と report.html）  → work/results/
 #   tune-figs              tune の図                                              → work/tune/figs/
 #   che-report             che の表と図                                            → work/che/report.html
-#   paper-figs [--ext | --robust | --final]  paper の図と表（引数なし = 結果のあるもの全部）
+#   paper-figs [--final2 | --final | --ext | --robust]  paper の図と表（引数なし = 結果のあるもの全部）
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
 . "$KIT/config.sh"
@@ -123,7 +125,10 @@ with_cmode() {  # with_cmode <指定>: piece なら ,chunk-mode=piece を足し�
   if [ "$(cmode "$1")" = piece ]; then echo "$1,chunk-mode=piece"; else echo "$1"; fi
 }
 # 済んだ run の印：P.json があり、同じ片の扱いで回したもの（"chunk_mode": "<mode>"。11-19 以前の P.json には無いので回し直す）
-done_test() { echo "grep -qs 'chunk_mode.: .$(cmode "$2").' $1/P.json"; }
+done_test() {  # 済みの印：P.json の片の扱いが同じ。admit=dram の構成は fill の規則（11-19）の版の結果であること
+  local t="grep -qs 'chunk_mode.: .$(cmode "$2").' $1/P.json"
+  [[ "$2" == *admit=dram* ]] && t="$t && grep -qs 'fill_admits' $1/P.json"
+  echo "$t"; }
 jq1() { python3 -c "import json,sys; print(json.load(open('$1'))['$2'])"; }
 auto_p() {  # auto_p <物の数> <footprint> <SSD> <DRAM>  →  "P 1本の見積りGB 空きGB"（P が数字ならそのまま）
   local av; av=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
@@ -363,6 +368,7 @@ paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。
     python3 "$KIT/py/paper_figs.py" "$WORK" || return
     ls "$WORK"/paper/ext/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_figs.py" "$WORK" --ext
     [ -s "$WORK/paper/final/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final
+    [ -s "$WORK/paper/final2/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final2
     ls "$WORK"/paper/robust/*.json >/dev/null 2>&1 && robust_all=1
   fi
   if [ $robust_all = 1 ] || [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
@@ -428,9 +434,10 @@ tune_pick() {  # TUNE_JOBS から TUNE_METHODS（id の並び。all = 全部）�
   log "tune: ${#PICKED[@]} 構成（${PICKED[*]%%|*}）"
 }
 paper_final() {  # 論文の本番用（PAPER_FINAL_METHODS）。結果は paper / paper-ext と共有し（済んだ run は回さない）、図と表は work/paper/final/
-  local F=$WORK/paper/final all extset main ext id
-  paper_pick "$PAPER_FINAL_METHODS" "$F" base   # 先に全部を確かめ、final/methods.tsv = 図と表の並び
-  all=$(ids_of "$PAPER_FINAL_METHODS"); extset=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
+  # paper-final2: PF_METHODS = PAPER_FINAL2_METHODS、PF_DIR = final2（図と表は work/paper/final2/）
+  local M=${PF_METHODS:-$PAPER_FINAL_METHODS} F=$WORK/paper/${PF_DIR:-final} all extset main ext id
+  paper_pick "$M" "$F" base   # 先に全部を確かめ、<dir>/methods.tsv = 図と表の並び
+  all=$(ids_of "$M"); extset=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
   main=$(for id in $all; do [[ $extset == *" $id "* ]] || echo "$id"; done)
   ext=$(for id in $all; do [[ $extset == *" $id "* ]] && echo "$id"; done)
   paper_set "$main" "$WORK/paper" base "$F/run_paper.tsv" "$@"        # paper の方式（work/paper/methods.tsv は変えない）
@@ -440,13 +447,14 @@ methods() {  # カタログの全部と、どの組で選ばれているか（�
   local P E R s id sl lb bad
   P=" $(ids_of "$PAPER_METHODS" | tr '\n' ' ') $BASE_ID "; E=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
   R=" $(ids_of "$PAPER_ROBUST_METHODS" | tr '\n' ' ') "; local Fi=" $(ids_of "$PAPER_FINAL_METHODS" | tr '\n' ' ') $BASE_ID "
-  printf '%-18s %-6s %-4s %-7s %-6s %s\n' id paper ext robust final "RegionFlash の指定（| 図の名前）"
+  local F2=" $(ids_of "$PAPER_FINAL2_METHODS" | tr '\n' ' ') $BASE_ID "
+  printf '%-18s %-7s %-6s %-6s %-4s %-7s %s\n' id final2 final paper ext robust "RegionFlash の指定（| 図の名前）"
   for s in "${PAPER_CATALOG[@]}"; do
     id=${s%%|*}; sl=$(cat_get "$id"); lb=${sl#*$'\t'}
-    printf '%-18s %-6s %-4s %-7s %-6s %s\n' "$id" "$([[ $P == *" $id "* ]] && echo yes)" "$([[ $E == *" $id "* ]] && echo yes)" \
-      "$([[ $R == *" $id "* ]] && echo yes)" "$([[ $Fi == *" $id "* ]] && echo yes)" "${sl%%$'\t'*}${lb:+ | $lb}"
+    printf '%-18s %-7s %-6s %-6s %-4s %-7s %s\n' "$id" "$([[ $F2 == *" $id "* ]] && echo yes)" "$([[ $Fi == *" $id "* ]] && echo yes)" \
+      "$([[ $P == *" $id "* ]] && echo yes)" "$([[ $E == *" $id "* ]] && echo yes)" "$([[ $R == *" $id "* ]] && echo yes)" "${sl%%$'\t'*}${lb:+ | $lb}"
   done
-  bad=$(for id in $(ids_of "$PAPER_METHODS $PAPER_EXT_METHODS $PAPER_ROBUST_METHODS $PAPER_FINAL_METHODS"); do cat_get "$id" >/dev/null || echo "$id"; done)
+  bad=$(for id in $(ids_of "$PAPER_METHODS $PAPER_EXT_METHODS $PAPER_ROBUST_METHODS $PAPER_FINAL_METHODS $PAPER_FINAL2_METHODS"); do cat_get "$id" >/dev/null || echo "$id"; done)
   [ -z "$bad" ] || echo "注意: カタログに無い id が選ばれている（選択から外すか、カタログに足す）:" $bad
 }
 
@@ -475,6 +483,7 @@ case $cmd in
   paper)        need_traces; need_build; paper_set "$PAPER_METHODS" "$WORK/paper" base "" "$@"; paper_figs ;;
   paper-ext)    need_traces; need_build; paper_set "$PAPER_EXT_METHODS" "$WORK/paper/ext" - "" "$@"; paper_figs --ext ;;
   paper-final)  need_traces; need_build; paper_final "$@"; paper_figs --final ;;
+  paper-final2) need_traces; need_build; PF_METHODS=$PAPER_FINAL2_METHODS PF_DIR=final2 paper_final "$@"; paper_figs --final2 ;;
   paper-robust) need_traces; need_build; paper_set "$PAPER_ROBUST_METHODS" "$WORK/paper/robust" - "" "$@"
                 python3 "$KIT/py/paper_check.py" "$WORK" --robust; paper_figs --robust ;;
   all)          setup && check && each_trace validity_one && synth && aggregate ;;

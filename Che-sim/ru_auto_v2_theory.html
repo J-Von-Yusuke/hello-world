@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ru_auto_v2 の理論</title>
+<style>
+:root { --ink:#14213D; --body:#3D4656; --mute:#6B7486; --paper:#F7F6F2; --card:#FBFBF8; --line:#CFCBBF;
+  --blue:#2F6FB0; --orange:#D9692A; --green:#2E7D4F; --blue-soft:#DCE7F3; --orange-soft:#F6E0D2; --green-soft:#DCEFE3; --bad:#B23A2E; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --green:#6CC08F; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --green-soft:#1D3A2A; --bad:#E07A6E; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--body); font-family:"Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif; line-height:1.8; }
+main { max-width:960px; margin:0 auto; padding:32px 16px 96px; }
+h1 { color:var(--ink); font-size:32px; margin:0 0 6px; line-height:1.3; }
+h2 { color:var(--ink); font-size:24px; margin:48px 0 12px; padding-top:14px; border-top:2px solid var(--line); }
+h3 { color:var(--ink); font-size:18px; margin:24px 0 8px; }
+p, li { font-size:16px; } ul, ol { padding-left:1.4em; } li { margin:4px 0; }
+.small { font-size:13px; color:var(--mute); }
+.box { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:14px 0; }
+.box.blue { background:var(--blue-soft); border-color:var(--blue); } .box.orange { background:var(--orange-soft); border-color:var(--orange); }
+.box.green { background:var(--green-soft); border-color:var(--green); }
+.rule { background:var(--card); border-left:6px solid var(--orange); padding:12px 18px; margin:12px 0; font-weight:500; color:var(--ink); }
+.grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; }
+table { border-collapse:collapse; width:100%; font-size:14px; font-variant-numeric:tabular-nums; margin:8px 0; }
+th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:right; vertical-align:top; }
+th:first-child, td:first-child { text-align:left; } th { color:var(--ink); } td.l { text-align:left; }
+.good { color:var(--green); font-weight:700; } .bad { color:var(--bad); font-weight:700; }
+code { font-size:13px; }
+svg text { font-family:inherit; }
+nav a { color:var(--blue); }
+</style>
+</head>
+<body>
+<main>
+<h1>ru_auto_v2 の理論的背景</h1>
+<p class="small">閾値（何をどの分類に置くか）・容量の配分（各分類に Region をいくつ持たせるか）・書き直し（追い出す物をもう一度書くか）を、決め打ちの目標値なしで決める仕組み。2026-11-20。記号はなるべく使わず言葉で書く。</p>
+<nav class="small">0 全体像 ／ 1 前提のモデル ／ 2 容量の配分 ／ 3 閾値 ／ 4 書き直し ／ 5 三つのつながり ／ 6 結果 ／ 7 残る前提と決め打ち</nav>
+
+<h2>0. 全体像：三つの判断と、二つの量</h2>
+<svg viewBox="0 0 920 300" role="img" aria-label="再利用の強さが閾値を決め、名簿の限界の価値が容量配分と書き直しを決める図">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="var(--mute)"/></marker></defs>
+  <rect x="20" y="40" width="250" height="90" rx="12" fill="var(--blue-soft)" stroke="var(--blue)"/>
+  <text x="145" y="74" text-anchor="middle" font-size="17" font-weight="700" fill="var(--ink)">再利用の強さ（平均の価値）</text>
+  <text x="145" y="100" text-anchor="middle" font-size="14" fill="var(--body)">書いた 1 バイトが何回</text>
+  <text x="145" y="120" text-anchor="middle" font-size="14" fill="var(--body)">要求されたか（大きさのビンごと）</text>
+  <rect x="20" y="180" width="250" height="90" rx="12" fill="var(--orange-soft)" stroke="var(--orange)"/>
+  <text x="145" y="214" text-anchor="middle" font-size="17" font-weight="700" fill="var(--ink)">名簿の限界の価値</text>
+  <text x="145" y="240" text-anchor="middle" font-size="14" fill="var(--body)">容量を少し足したら増える</text>
+  <text x="145" y="260" text-anchor="middle" font-size="14" fill="var(--body)">ヒットのバイト（分類ごと）</text>
+  <rect x="620" y="20" width="280" height="70" rx="12" fill="var(--card)" stroke="var(--line)"/>
+  <text x="760" y="50" text-anchor="middle" font-size="17" font-weight="700" fill="var(--ink)">① 閾値</text>
+  <text x="760" y="74" text-anchor="middle" font-size="14" fill="var(--body)">価値の違う組を分ける所</text>
+  <rect x="620" y="115" width="280" height="70" rx="12" fill="var(--card)" stroke="var(--line)"/>
+  <text x="760" y="145" text-anchor="middle" font-size="17" font-weight="700" fill="var(--ink)">② 容量の配分</text>
+  <text x="760" y="169" text-anchor="middle" font-size="14" fill="var(--body)">限界の価値がそろう所</text>
+  <rect x="620" y="210" width="280" height="70" rx="12" fill="var(--card)" stroke="var(--line)"/>
+  <text x="760" y="240" text-anchor="middle" font-size="17" font-weight="700" fill="var(--ink)">③ 書き直し</text>
+  <text x="760" y="264" text-anchor="middle" font-size="14" fill="var(--body)">得が場所の機会費用を超えるとき</text>
+  <line x1="270" y1="85" x2="616" y2="55" stroke="var(--blue)" stroke-width="2.5" marker-end="url(#a)"/>
+  <line x1="270" y1="220" x2="616" y2="150" stroke="var(--orange)" stroke-width="2.5" marker-end="url(#a)"/>
+  <line x1="270" y1="235" x2="616" y2="245" stroke="var(--orange)" stroke-width="2.5" marker-end="url(#a)"/>
+</svg>
+<div class="box blue">
+<p><b>一言でいうと</b>：BMR（オリジンから運ぶバイトの割合）を小さくするために、SSD の 1 バイトをどこに使えば一番ヒットが増えるかを、実行中に測りながら決める。</p>
+<ul>
+<li><b>容量の配分と書き直し</b>は「あと 1 バイトの場所をどこに使うか」の問題 → <b>限界の価値</b>（端で測る価値）で決める。</li>
+<li><b>閾値</b>は「同じ LRU に入れて損が少ない物どうしをまとめる」問題 → <b>平均の価値</b>（再利用の強さ）で決める。</li>
+</ul>
+</div>
+<table>
+<tr><th>判断</th><th class="l">指定</th><th class="l">決め方</th></tr>
+<tr><td>① 閾値</td><td class="l"><code>hint=st_otsu:val=logreq/bins=1/hold=4/band=2/ema_den=0</code></td><td class="l">再利用の強さの対数を、大津の式で 2 組に分ける（累積）</td></tr>
+<tr><td>② 容量の配分</td><td class="l"><code>region-evict=lru,region-params=auto=2/w=0/ff=0/move=2</code></td><td class="l">名簿で測る限界の BHR がそろう向きへ、大の分類の下限を動かす</td></tr>
+<tr><td>③ 書き直し</td><td class="l"><code>reinsert=hits:n=cb/lambda=0/base=marg</code></td><td class="l">次の滞在のヒット/バイト ≥ 名簿の限界の価値 なら書き直す</td></tr>
+</table>
+
+<h2>1. 前提のモデル：LRU の「特性時間」</h2>
+<p>LRU のキャッシュで、ある物が当たるのは「前回の要求から次の要求までの間隔が、その物が追い出されるまでの時間より短いとき」。物の数が多いと、この「追い出されるまでの時間」はどの物でもほぼ同じ一つの値になる（Che 近似の特性時間）。</p>
+<ul>
+<li><b>1 つの LRU の中では、年齢がそろう</b>：同じ分類（同じ Region の列）に入った物は、大きさや人気にかかわらず、最後に使われてから同じくらいの時間で追い出される。</li>
+<li><b>容量と特性時間の関係</b>：容量 ＝ 出ていくバイトの速さ × 滞在時間（リトルの法則）。容量を 5% 増やすと、滞在時間もほぼ 5% 延びる。</li>
+<li><b>1 バイトの価値は要求の頻度で決まる</b>：ある物を置いておくと、1 回当たるごとにその大きさ分のバイトを運ばずに済む。1 バイトあたりに直すと、大きさは消え、残るのは「どれだけ頻繁に要求されるか」だけになる。だから BMR を目的にすると、大きい物も小さい物も、1 バイトあたりの要求の頻度で比べればよい。</li>
+</ul>
+<p>RegionFlash の分類は、分類ごとに別の書き込み口（Region）を持つ。追い出しは全体の Region の LRU なので、分類どうしは容量を奪い合う。「何も手を加えないと、どの分類の物も同じ年齢で追い出される」——これが<b>自然な配分</b>。</p>
+
+<h2>2. 容量の配分（auto=2）</h2>
+<h3>2.1 何が最適か：限界の価値がそろう点</h3>
+<div class="rule">SSD の容量を分類に配るとき、BHR が最大になるのは、どの分類でも「容量を 1 バイト足したときに増えるヒットのバイト（限界の BHR）」が等しいとき。</div>
+<p>理由は単純な入れ替えの議論：もしある分類の限界の価値が別の分類より高ければ、低い方から 1 バイト取って高い方へ回すと、合計のヒットが増える。増えなくなる所（全部の限界の価値がそろう所）が最適。各分類のヒットは容量を増やすほど伸びが鈍る（人気の高い物から先に入っている）ので、この点はただ一つに決まる（制約付き最適化の KKT 条件と同じ形）。</p>
+<svg viewBox="0 0 900 260" role="img" aria-label="大の分類と小の分類の限界の価値の曲線。自然な配分では年齢がそろうが限界の価値はそろわず、最適点は二つの曲線が交わる所">
+  <g transform="translate(60,20)">
+    <line x1="0" y1="200" x2="780" y2="200" stroke="var(--line)"/><line x1="0" y1="0" x2="0" y2="200" stroke="var(--line)"/>
+    <path d="M0,30 C200,80 400,140 780,185" fill="none" stroke="var(--blue)" stroke-width="3"/>
+    <path d="M780,20 C580,70 380,140 0,190" fill="none" stroke="var(--orange)" stroke-width="3"/>
+    <line x1="395" y1="0" x2="395" y2="200" stroke="var(--ink)" stroke-dasharray="5 4"/>
+    <line x1="230" y1="0" x2="230" y2="200" stroke="var(--mute)" stroke-dasharray="2 4"/>
+    <text x="400" y="16" font-size="14" fill="var(--ink)">最適（限界の価値が等しい）</text>
+    <text x="235" y="40" font-size="13" fill="var(--mute)">自然な配分（年齢がそろう）</text>
+    <text x="10" y="24" font-size="14" fill="var(--blue)">大の分類の限界の価値</text>
+    <text x="770" y="14" text-anchor="end" font-size="14" fill="var(--orange)">小の分類の限界の価値</text>
+    <text x="390" y="225" text-anchor="middle" font-size="14" fill="var(--body)">← 大の分類の容量の割合 →（右ほど大の分類が多い。下限はこれを最低限保証する）</text>
+  </g>
+</svg>
+<p class="small">模式図。自然な配分と最適の位置関係はトレースで違う：nha は最適が右（大の分類に 0.6〜0.9）、w01（閾値 256K）は自然な配分のまま（大の分類はほぼ 0）、Tencent は 0.2〜0.4。</p>
+<h3>2.2 なぜ自然な配分では足りないか</h3>
+<p>自然な配分は「年齢」をそろえる。最適は「限界の価値」をそろえる。この二つは、分類ごとに人気の分布の形（同じ年齢でも端にいる物の要求頻度）が違えば一致しない。合成負荷（200 KB と 20 KB の 2 種類だけ）では、閾値が完璧でも自然な配分は BMR 46.4%、最適な配分は 40.3% で 6 pt 違った。nha でも閾値 32M・下限なしは +0.65 pt と大きく負ける。下限は、この差を埋めるための部品。</p>
+<h3>2.3 限界の価値を名簿で測る</h3>
+<div class="rule">「SSD から出てから、その分類の平均の滞在時間の 5% 以内にまた要求された物」は、その分類にあと 5% の容量があれば当たっていた。</div>
+<ul>
+<li>リトルの法則で、5% の容量 ＝ 5% 長い滞在。だから「出て間もない物へのミス」が、容量を 5% 足したときに増えるヒットそのもの。</li>
+<li>SSD を出た物の ID と時刻を少しの間だけ覚えておく（名簿）。ミスのたびに名簿を引き、窓の中なら当たりとして、その大きさのバイトを分類ごとに数える。</li>
+<li><b>片の扱い</b>：大きな物は 64K の片に分かれていて、片だけが追い出され、次の要求は「一部ヒット」になる。完全なミスではないので最初は名簿に映らず、nha の大の分類を低く見積もっていた。片ごとに追い出した時刻を覚え、取り直す片が窓の中なら名簿の当たりに数える（片ごとに 8 バイト増える）。</li>
+<li>分類 c の限界の価値 ＝ 窓の間に数えた名簿の当たりのバイト ÷ 要求されたバイト ÷ 分類 c の Region の数。</li>
+</ul>
+<h3>2.4 動かし方</h3>
+<p>N/2 回の追い出しごとに、大の分類と他の分類の限界の価値から「傾き」＝（大 − 他）÷（大 ＋ 他）を作り（−1〜1）、前の傾きと半分ずつ混ぜて揺れを抑え、下限を 2 × 0.02 × 傾き だけ動かす。傾きが 0、つまり限界の価値がそろった所で止まる。</p>
+<div class="grid">
+<div class="box orange"><h3>前の山登り（auto=1）が不安定だった理由</h3><p>前の山登りは「今の窓の J が前の窓より上がったか」で向きを決めていた。下限を固定して測ると、0.02 動かしたときの J の変化は、窓ごとの J の揺れの 0.001〜0.53 倍しかなかった。向きはほぼ偶然で決まり、下限は酔歩していた。下限が効かない範囲では J は完全に平らで、純粋な酔歩になる。行き先は出発点と偶然で決まり、書き直し・篩・閾値の小さな違いで BMR が最大 4 pt 変わった。</p></div>
+<div class="box green"><h3>名簿で測ると安定する理由</h3><p>前の窓と比べない。同じ窓の中で、大と他の限界の価値を同時に測って比べるので、負荷の移り変わり（窓どうしの差）が向きを決めない。下限が効いていない範囲でも、名簿は「大の分類にもっと容量があれば当たった」ことを直接見るので、傾きが見える。合成負荷で、出発点 0.3〜0.8 の結果の幅は 3.1 pt から 1.0 pt に縮んだ。</p></div>
+</div>
+<h3>2.5 OHR の重みを 0 にする理由（w=0）</h3>
+<p>目的を BMR にするなら、名簿の当たりに数えるのはバイトだけでよい。前は J = BHR ＋ 0.1 × OHR で、名簿の当たり 1 回ごとに 0.1 ÷ リクエスト数を足していた。小の分類はリクエスト数が多いので、この項で限界の価値が水増しされ、容量を奪っていた。nha の閾値 32M で、w=0.1 では下限 0.43・−0.084、w=0 では 0.66・−0.158（前の山登りの最良 −0.157 と同じ）。OHR も守りたい運用だけ、運用の費用（1 回の固定費用 ÷ 1 バイトの費用 ÷ 平均の大きさ）から重みを決めて入れればよい。</p>
+<h3>2.6 下限 0 から出発する理由（ff=0）</h3>
+<p>出発点を決め打ちしないなら、自然な配分（下限 0）が唯一の筋の通った出発点。名簿が「大の分類にもっと要る」と言うときだけ上げる。w01 は SSD が約 3 周しか入れ替わらず、N/2 の窓でも数回しか動けないので、出発点がそのまま結果になる：0.5 から出発すると +0.73 pt、0 から出発すると −3.78 pt（下限なしの −4.09 に近い）。nha は 0 から登るので、最良より 0.016〜0.02 pt 劣る（登るのに時間がかかる分）。</p>
+
+<h3>2.7 空回りの区間を速く抜ける（move=2、11-20 夜）</h3>
+<p>下限は「大の分類が最低限持つ割合」なので、今の割合より下にある間は何も変えない。0 から出発すると、自然な配分（大きさが変わる合成負荷では 0.45）に届くまで、名簿が正しく「大の分類へ」と言っていても空回りする（1 窓 0.04 で約 20 窓、前半の BMR を 4.8 pt 失った）。move=2 は、下限が効いていない間に名簿の傾きが強く正（平滑値 0.5 超）なら、今の割合との差を毎窓半分詰める。効き始めてからは元の歩幅。w01 のように大の分類を減らすべき負荷では傾きが強い正にならず、何も変わらない（w01 −3.813、Tencent −0.734、nha −0.132、msr −0.300、合成負荷の前半 21.31% → 18.70%）。</p>
+<p class="small">試して採らなかった案：今の割合から上下に動かす（move=1）。下限を割合の少し下に置いても追い出しの途中で効いてしまい、大の分類が 1 窓 0.03 しか縮めず w01 で −0.43 pt まで悪化した。傾きが正のときだけ割合まで一気に上げる案は、w01 で序盤の正の窓が下限を高い割合に固定した。</p>
+
+<h2>3. 閾値（val=logreq）</h2>
+<h3>3.1 配分とは違う量を使う理由</h3>
+<div class="rule">分類は「平均の価値が違う物を、別の LRU に分ける」問題。配分は「端の価値をそろえる」問題。合う量が違う。</div>
+<p>同じ LRU に入った物は同じ年齢で追い出される。要求頻度が大きく違う物が一つの LRU に混ざると、頻度の高い物には年齢が短すぎ、低い物には長すぎる（低い物が場所を使う）。分けておけば、配分でそれぞれに合った年齢を持たせられる。だから閾値は「組の中で頻度がそろい、組の間で違う」所に置くのがよい。</p>
+<p>名簿の限界の価値で閾値を決める案も試したが、失敗した。共有の LRU では端の年齢がそろうので、端で測る価値はビンどうしで似通い、しかも信号が弱い（1 バイトあたり 0.00〜0.02）。閾値が 20〜40 回往復した。</p>
+<h3>3.2 再利用の強さ</h3>
+<p>大きさのビン（2 のべき乗刻み）ごとに、<b>要求されたバイト ÷ SSD に書いたバイト</b>を数える。「書いた 1 バイトが、その後何回要求されたか」で、1 節の「1 バイトの価値は要求の頻度で決まる」に対応する量（頻度 × 滞在の長さ）。</p>
+<ul>
+<li>「一度でも当たったか」（再利用率）ではなく「何回要求されたか」を使う理由：nha には<b>ちょうど 50 MiB の物が 370 万リクエスト</b>あり、32〜64M のビンの書き込みの 34% を占める。再利用率では小さい物と同じく「ほぼ全部再利用される」で区別がつかず、小の組に入れて閾値 64M を選んだ（+0.013 pt、外れ）。回数で見ると、この塊は 1 バイトあたり 20 回で、小さいビン（1〜12 回）より大きいビン（28〜86 回）に近い。</li>
+<li><b>対数で比べる理由</b>：要求頻度は Zipf のように桁でばらつく。年齢のそろう LRU で効くのは頻度の比（何倍違うか）なので、差ではなく比、つまり対数で比べる。対数をとらないと nha は 2^27（2 オクターブ上）を選んだ。</li>
+</ul>
+<h3>3.3 大津の式</h3>
+<div class="rule">切れ目の候補ごとに「小の組のバイトの割合 × 大の組のバイトの割合 ×（2 組の平均の価値の差）²」を計算し、最大の切れ目を閾値にする。</div>
+<p>これは画像の二値化の大津の方法と同じで、「組の間のばらつき（分散）が最大」＝「組の中のばらつきが最小」になる切れ目。3.1 の理由（同じ LRU の中で頻度がばらつくほど損）から、組の中のばらつきを最小にするのが自然な目的になる。重みは書いたバイト（SSD の場所を使う量）。頂上では傾きが 0 なので、閾値が少しずれても損はずれの 2 乗でしか増えない（だから 1 オクターブ程度のずれは許される）。</p>
+<h3>3.4 累積で数える理由と、動きを抑える仕組み</h3>
+<ul>
+<li>閾値が動くと、書き込み中の Region を封じ直す損が出て、容量の配分もやり直しになる。動くこと自体が損なので、統計は<b>累積</b>で数える（減衰させると w01 で 57 回往復して −2.33、累積なら 7 回で −3.59）。</li>
+<li>さらに、今の閾値から 2 ビン未満の候補は無視し、同じ向きの候補が 4 回続いたときだけ動かす（hold=4、band=2）。</li>
+<li>何も分からない最初は分けない（閾値なし）。最初の再計算（10 万書き込みごと）から分け始める。</li>
+</ul>
+
+<h2>4. 書き直し（n=cb、base=marg）</h2>
+<div class="rule">追い出す物を書き直すのは、「その物が次の滞在で稼ぐ 1 バイトあたりのヒット」が「その場所を代わりに使ったら稼げるヒット（場所の機会費用）＋ 書き込みの値段 λ」以上のとき。</div>
+<ul>
+<li><b>大きさは消える</b>：得（次の滞在のヒット × 大きさ）も、場所の費用も、書き込みの費用も大きさに比例するので、1 バイトあたりで比べればよい。</li>
+<li><b>得の推定</b>：書いてから何回当たったかの段（1〜8 以上）ごとに、書き直したバイトが次の滞在で実際に何回当たったかを数えた平均（観測からの事後の推定）。nha 大の分類では 1 回の段 0.44、2 回 0.87、…、8 回以上 4.97 ヒット/バイト。</li>
+<li><b>場所の機会費用は、容量配分と同じ名簿の限界の価値</b>：書き直しで使う場所は、使わなければ「その分類の容量が少し増えた」のと同じ。だから比べる相手は名簿の限界の価値（nha 大の分類で 0.21〜0.27）。</li>
+<li><b>結論</b>：限界の価値は小さいので、1 回以上当たった物はほぼ全部書き直される → <b>CacheLib の n=1 が、λ=0 の損得から導かれる</b>。実測でも ru_auto_v2 の書き直しは n=1 版とほぼ同じ（nha 8.86 TB 対 8.91 TB、BMR 差 0.001 pt）。</li>
+<li>書き込みを減らしたいときは λ（書き込み 1 バイトの値段）を入れる。または「初めて書いた物の値」を基準にする（より厳しい近似。nha で NAND 0.696 → 0.647、BMR は −0.127 → −0.081）。</li>
+<li>前の n=auto（「次も当たる割合 ≥ 0.5」）は決め打ちの目標値で、書き直しを 8.9 → 0.76 TB に削りすぎ、人気の大きい物の片が欠けたまま残って BMR を失っていた。</li>
+</ul>
+
+<h2>5. 三つのつながり</h2>
+<div class="box green">
+<ul>
+<li><b>容量の配分と書き直しは、同じ一つの量（名簿の限界の価値）で決まる</b>。配分は「分類どうしで限界の価値をそろえる」、書き直しは「書き直す物の価値が限界の価値を超えるか」。どちらも「あと 1 バイトの場所をどこに使うか」に同じ物差しで答えている。</li>
+<li><b>閾値は、その配分がうまく働くように組を作る</b>。頻度のそろった組に分けておけば、配分（組ごとの年齢）を合わせるだけで最適に近づく。</li>
+<li>閾値・配分・書き直しのどれにも、「0.5」「0.8」「w=0.1」のような目標値がない。運用で決めるのは、書き込みの値段 λ（0 なら BMR だけ）と、OHR を守りたいときの重み w（0 なら BMR だけ）だけ。</li>
+</ul>
+</div>
+
+<h2>6. 結果</h2>
+<p>CacheLib n=1 との差（ΔBMR [pt] / ΔOHR [pt] / NAND、CacheLib = 1、R=256 MiB に DLWA 1.4）。全量、片のモード、Tencent は Region を nha と同じ比率に縮めた版。</p>
+<table>
+<tr><th>構成</th><th>nha</th><th>w01</th><th>Tencent</th></tr>
+<tr><td>旧 ru_auto（st・前の山登り・n=auto）</td><td class="bad">+0.083 / −3.46 / 0.609</td><td>−0.377 / +0.29 / 0.708</td><td class="bad">+1.459 / −2.60 / 0.698</td></tr>
+<tr><td><b>ru_auto_v2</b></td><td class="good">−0.127 / −0.47 / 0.696</td><td class="good">−3.812 / +8.35 / 0.667</td><td class="good">−0.750 / +1.88 / 0.695</td></tr>
+<tr><td>参考：最良の固定閾値（同じ配分）</td><td>−0.141（32M）</td><td>−3.782（256K）</td><td>−0.946（32K）</td></tr>
+</table>
+<ul>
+<li>nha の −0.127 pt は、CacheLib の SSD を約 1.19 倍にしたのと同じ（容量 2 倍で BMR 約 0.5 pt）。BMR が 4% 台なので、オリジン転送では約 2.7% の削減。</li>
+<li>閾値の選択：nha 16M（最良 32M の 1 つ下、1 回だけ動く）、w01 512K（最良 256K の 1 つ上）、Tencent 64K（最良 32K の 1 つ上）。3 本とも最良の固定閾値から 0.2 pt 以内。</li>
+<li>w01 は SSD がほとんど入れ替わらず書き直しはほぼ 0。差は閾値と配分から来る。</li>
+</ul>
+
+<h2>7. 残る前提と決め打ち</h2>
+<table>
+<tr><th>項目</th><th class="l">値</th><th class="l">性格</th></tr>
+<tr><td>名簿の窓</td><td class="l">平均滞在の 5%</td><td class="l">傾きを測るための差分の幅。小さすぎると当たりが少なく雑音、大きすぎると傾きでなく平均を測る</td></tr>
+<tr><td>配分の窓と歩幅</td><td class="l">N/2 回の追い出し、0.02 × 2 × 傾き</td><td class="l">追従の速さ。w01 のように入れ替わりの少ないトレースでは、数回しか動けない</td></tr>
+<tr><td>閾値のビンと動きの抑え</td><td class="l">2 のべき乗、hold=4・band=2</td><td class="l">分解能と安定性。最良から 1 オクターブずれる原因の一つ</td></tr>
+<tr><td>書き直しの学習</td><td class="l">段ごと 32 件までは書き直す、満たさない段も 2% は書き直す</td><td class="l">探索。Thompson sampling で置き換える案は、単独では段が凍って悪化した</td></tr>
+<tr><td>前提</td><td class="l">Che 近似（物が多い・年齢がそろう）、BMR が目的</td><td class="l">物が少ない分類や、強い時間変化では近似が崩れる</td></tr>
+</table>
+<p><b>まだ確かめていないこと</b>：乱数の種は 1 つ。篩（受け入れ）と組み合わせた ru_auto_v2（w01 では篩が大きく効き、Tencent では逆効果）。3 本以外のトレース。大きさの分布が時間とともに変わる負荷（閾値を累積で数えるので、追従は遅い）。</p>
+<p class="small">経過と全部の数字：<code>docs/Che-sim/summary_1120.html</code>。結果：<code>tools/synth/results/ru_auto_v2.json</code>・<code>a2_ff0.json</code>・<code>tau_logreq.json</code>・<code>floor_diag.json</code>。キット：<code>ru_auto_v2</code>、<code>./run.sh paper-final2</code>。</p>
+</main>
+</body>
+</html>
