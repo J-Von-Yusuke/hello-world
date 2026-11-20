@@ -6,6 +6,7 @@
 #   setup                  libCacheSim の取得・パッチ・cachesim のビルドと C ツールのコンパイル
 #   check                  traces.tsv の検査（パスが読めるか、名前の重複）
 #   methods                paper の方式のカタログと、組ごとに選んだもの（config.sh）
+#   stop                   回っている run.sh を全部止める（子の cachesim・python ごと。下の「止め方」）
 # 実験
 #   validity [name..]      トレース実験（分類方法 HINTS × 再挿入 × 書き込み予算）  → work/out/
 #   synth                  合成負荷                                              → work/synth/
@@ -25,6 +26,10 @@
 #   tune-figs              tune の図                                              → work/tune/figs/
 #   che-report             che の表と図                                            → work/che/report.html
 #   paper-figs [--final2 | --final | --ext | --robust | --sens]  paper の図と表（引数なし = 結果のあるもの全部）
+#
+# 止め方（誤って裏で回したときなど。11-20）: 実験のコマンドは回っている間、work/running/<番号> を置き、GUARD_SEC 秒ごとに
+#   この run.sh のファイルと work/running/<番号> があるかを見る。どちらかを消すと、その run.sh から生まれたプロセス
+#   （xargs・cachesim・python）を全部止めて終わる。./run.sh stop は work/running/ を空にする（回っている全部が止まる）
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
 . "$KIT/config.sh"
@@ -33,6 +38,34 @@ B=$WORK/bin
 mkdir -p "$WORK"/{traces,out,results,synth,bin}
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- 止め方（11-20）
+RUNNING=$WORK/running
+proc_tree() {  # proc_tree <pid> <除く pid>: その子孫の pid を全部（除く pid の下は辿らない）
+  local c; for c in $(pgrep -P "$1"); do [ "$c" = "$2" ] && continue; echo "$c"; proc_tree "$c" "$2"; done; }
+guard() {  # guard <コマンド>: 見張りを立てる。この run.sh か work/running/<pid> が消えたら、子孫を全部止めて終わる
+  local self mark=$RUNNING/$$; self=$(readlink -f "$0"); mkdir -p "$RUNNING"; echo "$*" > "$mark"
+  ( while sleep "$GUARD_SEC"; do
+      kill -0 $$ 2>/dev/null || exit 0
+      [ -e "$self" ] && [ -e "$mark" ] && continue
+      log "止める: $([ -e "$self" ] || echo "$self が消えた")$([ -e "$mark" ] || echo "$mark が消えた")。run.sh（pid $$）の子孫を全部止める"
+      # 子孫を一時停止 → 見直し、を新しいプロセスが出なくなるまで繰り返す（止まったプロセスは子を作れないので必ず止まりきる。
+      # 1 回だけだと、一覧を作った直後に bash -c が起動した cachesim が漏れ、親が消えて家系から外れて残った）。その後に全部を終わらせる
+      local me=$BASHPID all=" " new p   # 見張り自身を除く（$( ) の中の BASHPID は別のプロセスなので、先に取る）
+      while :; do
+        new=""; for p in $(proc_tree $$ "$me"); do [[ "$all" == *" $p "* ]] || new+="$p "; done
+        [ -n "$new" ] || break
+        kill -STOP $new 2>/dev/null; all+="$new"
+      done
+      kill -KILL $all 2>/dev/null; kill -TERM $$ 2>/dev/null
+      rm -f "$mark"; exit 0
+    done ) &
+  GUARD_PID=$!
+  trap 'kill $GUARD_PID 2>/dev/null; rm -f "$RUNNING/$$"' EXIT
+}
+stop_all() {  # 回っている run.sh を全部止める（見張りが GUARD_SEC 秒以内に気づく）
+  local f n=0; for f in "$RUNNING"/*; do [ -e "$f" ] || continue; log "止める: pid ${f##*/}（$(cat "$f")）"; rm -f "$f"; n=$((n + 1)); done
+  [ $n -gt 0 ] || log "回っている run.sh は無い（$RUNNING が空）"; }
 
 # ---------------------------------------------------------------- setup
 setup() {
@@ -133,6 +166,19 @@ done_test() {  # 済みの印：P.json の片の扱いが同じ。admit=dram の
   echo "$t"; }
 sig_same() {  # sig_same <印> <印>: 2 つの印が同じかを調べる式（SIG_PATCH=0 ならパッチの版の行を除いて）
   [ "$SIG_PATCH" = 1 ] && echo "cmp -s $1 $2" || echo "cmp -s <(tail -n +2 $1) <(tail -n +2 $2)"; }
+sig_twin() {  # sig_twin <dir>: <dir>/cmd.want と全く同じ印の済んだ run が work/ の別の場所にあれば、そのフォルダのファイルを写して印を付ける（11-20）。
+  # 例：paper-sens の RU 256 MiB の点の ru_base は、paper の r256_base と同じコマンド。写すのはファイルの複製（リンクにしない：回し直しで
+  # 上書きすると相手も壊れるため）。どの組の結果かは問わない（印に入っているのはパッチの版とコマンドだけ）
+  local d=$1 f s; f=$(sed -n 2p "$d/cmd.want")
+  while IFS= read -r s; do
+    s=$(dirname "$s"); [ "$s" = "$d" ] && continue
+    [ -s "$s/P.json" ] && eval "$(sig_same "$d/cmd.want" "$s/cmd.txt")" || continue
+    find "$s" -maxdepth 1 -type f ! -name 'cmd.*' -exec cp -p {} "$d/" \; && cp "$d/cmd.want" "$d/cmd.txt" &&
+      log "${d#$WORK/}: ${s#$WORK/} と同じ run（同じコマンド）なので結果を写した"
+    return 0
+  done < <(grep -rlxF --include=cmd.txt -e "$f" "$WORK" 2>/dev/null)
+  return 0
+}
 run_test() {  # run_test <dir> <指定> <印>: その run の印（パッチの版＋cachesim に渡す引数。出力先は除く）を <dir>/cmd.want に書き、
   # 「済み」の式を返す：P.json があり、成功した run が残した <dir>/cmd.txt が印と完全に一致するときだけ（11-20）。
   # 指定・SSD・DRAM・Region・NREQ・パッチのどれかが違えば回し直す。ADOPT_OLD=1：cmd.txt の無い古い結果は、前の判定（done_test）が
@@ -140,10 +186,29 @@ run_test() {  # run_test <dir> <指定> <印>: その run の印（パッチの�
   local d=$1 t; mkdir -p "$d"
   printf 'patch %s\n%s\n' "$PATCH_SHA" "$3" > "$d/cmd.want"   # 1 行目 = パッチの版（SIG_PATCH=0 では 2 行目以降だけ比べる）
   t="{ [ -s $d/P.json ] && $(sig_same $d/cmd.want $d/cmd.txt); }"
+  eval "$t" || sig_twin "$d"   # まだなら、全く同じ run が work/ の別の場所にあればその結果を写す（回さない）
   [ "$ADOPT_OLD" = 1 ] && t="{ $t || { [ ! -e $d/cmd.txt ] && $(done_test "$d" "$2") && cp $d/cmd.want $d/cmd.txt; }; }"
   echo "$t"
 }
 jq1() { python3 -c "import json,sys; print(json.load(open('$1'))['$2'])"; }
+json_tag() {  # json_tag <file> key=value..: JSON の一番上に値を足す（amp_key・amp_size は数、ほかは文字列）
+  python3 - "$@" <<'EOF'
+import json, sys; f = sys.argv[1]; d = json.load(open(f))
+for kv in sys.argv[2:]:
+    k, v = kv.split("=", 1); d[k] = float(v) if k in ("amp_key", "amp_size") else v
+json.dump(d, open(f, "w"))
+EOF
+}
+run_sizes() {  # run_sizes <footprint> <ssd指定>: 呼んだ側の SSD DRAM R CH に（paper-sens の SSD_MULT・DRAM_DIV・REGION_BYTES も反映）
+  SSD=$(ssd_bytes "$2" "$1"); [ -n "${SSD_MULT:-}" ] && SSD=$(awk -v s="$SSD" -v m="$SSD_MULT" 'BEGIN{printf "%.0f", s * m}')
+  DRAM=$((SSD / DRAM_DIV))
+  R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}; [ $R -lt 1048576 ] && R=1048576
+  CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
+}
+job_line() {  # job_line <dir> <指定> <trace> <SSD> <-t 等> [前に付けるもの] [cachesim の追加の引数]: jobs.txt の 1 行（済みなら何もしない）
+  local d=$1 spec; spec=$(with_cmode "$2")
+  echo "$(run_test "$d" "$2" "$3 RegionFlash $4 n=${NREQ:-} $5 $spec") || { rm -f $d/cmd.txt && ${6:+$6 }$CACHESIM $3 oracleGeneral RegionFlash $4 ${NREQ:+-n $NREQ} $5 ${7:+$7 }-e \"$spec,out=$d/P\" > $d/stdout 2>&1 && cp $d/cmd.want $d/cmd.txt || echo FAIL $d; }"
+}
 auto_p() {  # auto_p <物の数> <footprint> <SSD> <DRAM>  →  "P 1本の見積りGB 空きGB"（P が数字ならそのまま）
   local av; av=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
   awk -v u="$1" -v f="$2" -v s="$3" -v d="$4" -v av="$av" -v c="$NCPU" -v P="$P" -v fr="$MEM_FRAC" \
@@ -162,9 +227,7 @@ variant_run() {  # variant_run <name> <var: asis|fix|drop|delete> <trace.zst> <s
   case $var in drop|delete) TP="-t $var-obj-size=$SAT_VALUE"; SENV="SAT_DROP=$SAT_VALUE SAT_OP=$var";; esac
   [ -s "$O/info.json" ] || env $SENV "$B/og_info" "$tr" > "$O/info.json" || die "$name: og_info 失敗"
   local fp n sec; fp=$(jq1 "$O/info.json" footprint); n=$(jq1 "$O/info.json" n); sec=$(jq1 "$O/info.json" t_sec)
-  local SSD DRAM R CH; SSD=$(ssd_bytes "$ssdspec" "$fp"); DRAM=$((SSD / DRAM_DIV)); R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}
-  [ $R -lt 1048576 ] && R=1048576
-  CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
+  local SSD DRAM R CH; run_sizes "$fp" "$ssdspec"
   echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"piece\":$PIECE,\"interval\":$INTERVAL,\"nreq_limit\":\"${NREQ}\"}" > "$O/config.json"
   log "$name/$var: n=$n footprint=$fp SSD=$SSD DRAM=$DRAM R=$R"
   # (a) 通常の物単位 LRU（SSD と同じ容量）の先頭 N 要求の曲線と、初回アクセス（強制ミス）
@@ -172,10 +235,7 @@ variant_run() {  # variant_run <name> <var: asis|fix|drop|delete> <trace.zst> <s
   # (b) RegionFlash の全量 1 回の run（区間ごとの累積値から先頭 N 要求の値が全部取れる）
   local J=$O/jobs.txt TM=""; : > "$J"
   [ -x /usr/bin/time ] && TM=1   # 各 run のピーク RSS を <id>/rss に残す（見積り MEM_* の検証用）
-  job() {  # job <id> <eviction params> （完成済みはスキップ）
-    local d=$O/$1
-    echo "$(run_test $d "$2" "$tr RegionFlash $SSD n=${NREQ:-} $TP $(with_cmode "$2")") || { rm -f $d/cmd.txt && ${TM:+/usr/bin/time -f %M -o $d/rss} $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -o $d/lcs.txt -e \"$(with_cmode "$2"),out=$d/P\" > $d/stdout 2>&1 && cp $d/cmd.want $d/cmd.txt || echo FAIL $d; }" >> "$J"
-  }
+  job() { job_line "$O/$1" "$2" "$tr" "$SSD" "$TP" "${TM:+/usr/bin/time -f %M -o $O/$1/rss}" "-o $O/$1/lcs.txt" >> "$J"; }   # job <id> <指定>
   local E0="dram-size=$DRAM,region-size=$R,chunk=$CH,$BASE_E,interval=$INTERVAL" h hid hs v bud
   for bud in "" $BUDGET_DWPD; do
     [ -n "$bud" ] && [ "$sec" -lt 3600 ] && continue   # 予算は「1 日あたり」なので、1 時間未満のトレースでは意味がない
@@ -266,7 +326,7 @@ tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <
     if [[ "$spec" == *ssd-mode=object* ]]; then spec="dram-size=$DRAM,dram-algo=lru,inclusion=cachelib,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU},$spec"
     elif [[ "$spec" == *region-size=* ]]; then spec="$E,$spec"   # 構成が Region の大きさを持つ（paper の 256 MiB など）
     else spec="$E,region-size=$R,$spec"; fi
-    echo "$(run_test $O/$id "$spec" "$tr RegionFlash $SSD n=${NREQ:-} $TP $(with_cmode "$spec")") || { rm -f $O/$id/cmd.txt && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$O/$id/P\" > $O/$id/stdout 2>&1 && cp $O/$id/cmd.want $O/$id/cmd.txt || echo FAIL $O/$id; }" >>"$J"
+    job_line "$O/$id" "$spec" "$tr" "$SSD" "$TP" >> "$J"
   done
   echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"warmup\":\"$WU\",\"nreq_limit\":\"$NREQ\"}" > "$O/config.json"
   local p=${TUNE_P:-}; [ -z "$p" ] && { [ "$P" = auto ] && p=$NCPU || p=$P; }
@@ -295,10 +355,7 @@ trace_cfg() {  # trace_cfg <name> <path> <fmt> <params> <ssd指定>: tune / che 
   [ -s "$O/$var/info.json" ] || env $SENV "$B/og_info" "$tr" > "$O/$var/info.json" || die "$name: og_info 失敗"
   fp=$(jq1 "$O/$var/info.json" footprint)
   fp=$(awk -v f="$fp" -v k="${TR_AMP_KEY:-1}" -v a="${TR_AMP_SIZE:-1}" 'BEGIN{printf "%.0f", f * k * a}')   # 増幅したトレースのフットプリント
-  SSD=$(ssd_bytes "$5" "$fp"); [ -n "${SSD_MULT:-}" ] && SSD=$(awk -v s="$SSD" -v m="$SSD_MULT" 'BEGIN{printf "%.0f", s * m}')   # paper-sens
-  DRAM=$((SSD / DRAM_DIV))
-  R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}; [ $R -lt 1048576 ] && R=1048576
-  CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
+  run_sizes "$fp" "$5"
   u=$(awk -v n="$(jq1 "$O/$var/info.json" uniq)" -v k="${TR_AMP_KEY:-1}" 'BEGIN{printf "%.0f", n * k}')   # amp_key 倍の物（メモリも K 倍）
 }
 tune_one() {  # name path fmt params category source ssd: validity と同じ SSD・DRAM・Region で、主の変種（SAT_VARIANTS の先頭）だけ
@@ -309,11 +366,7 @@ tune_one() {  # name path fmt params category source ssd: validity と同じ SSD
   local pe; pe=($(auto_p "$u" "$fp" "$SSD" "$DRAM"))   # validity と同じメモリの見積り（meta は P≤4）
   log "tune $name/$var: 物 $u、同時実行 P=${TUNE_P:-${pe[0]}}（1 本の見積り ${pe[1]} GB、空き ${pe[2]} GB）"
   TUNE_P=${TUNE_P:-${pe[0]}} tune_run "$name" "$tr" "$SSD" "$DRAM" "$R" "$CH" "$TP" ""
-  python3 - "${RUN_ROOT:-$WORK/tune}/$name.json" "$5" "$6" "$var" "${TR_AMP_KEY:-1}" "${TR_AMP_SIZE:-1}" "${TR_MARKS:-}" <<'EOF'
-import json, sys; d = json.load(open(sys.argv[1]))
-d.update(category=sys.argv[2], source=sys.argv[3], variant=sys.argv[4], amp_key=float(sys.argv[5]), amp_size=float(sys.argv[6]), marks=sys.argv[7])
-json.dump(d, open(sys.argv[1], "w"))
-EOF
+  json_tag "${RUN_ROOT:-$WORK/tune}/$name.json" category="$5" source="$6" variant="$var" amp_key="${TR_AMP_KEY:-1}" amp_size="${TR_AMP_SIZE:-1}" marks="${TR_MARKS:-}"
 }
 # ---------------------------------------------------------------- Zipf の傾きと分類の利得（che。付録 §N.5）
 che_one() {  # name path fmt params category source ssd → work/che/<name>.json
@@ -334,9 +387,9 @@ che_one() {  # name path fmt params category source ssd → work/che/<name>.json
         st_lru) spec="$E,region-size=$R,hint=split_threshold,region-evict=lru";;
       esac
       d=$O/$id ev=""; [ "$id" = st_lru ] && ev="RF_EVLOG=$d/evlog RF_ENDDUMP=$d/enddump"
-      local tst; tst=$(run_test $d "$spec" "$tr RegionFlash $SSD n=${NREQ:-} $TP $(with_cmode "$spec")")
+      local line; line=$(job_line "$d" "$spec" "$tr" "$SSD" "$TP" "env $ev")
       [ "$id" = none ] && [ -s "$T/none/P.json" ] && eval "$(sig_same "$d/cmd.want" "$T/none/cmd.txt")" && continue   # tune の none が全く同じ run なら使う（st_lru は記録が要るので回す）
-      echo "$tst || { rm -f $d/cmd.txt && env $ev $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$d/P\" > $d/stdout 2>&1 && cp $d/cmd.want $d/cmd.txt || echo FAIL $d; }" >> "$J"
+      echo "$line" >> "$J"
     done
     # 増幅つきのトレースでは素の LRU は回さない（cachesim の lru は amp を知らない）
     [ "${TR_AMP_KEY:-1}" = 1 ] && [ "${TR_AMP_SIZE:-1}" = 1 ] &&
@@ -372,18 +425,19 @@ tune_synth() {  # 合成の 95:5 と 3:1（1/64 縮小の SSD）。答え（固�
     [ -s "$WORK/traces/syn_$name.zst" ] || { "$S/synth_gen" "$WORK/traces/syn_$name.raw" "$TUNE_SYNTH_N" 1 $spec >/dev/null &&
       "$B/og_pack" "$WORK/traces/syn_$name.raw" "$WORK/traces/syn_$name.zst" && rm -f "$WORK/traces/syn_$name.raw"; } || die "syn_$name: 生成失敗"
     tune_run "syn_$name" "$WORK/traces/syn_$name.zst" $((240 * 2**30 / 64)) 0 4194304 16384 "" $((TUNE_SYNTH_N / 4))
-    python3 - "$WORK/tune/syn_$name.json" <<'EOF'
-import json, sys; d = json.load(open(sys.argv[1])); d.update(category="synth", source="synth", variant="asis"); json.dump(d, open(sys.argv[1], "w"))
-EOF
+    json_tag "$WORK/tune/syn_$name.json" category=synth source=synth variant=asis
   done
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
+PAPER_SETS=(   # paper 系の組：選択の変数 場所 基準を足すか（base / -） methods の列の名前
+  "PAPER_FINAL2_METHODS paper/final2 base final2" "PAPER_FINAL_METHODS paper/final base final" "PAPER_METHODS paper base paper"
+  "PAPER_EXT_METHODS paper/ext - ext" "PAPER_ROBUST_METHODS paper/robust - robust" "PAPER_SENS_METHODS paper/sens base sens")
 paper_refresh() {  # 11-20: 図の系列 = いまの config.sh の選択。結果のある組の methods.tsv を、回さずに作り直す（カタログに無い id があれば止まる）
-  local g v r sub sel dir b
-  for g in "PAPER_METHODS paper base" "PAPER_EXT_METHODS paper/ext -" "PAPER_FINAL_METHODS paper/final base" "PAPER_FINAL2_METHODS paper/final2 base" "PAPER_ROBUST_METHODS paper/robust -" "PAPER_SENS_METHODS paper/sens base"; do
-    v=${g%% *}; r=${g#* }; sub=${r%% *}; b=${r##* }; sel=${!v}; dir=$WORK/$sub
-    [ -d "$dir" ] && [ -n "$(ids_of "$sel")" ] || continue
-    ( paper_pick "$sel" "$dir" "$b" ) 2>&1 | grep -v '方式（' >&2 || true
+  local g v sub b col dir
+  for g in "${PAPER_SETS[@]}"; do
+    read -r v sub b col <<< "$g"; dir=$WORK/$sub
+    [ -d "$dir" ] && [ -n "$(ids_of "${!v}")" ] || continue
+    ( paper_pick "${!v}" "$dir" "$b" ) 2>&1 | grep -v '方式（' >&2 || true
   done
 }
 figs_set() {  # figs_set [--ext | --final | --final2 | --cond c]: その組の全体の図と表、続けてトレースの群（traces.tsv の category × source）ごとの一式
@@ -494,19 +548,20 @@ sens_point() {  # sens_point <出力先> <1 = region-size を自分で持つ構�
   [ ${#PICKED[@]} -gt 0 ] || return 0
   RUN_JOBS=PICKED RUN_ROOT=$o each_trace tune_one "$@"
 }
-methods() {  # カタログの全部と、どの組で選ばれているか（● = 選択）
-  local P E R s id sl lb bad
-  P=" $(ids_of "$PAPER_METHODS" | tr '\n' ' ') $BASE_ID "; E=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
-  R=" $(ids_of "$PAPER_ROBUST_METHODS" | tr '\n' ' ') "; local Fi=" $(ids_of "$PAPER_FINAL_METHODS" | tr '\n' ' ') $BASE_ID "
-  local F2=" $(ids_of "$PAPER_FINAL2_METHODS" | tr '\n' ' ') $BASE_ID " Se=" $(ids_of "$PAPER_SENS_METHODS" | tr '\n' ' ') $BASE_ID "
-  printf '%-18s %-7s %-6s %-6s %-4s %-7s %-5s %s\n' id final2 final paper ext robust sens "RegionFlash の指定（| 図の名前）"
-  for s in "${PAPER_CATALOG[@]}"; do
-    id=${s%%|*}; sl=$(cat_get "$id"); lb=${sl#*$'\t'}
-    printf '%-18s %-7s %-6s %-6s %-4s %-7s %-5s %s\n' "$id" "$([[ $F2 == *" $id "* ]] && echo yes)" "$([[ $Fi == *" $id "* ]] && echo yes)" \
-      "$([[ $P == *" $id "* ]] && echo yes)" "$([[ $E == *" $id "* ]] && echo yes)" "$([[ $R == *" $id "* ]] && echo yes)" \
-      "$([[ $Se == *" $id "* ]] && echo yes)" "${sl%%$'\t'*}${lb:+ | $lb}"
+methods() {  # カタログの全部と、どの組で選ばれているか（PAPER_SETS の列に yes）
+  local g v sub b col s id sl lb line all="" sets=() cols=()
+  for g in "${PAPER_SETS[@]}"; do
+    read -r v sub b col <<< "$g"; cols+=("$col"); all+=" ${!v}"
+    sets+=(" $(ids_of "${!v}" | tr '\n' ' ')$([ "$b" = base ] && echo " $BASE_ID") ")
   done
-  bad=$(for id in $(ids_of "$PAPER_METHODS $PAPER_EXT_METHODS $PAPER_ROBUST_METHODS $PAPER_FINAL_METHODS $PAPER_FINAL2_METHODS $PAPER_SENS_METHODS"); do cat_get "$id" >/dev/null || echo "$id"; done)
+  line=$(printf '%-18s' id); for col in "${cols[@]}"; do line+=$(printf " %-$((${#col} + 1))s" "$col"); done
+  echo "$line RegionFlash の指定（| 図の名前）"
+  for s in "${PAPER_CATALOG[@]}"; do
+    id=${s%%|*}; sl=$(cat_get "$id"); lb=${sl#*$'\t'}; line=$(printf '%-18s' "$id")
+    for g in "${!cols[@]}"; do line+=$(printf " %-$((${#cols[$g]} + 1))s" "$([[ ${sets[$g]} == *" $id "* ]] && echo yes)"); done
+    echo "$line ${sl%%$'\t'*}${lb:+ | $lb}"
+  done
+  local bad; bad=$(for id in $(ids_of "$all"); do cat_get "$id" >/dev/null || echo "$id"; done)
   [ -z "$bad" ] || echo "注意: カタログに無い id が選ばれている（選択から外すか、カタログに足す）:" $bad
 }
 
@@ -520,11 +575,13 @@ need_build() {  # キットのパッチが当てたものと違う（キット�
 need_traces() { check >/dev/null || { check; die "traces.tsv を直す"; }; }
 usage() { awk 'NR > 1 && /^set -u/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; }
 cmd=${1:-help}; [ $# -gt 0 ] && shift
+case $cmd in help|-h|--help|check|methods|stop|aggregate|tune-figs|che-report|paper-figs) ;; *) guard "$cmd $*" ;; esac
 case $cmd in
   # 準備
   setup)        setup ;;
   check)        check ;;
   methods)      methods ;;
+  stop)         stop_all ;;
   # 実験
   validity)     need_traces; need_build; each_trace validity_one "$@" ;;
   synth)        need_build; synth ;;

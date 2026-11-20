@@ -13,7 +13,7 @@ RU を変えると CacheLib の DLWA も変わるので、NAND 書き込みで�
 import csv, glob, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from figures import Fig, Ax, PAL, span, to_png
+from figures import Fig, Ax, PAL, span, to_png, method_label
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 T = lambda ja, en: en if EN else ja
@@ -21,7 +21,7 @@ P = f"{WORK}/paper"; S = f"{P}/sens"; BASE = "r256_base"
 if not os.path.exists(f"{S}/methods.tsv"): sys.exit(f"{S}/methods.tsv が無い（./run.sh paper-sens がまだ）")
 SEL, NAME = [], {}
 for r in (l.rstrip("\n").split("\t") for l in open(f"{S}/methods.tsv", encoding="utf-8") if l.strip()):
-    SEL.append(r[0]); NAME[r[0]] = r[1] if len(r) > 1 and r[1] else r[0]
+    SEL.append(r[0]); NAME[r[0]] = r[1] if len(r) > 1 and r[1] else method_label(r[2])[EN] if len(r) > 2 and r[2] else r[0]
 METH = [c for c in SEL if c != BASE]
 COL = {c: PAL[i % len(PAL)] for i, c in enumerate(METH)}
 

@@ -26,7 +26,7 @@
 import csv, glob, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from figures import Fig, Ax, PAL, INK, fmt, span, to_png, tw
+from figures import Fig, Ax, PAL, INK, fmt, span, to_png, tw, method_label
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext/）を足した比較。図と表は work/paper/ext/ に出す
@@ -45,45 +45,8 @@ else:
 BASE = "r256_base"
 # 系列 = config.sh の組で選んだ方式のうち、どれか 1 本のトレースで結果がある物（下の SEL。並べた順が図と表の順）。
 # ここには方式の一覧を持たない（11-20：以前は ext・頑健性の並びをここに手で書いていた）。
-NAME = {
-    "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
-    "r256_n0": ("CacheLib n=0（書き直しなし）", "CacheLib n=0 (no rewrite)"),
-    "r256_n2": ("CacheLib n=2", "CacheLib n=2"),
-    "r256_n3": ("CacheLib n=3", "CacheLib n=3"),
-    "ru_base": ("R=RU", "R=RU"),
-    "ru_none_auto": ("R=RU＋n=auto（分類なし）", "R=RU + auto n (no class.)"),
-    "r256_none_auto": ("R=256MiB＋n=auto（分類なし）", "R=256MiB + auto n (no class.)"),
-    "ru_ff90_h3": ("R=RU＋分類（手動）", "R=RU + class. (manual)"),
-    "ru_auto": ("R=RU＋分類（自動・BHR+0.1·OHR）", "R=RU + class. (auto, BHR+0.1·OHR)"),
-    "r256_ff90_h3": ("R=256MiB＋分類（手動）", "R=256MiB + class. (manual)"),
-    "r256_auto": ("R=256MiB＋分類（自動・BHR+0.1·OHR）", "R=256MiB + class. (auto, BHR+0.1·OHR)"),
-    "ru_auto_w0": ("R=RU＋分類（自動・BHR のみ）", "R=RU + class. (auto, BHR only)"),
-    "r256_auto_w0": ("R=256MiB＋分類（自動・BHR のみ）", "R=256MiB + class. (auto, BHR only)"),
-    "ru_auto_ii": ("R=RU＋分類（自動）＋書き直しは別の口（ii）", "R=RU + class. (auto) + rewrite stream (ii)"),
-    "ru_dram_auto": ("R=RU＋DRAM ヒット数で 2 分割（動的・自動）", "R=RU + DRAM-hit split (dynamic, auto)"),
-    "ru_dram1_auto": ("R=RU＋DRAM ヒット 0 / 1 回以上（自動）", "R=RU + DRAM-hit split (0 / >=1, auto)"),
-    "ru_st_nauto": ("R=RU＋サイズ分類のみ（配分なし）＋n=auto", "R=RU + size class. only (no alloc.) + auto n"),
-    "ru_st_n0": ("R=RU＋サイズ分類のみ（配分なし・書き直しなし）", "R=RU + size class. only (no alloc., no rewrite)"),
-    "ru_gate": ("R=RU＋分類（ST か山登りかを自動選択）", "R=RU + class. (gate: ST or climb)"),
-    "r256_adm": ("CacheLib＋S3-FIFO 型の篩（受け入れ）", "CacheLib + S3-FIFO-style admission"),
-    "ru_adm_none_auto": ("R=RU＋篩＋n=auto（分類なし）", "R=RU + admission + auto n (no class.)"),
-    "ru_adm_auto": ("R=RU＋篩＋分類（自動）", "R=RU + admission + class. (auto)"),
-    "ru_adm_dram2_auto": ("R=RU＋篩＋DRAM ヒット 1 回以下 / 2 回以上（自動）", "R=RU + admission + DRAM-hit split (<=1 / >=2)"),
-    "r256_auto_n1": ("R=256MiB＋分類（自動）＋n=1", "R=256MiB + class. (auto) + n=1"),
-    "ru_auto_n1": ("R=RU＋分類（自動）＋n=1", "R=RU + class. (auto) + n=1"),
-    "r256_adm_auto_n1": ("R=256MiB＋篩＋分類（自動）＋n=1", "R=256MiB + admission + class. (auto) + n=1"),
-    "ru_adm_auto_n1": ("R=RU＋篩＋分類（自動）＋n=1", "R=RU + admission + class. (auto) + n=1"),
-    "r256_base_cb": ("CacheLib＋書き直しを損得で（n=cb）", "CacheLib + cost-benefit rewrite (n=cb)"),
-    "r256_auto_cb": ("R=256MiB＋分類（自動）＋n=cb", "R=256MiB + class. (auto) + n=cb"),
-    "ru_auto_cb": ("R=RU＋分類（自動）＋n=cb", "R=RU + class. (auto) + n=cb"),
-    "ru_adm_auto_cb": ("R=RU＋篩＋分類（自動）＋n=cb", "R=RU + admission + class. (auto) + n=cb"),
-    "ru_v2_n1": ("R=RU＋分類・配分 新版＋n=1", "R=RU + class./alloc. v2 + n=1"),
-    "r256_v2_n1": ("R=256MiB＋分類・配分 新版＋n=1", "R=256MiB + class./alloc. v2 + n=1"),
-    "ru_adm_v2_n1": ("R=RU＋篩＋分類・配分 新版＋n=1", "R=RU + admission + class./alloc. v2 + n=1"),
-    "ru_v2_cb": ("R=RU＋分類・配分 新版＋n=cb", "R=RU + class./alloc. v2 + n=cb"),
-    "ru_auto_v2": ("R=RU＋全部自動 新版（閾値・配分・書き直し）", "R=RU + all auto v2 (tau, alloc., rewrite)"),
-}
-COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#1f4e8c",
+NAME = {}   # id → (日本語, 英語) の図の名前。カタログの 3 番目の欄、無ければ指定から method_label で作る（11-20）
+COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256_n3": "#7f7f7f", "ru_base": "#a6a6a6", "ru_none_auto": "#9fb6cc", "r256_none_auto": "#dcc3ae", "ru_ff90_h3": "#3b7dbf", "ru_auto": "#9c755f",
        "r256_ff90_h3": "#e3a37c", "r256_auto": "#c9683a", "ru_auto_w0": "#5b3a8c", "r256_auto_w0": "#8c3a5b",
        "ru_auto_ii": "#2a9d8f", "ru_dram_auto": "#6a994e", "ru_dram1_auto": "#a7c957", "ru_st_nauto": "#e9c46a", "ru_st_n0": "#f4a261",
        "ru_gate": "#264653", "r256_adm": "#b5838d", "ru_adm_none_auto": "#9d8189", "ru_adm_auto": "#6d597a", "ru_adm_dram2_auto": "#b56576",
@@ -94,51 +57,22 @@ COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256
 #   paper / final / final2: その場所の methods.tsv。ext: paper の選択 ＋ ext の選択（ext は paper の結果も読む）。
 #   頑健性の条件ごと: robust の methods.tsv のうち、その条件の方式（末尾 _<条件> を外した名前で並べる）。
 # methods.tsv が無いとき（手で結果を置いた場合など）は、結果のある方式を全部（基準を先頭に）。
-SEL, SPEC = [], {}
+SEL, SPEC, CATNAME = [], {}, set()
 for _m in ([f"{WORK}/paper/robust/methods.tsv"] if COND else ([f"{WORK}/paper/methods.tsv"] if EXT else []) + [f"{D}/methods.tsv"]):
     if not os.path.exists(_m): continue
     for r in (l.rstrip("\n").split("\t") for l in open(_m, encoding="utf-8") if l.strip()):
         c = r[0][:-len(COND) - 1] if COND and r[0].endswith("_" + COND) else r[0]
         if COND and c == r[0]: continue   # 別の条件の方式
         if c not in SEL: SEL.append(c)
-        if len(r) > 1 and r[1]: NAME[c] = (r[1], r[1])
+        if len(r) > 1 and r[1]: NAME[c] = (r[1], r[1]); CATNAME.add(c)
         if len(r) > 2: SPEC[c] = r[2]
 if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（./run.sh paper-final{'2' if FINAL2 else ''} で作る）")
 if BASE in SEL: SEL.remove(BASE)
 ORDER = [BASE] + SEL
 
 
-def auto_name(spec):  # 名前の無い方式（カタログに図の名前が無く、下の NAME にも無い）: 指定から組み立てる
-    ja, en = [], []
-    def add(a, b): ja.append(a); en.append(b)
-    kv = {}
-    for tok in spec.split(","):
-        k, _, v = tok.partition("="); kv[k] = v
-    rs = kv.get("region-size")
-    add(f"R={int(rs) // 2**20}MiB" if rs else "R=RU", f"R={int(rs) // 2**20}MiB" if rs else "R=RU")
-    h = kv.get("hint", "none")
-    if h == "none": add("分類なし", "no class.")
-    elif h.startswith("st_otsu") and "logreq" in h: add("閾値＝再利用の強さ", "tau by reuse intensity")
-    elif h.startswith("st_otsu"): add("閾値＝大津", "tau by Otsu")
-    elif h.startswith("split_threshold"): add("サイズ分類（st）", "size class. (st)")
-    elif h.startswith("fixed"): add(f"閾値 {h.split('tau=')[-1]}", f"tau {h.split('tau=')[-1]}")
-    elif "key=dram" in h: add("DRAM ヒットで分類", "DRAM-hit class.")
-    else: add(h.split(":")[0], h.split(":")[0])
-    rp = kv.get("region-params", "")
-    if "auto=2" in rp: add("配分＝名簿", "alloc. by ghost")
-    elif "auto=1" in rp: add("配分＝山登り", "alloc. by climb")
-    elif "ff=" in rp: add(f"下限 {rp.split('ff=')[-1].split('/')[0]}", f"floor {rp.split('ff=')[-1].split('/')[0]}")
-    re_ = kv.get("reinsert", "")
-    if not re_: add("書き直しなし", "no rewrite")
-    elif "n=cb" in re_: add("n=cb（名簿）" if "base=marg" in re_ else "n=cb", "n=cb (ghost)" if "base=marg" in re_ else "n=cb")
-    elif "n=auto" in re_: add("n=auto", "auto n")
-    else: add(re_.split(":")[-1].split("/")[0], re_.split(":")[-1].split("/")[0])
-    if kv.get("admit", "").startswith("dram"): add("篩", "admission")
-    return "＋".join(ja), " + ".join(en)
-
-
-for c in SEL:
-    if c not in NAME and c in SPEC: NAME[c] = auto_name(SPEC[c])
+for c in [BASE] + SEL:   # 基準（CacheLib）も同じ並びで
+    if c in SPEC and c not in CATNAME: NAME[c] = method_label(SPEC[c])   # 11-20 名前は指定から同じ並びで（カタログに図の名前があればそれ）
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
 colr = lambda c: (COL.get(c) or PAL[ORDER.index(c) % len(PAL)]) if c in ORDER else COL.get(c, "#888")   # 1 方式 1 色（どの図でも同じ）
@@ -434,14 +368,14 @@ for n in names:
     if not KS: continue
     ncls = max(sum(1 for k in r[0] if k.startswith("share_")) for r in KS.values())
     f = Fig(1600, 900)
-    f.add_legend([(nm(c), colr(c), "line") for c in KS] + [(T("分類 0（小）", "class 0 (small)"), "#555555", "dash"),
-                                                         (T("分類 1（大）", "class 1 (large)"), "#555555", "line")])
+    f.add_legend([(nm(c), colr(c), "line") for c in KS] + [(T("右 2 面：破線 = 分類 0（小）", "right panels: dashed = class 0 (small)"), "#555555", "dash"),
+                                                          (T("実線 = 分類 1（大）", "solid = class 1 (large)"), "#555555", "line")])
     top, x0, gap = f.legend_h() + 50, 110, 140
     W = (1600 - x0 - 30 - gap * 3) // 4
     X = lambda r: int(r["t_end"]) / 1e6
     xs = [X(r) for v in KS.values() for r in v]
     panels = [(T("閾値 τ（log2 バイト）", "Threshold τ (log2 bytes)"), "log2 τ"),
-              (T("容量の割合と下限", "Capacity share and floor"), T("割合", "share")),
+              (T("大の分類の下限 ff（太）と実際の割合（細）", "Large-class floor ff (thick) and actual share (thin)"), T("SSD に占める割合", "share of SSD")),
               (T("書き直しの基準（名簿の限界の価値）", "Rewrite bar (marginal value)"), T("ヒット/バイト/滞在", "hits/byte/stay")),
               (T("実質の n（書き直す最少のヒット数）", "Effective n (min hits to rewrite)"), "n")]
     import math
@@ -454,15 +388,19 @@ for n in names:
                 for i in range(1, ncls):
                     pts = [(a, math.log2(b + 1)) for a, b in series(r, f"tau_{i}") if b is not None]
                     if pts: lines.append((c, pts, False, False))
+            if k == 1:   # 容量配分：下限 ff を太い線、その分類が実際に持つ割合を細い線で（下限なしで分類する方式は、大の分類の自然な割合だけ細い線）
+                fc = r[0].get("floor_class")
+                if fc:
+                    pts = [(a, b) for a, b in series(r, "floor") if b is not None]
+                    if pts: lines.append((c, pts, False, False))
+                if fc or r[0].get("tau_1"):
+                    pts = [(a, b) for a, b in series(r, f"share_{fc or 1}") if b is not None]
+                    if pts: lines.append((c, pts, False, True))
             for cl in range(ncls):
-                key = {1: f"share_{cl}", 2: f"bar_{cl}", 3: f"n_{cl}"}.get(k)
+                key = {2: f"bar_{cl}", 3: f"n_{cl}"}.get(k)
                 if key is None or key not in r[0]: continue
-                if k == 1 and not (r[0].get("floor_class") or len({x.get("tau_1") for x in r}) > 1 or r[0].get("tau_1")): continue
                 pts = [(a, b) for a, b in series(r, key) if b is not None]
                 if pts: lines.append((c, pts, cl == 0, False))
-            if k == 1 and r[0].get("floor_class"):
-                pts = [(a, b) for a, b in series(r, "floor") if b is not None]
-                if pts: lines.append((c, pts, False, True))
         ys = [y for _, p, _, _ in lines for _, y in p]
         if not ys: continue
         yr = (0, 1.0) if k == 1 else (min(ys) - 0.5, max(ys) + 0.5) if k in (0, 3) else (0, max(ys) * 1.1 or 1)
@@ -613,7 +551,44 @@ if mrows:
     open(f"{D}/table_marks.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
         "各セル = ΔBMR [pt]（構成 − CacheLib）/ 書き込みの比（構成 ÷ CacheLib）。印 = CacheLib の累積 SSD 書き込みがその量に達した時点（先頭の割合 = そこまでの要求の割合）。✗ = 全量と差の向きが違う。\n",
         "Each cell: ΔBMR [pt] (config − CacheLib) / write ratio (config ÷ CacheLib), at the point where CacheLib has written that much to the SSD. ✗ = sign differs from the full trace.\n"))
-png = to_png(D, list(FIGS) + tl + tr + mk + kn)
+# ---------------------------------------------------------------- 書き直しの閾値がなぜその値か（11-20、n=cb の方式）：P.reauto.json の最終値
+#   分類ごとの面に、今の滞在で当たった回数の段（1〜8 以上）ごとの「書き直した物が次の滞在で 1 バイトあたり何回当たったか」の棒と、
+#   比べる相手（名簿で測った端の密度 bar ＋ 書き込みの値段 λ）の横線。線を越えた段は書き直す（濃い棒）、越えない段は書き直さない（薄い棒）。
+#   越える最初の段が実質の n（CacheLib の n に当たる）。データが 32 件未満の段は学習中で、比べずに書き直す（白抜き）
+rw = []
+for n in names:
+    for c in cfgs:
+        if "n=cb" not in SPEC.get(c, ""): continue
+        p = f"{rundir.get((n, c), f'{D}/{n}/{c}')}/P.reauto.json"
+        if not os.path.exists(p): continue
+        cls = [(i, x) for i, x in enumerate(json.load(open(p)).get("class", [])) if x.get("next_stay_hits_per_byte") and x.get("bar", -1) >= 0]
+        if not cls: continue
+        f = Fig(1600, 870)
+        f.add_legend([(T("線を越える段（書き直す）", "above the bar (rewrite)"), colr(c), "box"),
+                      (T("越えない段（書き直さない）", "below the bar (no rewrite)"), "#c8c8c8", "box"),
+                      (T("名簿で測った端の密度 ＋ λ", "marginal value from the ghost + λ"), "#c0504a", "dash")])
+        top = f.legend_h() + 70; W = (1600 - 140 - 30 - 130 * (len(cls) - 1)) // len(cls)
+        cats = ["1", "2", "3", "4", "5", "6", "7", T("8 以上", "8+")]
+        for j, (ci, x) in enumerate(cls):
+            v = x["next_stay_hits_per_byte"]; tries = x.get("try", [99] * 8); bar = x["bar"] + x.get("lambda", 0)
+            ok = [tries[b] < 32 or v[b] >= bar for b in range(len(v))]
+            neff = next((b + 1 for b in range(len(v)) if ok[b]), 9)
+            x0 = 140 + j * (W + 130)
+            name = {0: T("分類 0（小）", "class 0 (small)"), 1: T("分類 1（大）", "class 1 (large)")}.get(ci, T(f"分類 {ci}", f"class {ci}"))
+            a = Ax(f, (x0, top, x0 + W, 720), yr=(0, max(v + [bar]) * 1.15), cats=cats,
+                   xlabel=T("今の滞在で当たった回数（段）", "SSD hits in this stay (bucket)") if j == len(cls) // 2 else "",
+                   ylabel=T("次の滞在のヒット / バイト", "next-stay hits per byte") if j == 0 else "",
+                   title=T(f"{name}：実質の n = {neff if neff < 9 else 'なし'}", f"{name}: effective n = {neff if neff < 9 else 'none'}"))
+            for b, y in enumerate(v):
+                xc = a.x0 + a.bw * (b + 0.5); w_ = a.bw * 0.6; y0, y1 = a.Y(0), a.Y(y)
+                learn = tries[b] < 32
+                f.e.append(f'<rect x="{xc - w_ / 2:.1f}" y="{y1:.1f}" width="{w_:.1f}" height="{max(y0 - y1, 1):.1f}" '
+                           f'fill="{"#ffffff" if learn else colr(c) if ok[b] else "#c8c8c8"}" stroke="{colr(c) if ok[b] else "#999999"}" stroke-width="2"/>')
+                f.t(xc, y1 - 8, f"{y:.2f}", 18, "middle")
+            a.hline(bar, col="#c0504a", label=f"{bar:.2f}")
+        f.t(800, 800, T(f"{n}・{nm(c)}（最終値。白抜き = データ 32 件未満で学習中）", f"{n} · {nm(c)} (final values; hollow = < 32 samples, still learning)"), 20, "middle")
+        slug = f"fig_rewrite_{n}_{c}"; open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(f.svg()); rw.append(slug)
+png = to_png(D, list(FIGS) + tl + tr + mk + kn + rw)
 
 # ---------------------------------------------------------------- 説明のページ
 def mean_of(fn, c):
@@ -640,11 +615,15 @@ img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}
 """ + ("<h2>補足：時間変化</h2><p class='m'>fig_ops_* = 横軸が処理した要求数（BMR・OHR は区間ごと、SSD 書き込みは累積）。"
        "fig_wr_* = 横軸がその構成の累積 SSD 書き込み量（BMR・OHR はそこまでの累積。同じ量を書いた時点での比較）。破線 = 基準。</p>"
        + "".join(f'<h3>{s}</h3><img src="{s}.svg" alt="{s}">' for s in tl) if tl else "") + (
-    "<h2>自分で決める値の動き：fig_knobs_&lt;trace&gt;.svg</h2><p class='m'>左から 閾値 τ、各分類の容量の割合と大の分類の下限（細い薄い線）、"
-    "書き直しの基準（名簿の限界の価値）、実質の n（その時点で書き直す最少のヒット数。CacheLib の n に当たる）。色 = 方式、破線 = 分類 0（小）、実線 = 分類 1（大）。下限は同じ色の細い薄い線（大の分類が最低限持つ割合）、割合は封じた Region のうちその分類の物の割合。"
+    "<h2>自分で決める値の動き：fig_knobs_&lt;trace&gt;.svg</h2><p class='m'>左から 閾値 τ、容量配分（大の分類の下限 ff を太い線、その分類が実際に SSD に持つ割合を同じ色の細い線。下限なしで分類する方式は大の分類の自然な割合だけ）、"
+    "書き直しの基準（名簿の限界の価値）、実質の n（その時点で書き直す最少のヒット数。CacheLib の n に当たる）。色 = 方式。右の 2 面は分類ごとに線を分け、破線 = 分類 0（小）、実線 = 分類 1（大）。下限 ff は大の分類が最低限持つ割合で、細い線（実際の割合）が太い線の上にあれば下限は効いておらず（自然な配分のほうが多い）、重なっていれば下限で配分を決めている。"
     "どこに落ち着いたかは table_knobs.md（最後の 4 分の 1 の平均と、下限が落ち着いた区間）。</p>"
     + "".join(f'<h3>{s_}</h3><img src="{s_}.svg" alt="{s_}">' for s_ in kn)
-    + (f"<pre>{open(f'{D}/table_knobs.md', encoding='utf-8').read()}</pre>" if KN else "") if kn else "") + f"""
+    + (f"<pre>{open(f'{D}/table_knobs.md', encoding='utf-8').read()}</pre>" if KN else "") if kn else "") + (
+    "<h2>書き直しの閾値がなぜその値か：fig_rewrite_&lt;trace&gt;_&lt;方式&gt;.svg</h2><p class='m'>n=cb の方式ごと、分類ごとの面。棒 = 今の滞在で当たった回数の段（1〜8 以上）ごとに、"
+    "その段で書き直した物が次の滞在で 1 バイトあたり何回当たったか（実測の平均）。赤い破線 = 比べる相手（名簿で測った端の密度 ＋ 書き込みの値段 λ）。"
+    "線を越えた段（濃い棒）は書き直し、越えない段（薄い棒）は書き直さない。越える最初の段が実質の n（CacheLib の n に当たる）。白抜き = データ 32 件未満で、比べずに書き直している段。最終値。</p>"
+    + "".join(f'<h3>{s_}</h3><img src="{s_}.svg" alt="{s_}">' for s_ in rw) if rw else "") + f"""
 """ + ("<h2>書き込み量の印での結果（部分トレースで足りるか）</h2><p class='m'>fig_marks_&lt;trace&gt;：横 = CacheLib が SSD に書いた量（先頭の部分トレースの長さ）、縦 = ΔBMR と書き込みの比。"
        "線が右端（全量）の値に早く落ち着き、赤い縦線（指定した書き込み量）の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。数値は table_marks.md / .csv（✗ = 全量と向きが違う）。</p>"
        + "".join(f'<img src="{s_}.svg" alt="{s_}">' for s_ in mk) + (f"<pre>{open(f'{D}/table_marks.md', encoding='utf-8').read()}</pre>" if mrows else "") if mk else "") + f"""

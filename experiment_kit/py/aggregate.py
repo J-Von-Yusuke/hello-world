@@ -57,8 +57,8 @@ import tune_aggregate   # 自動推定（tune）の集計。validity の結果�
 tune_html, tune_n = tune_aggregate.run(kit, work, by, float(os.environ.get("TUNE_W", "0.3")))
 if tune_n: print(f"tune の集計: {tune_n} 本 → {R}/tune_report.html, tune_per_trace.csv, tune_by_*.csv")
 if not rows:   # トレース実験の結果が無くても、合成トレースの図だけは作る
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import figures
-    os.makedirs(R, exist_ok=True); fo, nf, png = figures.build(R, [], work, {}, None)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import agg_figs
+    os.makedirs(R, exist_ok=True); fo, nf, png = agg_figs.build(R, [], work, {}, None)
     print(f"results/*.json が無い（./run.sh validity がまだ）。合成トレースの図だけ作った: {nf} 枚 → {fo}/index.html" if nf else
           "results/*.json も合成トレースの結果も無い（validity / synth はまだ）", file=sys.stderr)
     sys.exit(0 if nf or tune_n else 1)   # tune の集計だけでもできていれば成功
@@ -309,7 +309,7 @@ print(f"集計: {len(rows)} 本 → {R}/report.html, per_trace.csv, by_*.csv" + 
 
 # ---------------------------------------------------------------- スライド用の図と説明（figs/）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import figures
-fo, nf, png = figures.build(R, rows, work, groups, spearman)
+import agg_figs
+fo, nf, png = agg_figs.build(R, rows, work, groups, spearman)
 print(f"図: {nf} 枚 → {fo}/index.html（説明つき）, *.svg" + (", *.png, slides.pptx" if png else
       "（PNG と slides.pptx は作れなかった: rsvg-convert / cairosvg / inkscape のどれかを入れる。例 sudo apt install librsvg2-bin）"))
