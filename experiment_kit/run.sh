@@ -28,6 +28,7 @@
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
 . "$KIT/config.sh"
+PATCH_SHA=$(sha256sum "$KIT/regionflash.patch" | cut -c1-16)   # 済みの印に入れるパッチの版
 B=$WORK/bin
 mkdir -p "$WORK"/{traces,out,results,synth,bin}
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
@@ -130,6 +131,18 @@ done_test() {  # 済みの印：P.json の片の扱いが同じ。admit=dram の
   local t="grep -qs 'chunk_mode.: .$(cmode "$2").' $1/P.json"
   [[ "$2" == *admit=dram* ]] && t="$t && grep -qs 'fill_admits' $1/P.json"
   echo "$t"; }
+sig_same() {  # sig_same <印> <印>: 2 つの印が同じかを調べる式（SIG_PATCH=0 ならパッチの版の行を除いて）
+  [ "$SIG_PATCH" = 1 ] && echo "cmp -s $1 $2" || echo "cmp -s <(tail -n +2 $1) <(tail -n +2 $2)"; }
+run_test() {  # run_test <dir> <指定> <印>: その run の印（パッチの版＋cachesim に渡す引数。出力先は除く）を <dir>/cmd.want に書き、
+  # 「済み」の式を返す：P.json があり、成功した run が残した <dir>/cmd.txt が印と完全に一致するときだけ（11-20）。
+  # 指定・SSD・DRAM・Region・NREQ・パッチのどれかが違えば回し直す。ADOPT_OLD=1：cmd.txt の無い古い結果は、前の判定（done_test）が
+  # 通れば今の印で回したものと見なして印を付ける。SIG_PATCH=0：パッチの版は照合しない
+  local d=$1 t; mkdir -p "$d"
+  printf 'patch %s\n%s\n' "$PATCH_SHA" "$3" > "$d/cmd.want"   # 1 行目 = パッチの版（SIG_PATCH=0 では 2 行目以降だけ比べる）
+  t="{ [ -s $d/P.json ] && $(sig_same $d/cmd.want $d/cmd.txt); }"
+  [ "$ADOPT_OLD" = 1 ] && t="{ $t || { [ ! -e $d/cmd.txt ] && $(done_test "$d" "$2") && cp $d/cmd.want $d/cmd.txt; }; }"
+  echo "$t"
+}
 jq1() { python3 -c "import json,sys; print(json.load(open('$1'))['$2'])"; }
 auto_p() {  # auto_p <物の数> <footprint> <SSD> <DRAM>  →  "P 1本の見積りGB 空きGB"（P が数字ならそのまま）
   local av; av=$(awk '/^MemAvailable:/{printf "%.0f", $2*1024}' /proc/meminfo)
@@ -161,7 +174,7 @@ variant_run() {  # variant_run <name> <var: asis|fix|drop|delete> <trace.zst> <s
   [ -x /usr/bin/time ] && TM=1   # 各 run のピーク RSS を <id>/rss に残す（見積り MEM_* の検証用）
   job() {  # job <id> <eviction params> （完成済みはスキップ）
     local d=$O/$1
-    echo "$(done_test $d "$2") || { mkdir -p $d && ${TM:+/usr/bin/time -f %M -o $d/rss} $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -o $d/lcs.txt -e \"$(with_cmode "$2"),out=$d/P\" > $d/stdout2>&1 || echo FAIL $d; }" >> "$J"
+    echo "$(run_test $d "$2" "$tr RegionFlash $SSD n=${NREQ:-} $TP $(with_cmode "$2")") || { rm -f $d/cmd.txt && ${TM:+/usr/bin/time -f %M -o $d/rss} $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -o $d/lcs.txt -e \"$(with_cmode "$2"),out=$d/P\" > $d/stdout 2>&1 && cp $d/cmd.want $d/cmd.txt || echo FAIL $d; }" >> "$J"
   }
   local E0="dram-size=$DRAM,region-size=$R,chunk=$CH,$BASE_E,interval=$INTERVAL" h hid hs v bud
   for bud in "" $BUDGET_DWPD; do
@@ -253,7 +266,7 @@ tune_run() {  # tune_run <出力名> <trace> <SSD> <DRAM> <R> <chunk> <-t 等> <
     if [[ "$spec" == *ssd-mode=object* ]]; then spec="dram-size=$DRAM,dram-algo=lru,inclusion=cachelib,seed=1,interval=$INTERVAL${WU:+,warmup-req=$WU},$spec"
     elif [[ "$spec" == *region-size=* ]]; then spec="$E,$spec"   # 構成が Region の大きさを持つ（paper の 256 MiB など）
     else spec="$E,region-size=$R,$spec"; fi
-    echo "$(done_test $O/$id "$spec") || { mkdir -p $O/$id && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$O/$id/P\" > $O/$id/stdout 2>&1 || echo FAIL $O/$id; }" >>"$J"
+    echo "$(run_test $O/$id "$spec" "$tr RegionFlash $SSD n=${NREQ:-} $TP $(with_cmode "$spec")") || { rm -f $O/$id/cmd.txt && $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$O/$id/P\" > $O/$id/stdout 2>&1 && cp $O/$id/cmd.want $O/$id/cmd.txt || echo FAIL $O/$id; }" >>"$J"
   done
   echo "{\"ssd\":$SSD,\"dram\":$DRAM,\"region\":$R,\"chunk\":$CH,\"warmup\":\"$WU\",\"nreq_limit\":\"$NREQ\"}" > "$O/config.json"
   local p=${TUNE_P:-}; [ -z "$p" ] && { [ "$P" = auto ] && p=$NCPU || p=$P; }
@@ -320,9 +333,10 @@ che_one() {  # name path fmt params category source ssd → work/che/<name>.json
         none) spec="$E,region-size=$R,hint=none,region-evict=lru";;
         st_lru) spec="$E,region-size=$R,hint=split_threshold,region-evict=lru";;
       esac
-      [ "$id" = none ] && eval "$(done_test "$T/none" "$spec")" && continue   # 同じ片の扱いの tune の結果を使う（st_lru は記録が要るので回す）
       d=$O/$id ev=""; [ "$id" = st_lru ] && ev="RF_EVLOG=$d/evlog RF_ENDDUMP=$d/enddump"
-      echo "$(done_test $d "$spec") || { mkdir -p $d && env $ev $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$d/P\" > $d/stdout 2>&1 || echo FAIL $d; }" >> "$J"
+      local tst; tst=$(run_test $d "$spec" "$tr RegionFlash $SSD n=${NREQ:-} $TP $(with_cmode "$spec")")
+      [ "$id" = none ] && [ -s "$T/none/P.json" ] && eval "$(sig_same "$d/cmd.want" "$T/none/cmd.txt")" && continue   # tune の none が全く同じ run なら使う（st_lru は記録が要るので回す）
+      echo "$tst || { rm -f $d/cmd.txt && env $ev $CACHESIM $tr oracleGeneral RegionFlash $SSD ${NREQ:+-n $NREQ} $TP -e \"$(with_cmode "$spec"),out=$d/P\" > $d/stdout 2>&1 && cp $d/cmd.want $d/cmd.txt || echo FAIL $d; }" >> "$J"
     done
     # 増幅つきのトレースでは素の LRU は回さない（cachesim の lru は amp を知らない）
     [ "${TR_AMP_KEY:-1}" = 1 ] && [ "${TR_AMP_SIZE:-1}" = 1 ] &&
@@ -372,23 +386,32 @@ paper_refresh() {  # 11-20: 図の系列 = いまの config.sh の選択。結�
     ( paper_pick "$sel" "$dir" "$b" ) 2>&1 | grep -v '方式（' >&2 || true
   done
 }
+figs_set() {  # figs_set [--ext | --final | --final2 | --cond c]: その組の全体の図と表、続けてトレースの群（traces.tsv の category × source）ごとの一式
+  python3 "$KIT/py/paper_figs.py" "$WORK" "$@" || return
+  [ "$GROUP_FIGS" = 1 ] || return 0
+  local g n=0; while IFS= read -r g; do
+    [ -n "$g" ] || continue; n=$((n + 1))
+    python3 "$KIT/py/paper_figs.py" "$WORK" "$@" --group "$g" | sed "s|^|  群 $g: |" >&2 || log "群 $g の図に失敗"
+  done < <(python3 "$KIT/py/paper_figs.py" "$WORK" "$@" --list-groups)
+  return 0
+}
 paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。--ext / --robust ならその部分だけ
   local robust_all=0
   paper_refresh
   if [ $# -eq 0 ]; then
-    python3 "$KIT/py/paper_figs.py" "$WORK" || return
-    ls "$WORK"/paper/ext/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_figs.py" "$WORK" --ext
-    [ -s "$WORK/paper/final/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final
-    [ -s "$WORK/paper/final2/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final2
+    figs_set || return
+    ls "$WORK"/paper/ext/*.json >/dev/null 2>&1 && figs_set --ext
+    [ -s "$WORK/paper/final/methods.tsv" ] && figs_set --final
+    [ -s "$WORK/paper/final2/methods.tsv" ] && figs_set --final2
     ls "$WORK"/paper/sens/*/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_sens_figs.py" "$WORK"
     ls "$WORK"/paper/robust/*.json >/dev/null 2>&1 && robust_all=1
   fi
   if [ $robust_all = 1 ] || [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
     python3 "$KIT/py/paper_robust_figs.py" "$WORK"
     local c; for c in $(ids_of "$PAPER_ROBUST_METHODS" | grep -oE '_(c0m|c0|f1|s[0-9]+)$' | tr -d _ | sort -u); do   # 選んだ方式の条件ごと
-      python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
+      figs_set --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
   elif [[ " $* " == *" --sens "* ]]; then python3 "$KIT/py/paper_sens_figs.py" "$WORK"
-  elif [ $# -gt 0 ]; then python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
+  elif [ $# -gt 0 ]; then figs_set "$@"; fi
 }
 
 # ---------------------------------------------------------------- paper の方式（config.sh の PAPER_CATALOG と *_METHODS）

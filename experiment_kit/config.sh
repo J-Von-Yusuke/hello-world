@@ -25,6 +25,11 @@ NCPU=${NCPU:-$(n=$(nproc); echo $(( n > 1 ? n - 1 : 1 )))}   # 並列に使う�
 SYNTH_P=${SYNTH_P:-$NCPU}                  # 合成負荷の並列数（1 本あたりは軽い）
 
 # ---- トレース実験（validity）の既定構成 ----------------------------------
+# 済みの判定（11-20）: 各 run は <フォルダ>/cmd.txt（パッチの版＋cachesim の引数）が今と完全に一致するときだけ飛ばす
+GROUP_FIGS=${GROUP_FIGS:-1}                # 1 = paper 系の図と表を、全体（work/paper/<組>/）に加えてトレースの群（traces.tsv の category × source）ごとにも
+                                           #     work/paper/<組>/groups/<category>__<source>/ に出す（11-20）。run は共有なので回す量は変わらない
+ADOPT_OLD=${ADOPT_OLD:-0}                  # 1 = cmd.txt の無い 11-20 より前の結果を、前の判定（片の扱い・fill）が通れば今の指定のものと見なして使う
+SIG_PATCH=${SIG_PATCH:-1}                  # 0 = パッチの版は照合しない（キットを更新しても結果が変わらないと分かっているとき）
 SSD_DEFAULT=${SSD_DEFAULT:-30%}            # SSD 容量: 240G（固定）/ 30%（フットプリントに対する割合）。traces.tsv の ssd 列で個別指定
 DRAM_DIV=${DRAM_DIV:-30}                   # DRAM = SSD / DRAM_DIV        （meta: 240G の SSD に 8G）
 REGION_N=${REGION_N:-392}                  # Region の数。R = SSD / REGION_N（MiB に切り捨て。meta: 626.5 MiB）
@@ -33,7 +38,8 @@ CHUNK_MODE=${CHUNK_MODE:-piece}            # 片の扱い。piece = CacheLib の
                                            # 取り直す。11-19 から既定）/ object = 片を 1 つ失うと物全体を捨てる（11-19 までの結果）。
                                            # chunk=0 の構成と物単位 SSD（obj 系）は片が無いので常に object。モードが違う結果は回し直す
 PIECE=${PIECE:-131072}                     # K(N)（piece 数）の数え方。CacheLib は 128 KiB
-INTERVAL=${INTERVAL:-10000}                # 先頭 N 要求の曲線の刻み（要求数）。小さいトレース（< 1000 万）は 1000 に
+INTERVAL=${INTERVAL:-1000000}              # 先頭 N 要求の曲線・時間変化の刻み（要求数）。11-20 に 10000 → 100 万（Wiki・Tencent CDN で区間ごとの CSV が
+                                           # 大きくなりすぎストレージを圧迫したため）。細かく見たいときや 1000 万要求未満のトレースは小さく（例 INTERVAL=10000）
 NREQ=${NREQ:-}                             # 空 = 全要求。数字 = 各 RegionFlash 実行を先頭 NREQ 要求で打ち切る（試運転用）
 BASE_E="dram-algo=lru,inclusion=cachelib,region-evict=lru,seal-on-repartition=inactive,seed=1"
 # 分類方法（id:hint 指定）。足すと、その分類の効果（none との BMR 差）も集計される

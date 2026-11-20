@@ -23,7 +23,7 @@
   アプリ層の書き込み増幅 = SSD に書いたバイト ÷ 受け入れたバイト（1 = 書き直しなし。表の基準の列）
 出力（work/paper/）: fig_main.svg（3 面まとめ）と fig_bmr.svg / fig_write.svg / fig_ohr.svg（1 面ずつ）、
   補足の時間変化 fig_ops_<trace>.svg（横軸 = 要求数）/ fig_wr_<trace>.svg（横軸 = 累積 SSD 書き込み。PAPER_BINS = 区間のまとめ数、既定 100）。.png は変換器があれば, table_main.csv / .md / .tex, index.html。標準ライブラリだけ。"""
-import csv, glob, json, os, sys
+import csv, glob, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from figures import Fig, Ax, PAL, INK, fmt, span, to_png, tw
@@ -33,6 +33,10 @@ EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext
 FINAL2 = "--final2" in sys.argv   # paper-final2: 同じ読み方で、図と表は work/paper/final2/
 FINAL = "--final" in sys.argv or FINAL2   # paper-final: work/paper と work/paper/ext の結果から final/methods.tsv の方式だけ。図と表は work/paper/final/
 COND = sys.argv[sys.argv.index("--cond") + 1] if "--cond" in sys.argv else ""   # 頑健性の条件（c0 / f1 / s2 / s3）
+# 11-20 トレースの群ごと：--group <category>/<source> = traces.tsv の category・source がそれの物だけで同じ一式を <図の場所>/groups/<category>__<source>/ に。
+# --list-groups = 結果のある群を 1 行ずつ出して終わる（run.sh paper-figs が群ごとに呼ぶ）。群をまたいだ全体は今まで通り <図の場所> に
+GROUP = sys.argv[sys.argv.index("--group") + 1] if "--group" in sys.argv else ""
+LIST_GROUPS = "--list-groups" in sys.argv
 if COND:   # work/paper/robust の <構成>_<条件> だけを <構成> として読み、work/paper/robust/<条件>/ に同じ一式を出す
     SRC = [f"{WORK}/paper/robust"]; D = f"{WORK}/paper/robust/{COND}"
 else:
@@ -152,6 +156,12 @@ for src in SRC:
             else: key = c
             cur["runs"][key] = r; rundir[(d["name"], key)] = f"{src}/{d['name']}/{c}"
 runs = {n: d for n, d in runs.items() if BASE in d["runs"]}
+grp = lambda n: f"{runs[n].get('category', '') or '-'}/{runs[n].get('source', '') or '-'}"
+if LIST_GROUPS:
+    print("\n".join(sorted({grp(n) for n in runs}))); sys.exit(0)
+if GROUP:
+    runs = {n: d for n, d in runs.items() if grp(n) == GROUP}
+    D = f"{D}/groups/" + "__".join(re.sub(r"[^A-Za-z0-9_.-]", "_", x) for x in GROUP.split("/", 1))
 if not runs: sys.exit(f"{SRC[0]}/*.json に {BASE}{'_' + COND if COND else ''} を含む結果が無い")
 os.makedirs(D, exist_ok=True)
 names = sorted(runs, key=lambda n: (runs[n].get("category", ""), runs[n].get("source", ""), n))
@@ -615,7 +625,7 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 <style>:root{{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}}@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
-<h1>{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final2：ru_auto を ru_auto_v2 に）" if FINAL2 else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
+<h1>{f"［{GROUP}］" if GROUP else ""}{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final2：ru_auto を ru_auto_v2 に）" if FINAL2 else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
 """ + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
        "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
        "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"

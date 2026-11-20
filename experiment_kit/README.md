@@ -38,7 +38,12 @@ synth_workloads.txt → run.sh synth → work/synth/*.json ───────
 ```
 
 コマンドの一覧は `./run.sh`（引数なし）で出る。「準備」（setup・check・methods）・「実験」・「図と表だけ作り直す」（aggregate・*-figs・che-report）の 3 群。
-どの実験も、済んだ run（`P.json` があるもの）は回し直さない。途中で止めても同じコマンドで続きから回る。消せばやり直す。
+どの実験も、済んだ run は回し直さない。途中で止めても同じコマンドで続きから回る。消せばやり直す。
+
+**済みの判定（11-20）**：各 run のフォルダの `cmd.txt` に、成功した run の**パッチの版と cachesim に渡した引数**（トレース・SSD・`NREQ`・`-t`・`-e` の指定全部。DRAM・Region・片の扱い・乱数の種もここに入る。出力先だけ除く）が残る。`P.json` があり、`cmd.txt` が今回しようとしているものと**完全に一致するときだけ**飛ばす。カタログの指定を書き換えた・`config.sh` の SSD や Region を変えた・試運転（`NREQ`）の結果が残っていた・キットを更新した、のどれでも、その run だけ回し直す（id が同じでも古い結果は使わない）。途中で失敗した run は `cmd.txt` を消してから回すので、次も回し直しになる。
+
+- 11-20 より前の結果には `cmd.txt` が無いので、**既定では全部回し直しになる**。その前の結果を使い続けるなら `ADOPT_OLD=1 ./run.sh …`：`cmd.txt` の無い結果は、前の判定（片の扱いと篩の fill 規則）が通れば今の指定で回したものと見なして `cmd.txt` を付ける（指定を変えていないことは自分で確かめる）。
+- `SIG_PATCH=0 ./run.sh …`：パッチの版は照合しない（キットを更新しても結果が変わらないと分かっているとき。11-20 の `P.knobs.csv` のように出力が増えただけの更新など）。
 
 ## 2. 必要なもの
 
@@ -121,8 +126,10 @@ bash のファイル。どの項目も環境変数で上書きできる（例 `P
 | `BUDGET_DWPD` | `3 1` | validity の書き込み予算つき構成（1 日あたりの SSD 全書き換え回数）。空なら走らせない |
 | `SAT_VALUE` / `SAT_VARIANTS` / `SAT` | `4294967295` / `drop delete` / `auto` | サイズ `2^32−1`（= −1 を uint32 で書いたもの。GET 以外の操作の印と見る）の要求の扱い。`auto` = その要求があるトレースでは `SAT_VARIANTS` を走らせる（先頭が主結果。tune・che・paper は先頭だけ）。`drop` = 無かったことにする、`delete` = その物を消す操作（要求に数えない）、`fix` = その物の他のサイズに置換（感度用）、`asis` = そのまま |
 | `WRITE_MARKS_TB` | `1.5` | 「先頭から SSD に W TB 書いた時点」で効果を測る W（TB = 10^12 B） |
-| `INTERVAL` | `10000` | 先頭 N 曲線・時間変化の刻み（要求数）。1000 万要求未満のトレースは `1000` に |
-| `NREQ` | 空 | 数字を入れると各 run を先頭 NREQ 要求で打ち切る（試運転） |
+| `INTERVAL` | `1000000` | 先頭 N 曲線・時間変化・自分で決める値の動き（`P.knobs.csv`）の刻み（要求数）。11-20 に 10000 → 100 万（Wiki・Tencent CDN で区間ごとの CSV が大きくなりすぎたため）。1000 万要求未満のトレースや細かく見たいときは小さく（`INTERVAL=10000 ./run.sh …`）。書き込み予算つき（`dwpd`）の構成は区間の終わりごとに λ を動かすので、刻みが粗いと追従も粗くなる |
+| `NREQ` | 空 | 数字を入れると各 run を先頭 NREQ 要求で打ち切る（試運転）。`cmd.txt` に入るので、本番では試運転の結果を使わず回し直す |
+| `GROUP_FIGS` | `1` | paper 系の図と表を、全体に加えてトレースの群（`category` × `source`）ごとにも `<組>/groups/<category>__<source>/` に出す（§6.5.5） |
+| `ADOPT_OLD` / `SIG_PATCH` | `0` / `1` | 済みの判定（§3）：`cmd.txt` の無い古い結果を使うか / パッチの版も照合するか |
 | `P` | `auto` | 同時に走らせる cachesim の数。`auto` = §5.3 の見積りで自動。数字なら固定 |
 | `NCPU` | CPU の総コア数 − 1 | 並列に使うプロセス数の上限（`P=auto`・tune-synth・`SYNTH_P`・`make -j`） |
 | `MEM_FRAC` | `0.8` | `auto` で使ってよい空きメモリ（`MemAvailable`）の割合 |
@@ -465,6 +472,8 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 
 出力（各組のフォルダ。`index.html` に図と表と要点）：
 
+**トレースの群ごと（11-20）**：組のフォルダ（`work/paper/`・`final/`・`final2/`・`ext/`・`robust/<条件>/`）には、traces.tsv の全トレースをまとめた図と表が出る。それに加えて、traces.tsv の `category` × `source` の群ごとに、同じ一式（下の表のファイル全部と `index.html`）を `<組のフォルダ>/groups/<category>__<source>/` に出す（例：`work/paper/final2/groups/CDN__Meta/`、`.../KV__Twitter/`）。書き込み量や効き方は群でかなり違うので、群の中で比べるとき用。run は群をまたいで共有するので回す量は変わらず、`./run.sh paper-figs` だけでも作り直せる。出さないなら `GROUP_FIGS=0`。category・source が空のトレースは `-` の群になる。感度（paper-sens）と頑健性の条件をまたいだ図（`fig_robust*.svg`）は群に分けない（感度はトレースごとの図がある）。
+
 | ファイル | 中身 |
 |---|---|
 | `fig_main.svg` | 値そのものの 3 面：BMR [%]・SSD 書き込み量 [TB]・OHR [%]（参考）。**縦軸は 0 から**。横軸 = トレース（BMR・OHR は 2 本以上なら最後に平均） |
@@ -522,6 +531,9 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 
 ## 付録：変更の履歴
 
+- **11-20 `INTERVAL` の既定を 10000 → 1000000**：Wiki・Tencent CDN で `P.interval*.csv` が大きくなりすぎ、ストレージを圧迫したため。合計の結果（P.json）は変わらない（`dwpd` の構成は λ を動かす間隔が変わる）が、時間変化の図・先頭 N 曲線・書き込み量の印は粗くなる。`interval=` は run の指定に入るので、済みの判定（§3）では今までの結果は回し直しになる（合計だけ使うなら `ADOPT_OLD=1`）。
+- **11-20 トレースの群ごとの図と表**：paper 系の図と表を、全トレースをまとめた今まで通りの一式に加えて、traces.tsv の `category` × `source` ごとに `<組のフォルダ>/groups/<category>__<source>/` にも出すようにした（`GROUP_FIGS=0` で止める）。`paper_figs.py --group <category>/<source>`、`--list-groups`。run は共有で回す量は同じ。`tools/synth/kit_group_test.sh`（nha = CDN/Meta、Tencent = CDN/Tencent）で確かめた。
+- **11-20 済みの判定を「実際のコマンドが完全に一致するか」に**：前は `P.json` があり片の扱い（と篩の fill 規則）が同じなら、指定・SSD・DRAM・Region・`NREQ`・キットの版が違っても飛ばしていた（id が同じなら古い結果を使っていた）。今は各 run が成功したときに `cmd.txt`（パッチの版＋cachesim の引数）を残し、それが今と完全に一致するときだけ飛ばす（validity・tune・paper 系・che の全部）。古い結果は `ADOPT_OLD=1` で使える。`SIG_PATCH=0` でパッチの版を照合から外す。validity の stderr が `stdout` に残っていなかった書き間違い（`> stdout2>&1`）も直した。`tools/synth/kit_sig_test.sh` で、同じなら 0 本・`NREQ` / 方式の指定 / パッチの版を変えたらその run だけ・失敗した run は回し直し・paper-sens の点も同じ、を確かめた。
 - **11-20 論文の問い Q1〜Q5 を paper-final2 一回で**：`paper_story.html` §3 の計測に足りなかった方式をカタログに足し、`PAPER_FINAL2_METHODS` に並べた（16 → 24 方式）：`ru_v2_nofloor`（閾値だけ・下限なし）、`ru_v2_n1`・`ru_none_v2`（部品の段階）、`ru_adm_none_v2`・`ru_adm_v2`（篩との 2×2）、`ru_auto_v2_l01`・`_l03`・`_l1`（λ）。交換関係の図は `ru_auto_v2` と λ の変種を破線でつなぐ。種 2・3 の `ru_auto_v2_s2`・`_s3` は paper-robust に入れ、`paper_robust_figs.py` が `fig_robust_v2.svg` を出す。`tools/synth/kit_q_test.sh` で確かめた。
 - **11-20 自分で決める値の動きの図 `fig_knobs_<trace>.svg` と `table_knobs.md`**：cachesim が区間の終わりごとに `P.knobs.csv`（閾値 τ、大の分類の下限、分類ごとの容量の割合・n=cb の基準・実質の n、λ）を書くようにし、paper 系の図に足した（§6.5.5）。既存の出力（P.json・P.interval*.csv）はビット単位で変わらない（24 構成）。図の点は 400 までに間引く。`tools/synth/kit_knobs_test.sh` で Tencent（縮小）全量の paper-final2 から図と表が出ることを確かめた（ru_auto_v2：閾値 2^16、下限 0.22、小の分類の基準 1.17・実質 n=2、大の分類 0.26・n=1）。
 - **11-20 感度 `paper-sens`**：SSD 容量（トレースの既定の 0.33・2 倍）・DRAM（SSD ÷ 100・10）・RU（256 MiB・1.25 GiB・2.5 GiB）を一つずつ変える組を足した（§6.5.6）。既定の点は paper の結果を共有し、RU の点では CacheLib を回さない。図は `py/paper_sens_figs.py`。カタログに `ru_none_v2`（分類なし＋n=cb）と `ru_adm_v2`（現在の提案＋篩、既定ではどの組にも入れていない）を足した。`run.sh` は `SSD_MULT` で SSD を倍にできる（paper-sens の中だけで使う）。`tools/synth/kit_sens_test.sh` で、nha の先頭 20 万要求について点ごとの SSD・DRAM・Region が指定どおりになること、RU の点で `r256_base` を回さないこと、図と表が出ることを確かめた。
