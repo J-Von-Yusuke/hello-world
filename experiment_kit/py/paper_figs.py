@@ -39,13 +39,8 @@ else:
     SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT or FINAL else [])   # 結果を読む場所（同じ構成は後の場所が優先）
     D = f"{WORK}/paper/final2" if FINAL2 else f"{WORK}/paper/final" if FINAL else SRC[-1]                             # 図と表を書く場所
 BASE = "r256_base"
-ORDER = (["r256_base", "r256_n0", "r256_n2", "r256_n3", "r256_none_auto", "ru_none_auto", "ru_ff90_h3", "ru_auto",
-          "r256_adm", "ru_adm_none_auto", "ru_adm_auto"] if EXT else   # ext: CacheLib の閾値違いと提案、篩（S3-FIFO 型の受け入れ）
-         ["r256_base", "r256_n0", "r256_n2", "r256_n3", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "r256_none_auto", "r256_ff90_h3", "r256_auto"]
-         if COND else   # 条件ごと: その条件で回した構成を全部
-         ["r256_base", "r256_adm", "ru_base", "ru_none_auto", "ru_ff90_h3", "ru_auto", "ru_auto_w0", "ru_auto_ii", "ru_dram_auto", "ru_dram1_auto",
-          "ru_st_nauto", "ru_st_n0", "ru_gate", "ru_adm_none_auto", "ru_adm_auto", "ru_adm_dram2_auto",
-          "r256_none_auto", "r256_ff90_h3", "r256_auto", "r256_auto_w0"])   # 図と表に並べる順
+# 系列 = config.sh の組で選んだ方式のうち、どれか 1 本のトレースで結果がある物（下の SEL。並べた順が図と表の順）。
+# ここには方式の一覧を持たない（11-20：以前は ext・頑健性の並びをここに手で書いていた）。
 NAME = {
     "r256_base": ("CacheLib（R=256MiB）", "CacheLib (R=256MiB)"),
     "r256_n0": ("CacheLib n=0（書き直しなし）", "CacheLib n=0 (no rewrite)"),
@@ -91,21 +86,58 @@ COL = {"r256_base": "#4d4d4d", "r256_n0": "#d0d0d0", "r256_n2": "#a0a0a0", "r256
        "r256_auto_n1": "#e76f51", "ru_auto_n1": "#0b6e4f", "r256_adm_auto_n1": "#f4845f", "ru_adm_auto_n1": "#40916c",
        "r256_base_cb": "#6c757d", "r256_auto_cb": "#9c6644", "ru_auto_cb": "#3a86ff", "ru_adm_auto_cb": "#8338ec",
        "ru_v2_n1": "#d62828", "r256_v2_n1": "#f77f00", "ru_adm_v2_n1": "#2a9d8f", "ru_v2_cb": "#7209b7", "ru_auto_v2": "#03045e"}
-# run.sh が残した選択（methods.tsv: id・図の名前・指定）。paper はその順と名前で並べ、選ばなかった方式は出さない。
-# ext / 条件ごとは上の並びに、選んだ方式のうち並びに無いものを後ろへ足す。名前が空なら上の NAME（無ければ id）
-SEL = []
-_m = f"{WORK}/paper/robust/methods.tsv" if COND else f"{D}/methods.tsv"
-if os.path.exists(_m):
+# run.sh が残した選択（methods.tsv: id・図の名前・指定。./run.sh paper-figs は描く前に今の config.sh から作り直す）。
+#   paper / final / final2: その場所の methods.tsv。ext: paper の選択 ＋ ext の選択（ext は paper の結果も読む）。
+#   頑健性の条件ごと: robust の methods.tsv のうち、その条件の方式（末尾 _<条件> を外した名前で並べる）。
+# methods.tsv が無いとき（手で結果を置いた場合など）は、結果のある方式を全部（基準を先頭に）。
+SEL, SPEC = [], {}
+for _m in ([f"{WORK}/paper/robust/methods.tsv"] if COND else ([f"{WORK}/paper/methods.tsv"] if EXT else []) + [f"{D}/methods.tsv"]):
+    if not os.path.exists(_m): continue
     for r in (l.rstrip("\n").split("\t") for l in open(_m, encoding="utf-8") if l.strip()):
         c = r[0][:-len(COND) - 1] if COND and r[0].endswith("_" + COND) else r[0]
         if COND and c == r[0]: continue   # 別の条件の方式
-        SEL.append(c)
+        if c not in SEL: SEL.append(c)
         if len(r) > 1 and r[1]: NAME[c] = (r[1], r[1])
+        if len(r) > 2: SPEC[c] = r[2]
 if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（./run.sh paper-final{'2' if FINAL2 else ''} で作る）")
-if SEL and not EXT and not COND: ORDER = SEL
-else: ORDER = ORDER + [c for c in SEL if c not in ORDER]
+if BASE in SEL: SEL.remove(BASE)
+ORDER = [BASE] + SEL
+
+
+def auto_name(spec):  # 名前の無い方式（カタログに図の名前が無く、下の NAME にも無い）: 指定から組み立てる
+    ja, en = [], []
+    def add(a, b): ja.append(a); en.append(b)
+    kv = {}
+    for tok in spec.split(","):
+        k, _, v = tok.partition("="); kv[k] = v
+    rs = kv.get("region-size")
+    add(f"R={int(rs) // 2**20}MiB" if rs else "R=RU", f"R={int(rs) // 2**20}MiB" if rs else "R=RU")
+    h = kv.get("hint", "none")
+    if h == "none": add("分類なし", "no class.")
+    elif h.startswith("st_otsu") and "logreq" in h: add("閾値＝再利用の強さ", "tau by reuse intensity")
+    elif h.startswith("st_otsu"): add("閾値＝大津", "tau by Otsu")
+    elif h.startswith("split_threshold"): add("サイズ分類（st）", "size class. (st)")
+    elif h.startswith("fixed"): add(f"閾値 {h.split('tau=')[-1]}", f"tau {h.split('tau=')[-1]}")
+    elif "key=dram" in h: add("DRAM ヒットで分類", "DRAM-hit class.")
+    else: add(h.split(":")[0], h.split(":")[0])
+    rp = kv.get("region-params", "")
+    if "auto=2" in rp: add("配分＝名簿", "alloc. by ghost")
+    elif "auto=1" in rp: add("配分＝山登り", "alloc. by climb")
+    elif "ff=" in rp: add(f"下限 {rp.split('ff=')[-1].split('/')[0]}", f"floor {rp.split('ff=')[-1].split('/')[0]}")
+    re_ = kv.get("reinsert", "")
+    if not re_: add("書き直しなし", "no rewrite")
+    elif "n=cb" in re_: add("n=cb（名簿）" if "base=marg" in re_ else "n=cb", "n=cb (ghost)" if "base=marg" in re_ else "n=cb")
+    elif "n=auto" in re_: add("n=auto", "auto n")
+    else: add(re_.split(":")[-1].split("/")[0], re_.split(":")[-1].split("/")[0])
+    if kv.get("admit", "").startswith("dram"): add("篩", "admission")
+    return "＋".join(ja), " + ".join(en)
+
+
+for c in SEL:
+    if c not in NAME and c in SPEC: NAME[c] = auto_name(SPEC[c])
 nm = lambda c: NAME.get(c, (c, c))[EN]
 T = lambda ja, en: en if EN else ja
+colr = lambda c: (COL.get(c) or PAL[ORDER.index(c) % len(PAL)]) if c in ORDER else COL.get(c, "#888")   # 1 方式 1 色（どの図でも同じ）
 
 runs, rundir = {}, {}   # rundir[(trace, config)] = その構成の出力のフォルダ（P.interval.csv の場所）
 for src in SRC:
@@ -123,6 +155,8 @@ runs = {n: d for n, d in runs.items() if BASE in d["runs"]}
 if not runs: sys.exit(f"{SRC[0]}/*.json に {BASE}{'_' + COND if COND else ''} を含む結果が無い")
 os.makedirs(D, exist_ok=True)
 names = sorted(runs, key=lambda n: (runs[n].get("category", ""), runs[n].get("source", ""), n))
+if not SEL:   # methods.tsv が無い: 結果のある方式を全部（基準を先頭に）
+    ORDER = [BASE] + sorted({c for n in names for c in runs[n]["runs"]} - {BASE})
 cfgs = [c for c in ORDER if any(c in runs[n]["runs"] for n in names)]
 others = [c for c in cfgs if c != BASE]
 
@@ -237,7 +271,7 @@ def stacked(a, key, shown, mean):
     """書き込みの棒を 取得（濃い）＋ 再書き込み（薄い）に分けて積む。nwrite は基準の書き込み全体 = 1 で割る。詰め物は描かない（表に残す）"""
     k = len(shown); w = a.bw * 0.8 / max(k, 1)
     for gi, c in enumerate(shown):
-        col = COL.get(c, PAL[cfgs.index(c) % len(PAL)])
+        col = colr(c)
         parts = []
         for n in names:
             R = runs[n]["runs"]
@@ -277,7 +311,7 @@ def stack_labels(a, x, w, ys, p):
 def draw(keys):  # keys の面を横に並べた 1 枚の図
     kinds = {PANELS[k][5] for k in keys}
     shown = cfgs if "abs" in kinds else others          # 差・比の図には基準の棒を出さない（基準 = 0 / 1 の線）
-    f = Fig(); f.add_legend([(nm(c), COL.get(c, PAL[i % len(PAL)]), "box") for i, c in enumerate(cfgs) if c in shown])
+    f = Fig(); f.add_legend([(nm(c), colr(c), "box") for i, c in enumerate(cfgs) if c in shown])
     if {"write", "nwrite"} & set(keys):
         f.add_legend([(T("書き込み：濃い = 取得（ミス）、薄い = 再書き込み。数字 = 段の中が各量、上が合計", "Writes: solid = admitted (misses), light = rewrites; numbers = each part inside, total on top"), "#bbbbbb", "box")])
     if "ratio" in kinds:   # 基準の線の名前は凡例に（線の上に書くと棒の上の数字と重なる）
@@ -300,7 +334,7 @@ def draw(keys):  # keys の面を横に並べた 1 枚の図
         else: yr = (0, max(vals + ([1] if kind == "ratio" else [])) * (1.3 if key in ("write", "nwrite") else 1.1) or 1)   # 0 から（書き込みは上のラベルの分を空ける）
         a = Ax(f, (x0 + k * (W + gap), top, x0 + k * (W + gap) + W, 760), yr=yr, cats=cats_m if mean else names, ylabel=ylab, title=title)
         if key in ("write", "nwrite"): stacked(a, key, shown, mean)
-        else: a.bars([(nm(c), COL.get(c, PAL[i % len(PAL)]), data[c], None) for i, c in enumerate(cfgs) if c in shown],
+        else: a.bars([(nm(c), colr(c), data[c], None) for i, c in enumerate(cfgs) if c in shown],
                      d=d, sign=kind == "diff")
         if kind == "ratio": a.hline(1.0, col="#4d4d4d")
     return f.svg()
@@ -340,7 +374,7 @@ def timeline(rows):  # → [(累積要求, 区間 BMR, 区間 OHR, 累積書込 
 def tl_fig(n, xkey):
     S = {c: timeline(rows) for c in cfgs if (rows := interval_rows(n, c))}
     if not S: return None
-    f = Fig(); f.add_legend([(nm(c), COL.get(c, PAL[i % len(PAL)]), "dash" if c == BASE else "line") for i, c in enumerate(cfgs) if c in S])
+    f = Fig(); f.add_legend([(nm(c), colr(c), "dash" if c == BASE else "line") for i, c in enumerate(cfgs) if c in S])
     top, x0, gap = f.legend_h() + 50, 110, 115
     if xkey == "ops":
         X = lambda p: p[0] / 1e6; xlab = T("処理した要求 [百万]", "Requests processed [M]")
@@ -358,7 +392,7 @@ def tl_fig(n, xkey):
         a = Ax(f, (x0 + k * (W + gap), top, x0 + k * (W + gap) + W, 790), xr=(0, max(xs) or 1), yr=(0, max(ys) * 1.08 or 1),
                xlabel=xlab if k == len(panel) // 2 else "", ylabel=ylab, title=title)
         for i, c in enumerate(cfgs):
-            if c in S: a.line([X(p) for p in S[c]], [p[j] for p in S[c]], COL.get(c, PAL[i % len(PAL)]), w=3, dash=c == BASE)
+            if c in S: a.line([X(p) for p in S[c]], [p[j] for p in S[c]], colr(c), w=3, dash=c == BASE)
     return f.svg()
 
 
@@ -369,24 +403,103 @@ for n in names:
         if svg:
             slug = f"fig_{xkey}_{n}"; open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(svg); tl.append(slug)
 
+# ---------------------------------------------------------------- 自分で決める値の動き（11-20）：P.knobs.csv（区間の終わりごと）
+#   閾値 τ、大の分類の下限と各分類の実際の容量の割合、n=cb の基準（名簿の限界の価値）と実質の n を、分類ごとに別の線で。
+#   線の色 = 方式、線の形 = 分類（分類 0 = 破線、分類 1 以上 = 実線）、下限 = 細い薄い線。値が時間で変わらない方式は描かない
+def knob_rows(n, c):
+    p = f"{rundir.get((n, c), f'{D}/{n}/{c}')}/P.knobs.csv"
+    if not os.path.exists(p): return None
+    R = list(csv.DictReader(open(p)))
+    if len(R) > 400: R = R[::-(-len(R) // 400)] + ([R[-1]] if (len(R) - 1) % -(-len(R) // 400) else [])   # 図は 400 点まで（最後の区間は残す）
+    return R or None
+
+
+fnum = lambda v: float(v) if v not in ("", None) else None
+KN = []   # 表：最後の 4 分の 1 の平均（大体どこに落ち着いたか）と、下限が最終値の ±0.05 に初めて入った区間
+kn = []
+for n in names:
+    KS = {c: r for c in cfgs if (r := knob_rows(n, c))}
+    KS = {c: r for c, r in KS.items() if any(r[0].get(k) for k in ("tau_1", "floor_class", "bar_0"))
+         and (len({x.get("tau_1") for x in r}) > 1 or r[0].get("floor_class") or r[0].get("bar_0") or r[-1].get("bar_0"))}
+    if not KS: continue
+    ncls = max(sum(1 for k in r[0] if k.startswith("share_")) for r in KS.values())
+    f = Fig(1600, 900)
+    f.add_legend([(nm(c), colr(c), "line") for c in KS] + [(T("分類 0（小）", "class 0 (small)"), "#555555", "dash"),
+                                                         (T("分類 1（大）", "class 1 (large)"), "#555555", "line")])
+    top, x0, gap = f.legend_h() + 50, 110, 140
+    W = (1600 - x0 - 30 - gap * 3) // 4
+    X = lambda r: int(r["t_end"]) / 1e6
+    xs = [X(r) for v in KS.values() for r in v]
+    panels = [(T("閾値 τ（log2 バイト）", "Threshold τ (log2 bytes)"), "log2 τ"),
+              (T("容量の割合と下限", "Capacity share and floor"), T("割合", "share")),
+              (T("書き直しの基準（名簿の限界の価値）", "Rewrite bar (marginal value)"), T("ヒット/バイト/滞在", "hits/byte/stay")),
+              (T("実質の n（書き直す最少のヒット数）", "Effective n (min hits to rewrite)"), "n")]
+    import math
+    def series(r, key):
+        return [(X(x), fnum(x.get(key))) for x in r]
+    for k, (title, ylab) in enumerate(panels):
+        lines = []   # (方式, xs, ys, 破線, 細い)
+        for c, r in KS.items():
+            if k == 0 and r[0].get("tau_1") is not None:
+                for i in range(1, ncls):
+                    pts = [(a, math.log2(b + 1)) for a, b in series(r, f"tau_{i}") if b is not None]
+                    if pts: lines.append((c, pts, False, False))
+            for cl in range(ncls):
+                key = {1: f"share_{cl}", 2: f"bar_{cl}", 3: f"n_{cl}"}.get(k)
+                if key is None or key not in r[0]: continue
+                if k == 1 and not (r[0].get("floor_class") or len({x.get("tau_1") for x in r}) > 1 or r[0].get("tau_1")): continue
+                pts = [(a, b) for a, b in series(r, key) if b is not None]
+                if pts: lines.append((c, pts, cl == 0, False))
+            if k == 1 and r[0].get("floor_class"):
+                pts = [(a, b) for a, b in series(r, "floor") if b is not None]
+                if pts: lines.append((c, pts, False, True))
+        ys = [y for _, p, _, _ in lines for _, y in p]
+        if not ys: continue
+        yr = (0, 1.0) if k == 1 else (min(ys) - 0.5, max(ys) + 0.5) if k in (0, 3) else (0, max(ys) * 1.1 or 1)
+        a = Ax(f, (x0 + k * (W + gap), top, x0 + k * (W + gap) + W, 790), xr=(0, max(xs) or 1), yr=yr,
+               xlabel=T("処理した要求 [百万]", "Requests processed [M]") if k == 1 else "", ylabel=ylab, title=title)
+        for c, p, dash, thin in lines:
+            a.line([q[0] for q in p], [q[1] for q in p], colr(c), w=2 if thin else 3, dash=dash, op=0.45 if thin else 1.0)
+    slug = f"fig_knobs_{n}"; open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(f.svg()); kn.append(slug)
+    for c, r in KS.items():   # 表
+        q = r[-max(1, len(r) // 4):]
+        avg = lambda key: (lambda v: sum(v) / len(v) if v else None)([fnum(x.get(key)) for x in q if fnum(x.get(key)) is not None])
+        row = dict(trace=n, config=c, label=nm(c), intervals=len(r), tau_last=r[-1].get("tau_1") or "", tau_changes=sum(
+            1 for a_, b_ in zip(r, r[1:]) if a_.get("tau_1") != b_.get("tau_1")), floor_last_q=avg("floor"))
+        fl = [fnum(x.get("floor")) for x in r]
+        if row["floor_last_q"] is not None:
+            row["floor_settle_interval"] = next((i for i, v in enumerate(fl) if v is not None and abs(v - row["floor_last_q"]) <= 0.05), "")
+        for cl in range(ncls):
+            for key in ("share", "bar", "n"): row[f"{key}_{cl}_last_q"] = avg(f"{key}_{cl}")
+        KN.append(row)
+if KN:
+    cols = list(dict.fromkeys(k for r in KN for k in r))
+    with open(f"{D}/table_knobs.csv", "w", newline="", encoding="utf-8") as fo:
+        w_ = csv.DictWriter(fo, cols); w_.writeheader(); w_.writerows(KN)
+    show = [k for k in cols if k not in ("trace", "config", "label")]
+    g = lambda v: "–" if v in (None, "") else f"{v:.3g}" if isinstance(v, float) else str(v)
+    open(f"{D}/table_knobs.md", "w", encoding="utf-8").write("\n".join(
+        [f"| {T('トレース', 'Trace')} | {T('方式', 'Config')} | " + " | ".join(show) + " |", "|---|---|" + "---|" * len(show)]
+        + [f"| {r['trace']} | {r['label']} | " + " | ".join(g(r.get(k)) for k in show) + " |" for r in KN]) + "\n\n" + T(
+        "*_last_q = 最後の 4 分の 1 の区間の平均（大体どこに落ち着いたか）。floor_settle_interval = 下限がその値の ±0.05 に初めて入った区間。"
+        "bar = 名簿の限界の価値（ヒット/バイト/滞在）、n = 書き直す最少のヒット数（9 = 書き直さない）。分類 0 = 小、1 = 大。\n",
+        "*_last_q = mean over the last quarter of the intervals (where it settled). floor_settle_interval = first interval within ±0.05 of it. "
+        "bar = marginal value from the ghost (hits/byte/stay), n = min hits to rewrite (9 = none). class 0 = small, 1 = large.\n"))
+
 # ---------------------------------------------------------------- 交換関係の図（--ext のみ）：横 = SSD 書き込み（CacheLib n=1 = 1）、縦 = ΔBMR [pt]
 #   CacheLib の n=0..3 を線でつなぐ（書き直しを増やすほど書き込みが増え BMR が下がる、という交換関係）。
 #   提案の点がその線の左下にあれば、同じ BMR を少ない書き込みで（同じ書き込みで低い BMR を）出している。
 #   S3-FIFO 型の篩（受け入れ、admit=dram:min=1/ghost=0.9）の点も重ねる：書き込みは少なく左に来るので、
 #   縦の位置を n=0（書き直しなし）の点と比べると、篩が帯域（BMR）と引き換えにどれだけ書き込みを減らしたかが分かる
 CURVE = [("r256_n0", "n=0"), ("r256_base", "n=1"), ("r256_n2", "n=2"), ("r256_n3", "n=3")]
-PTS = [("r256_auto_n1", 11, False), ("ru_auto_n1", 10, False), ("ru_auto", 11, False), ("ru_ff90_h3", 10, True), ("ru_none_auto", 8, True), ("r256_none_auto", 8, True),
-       ("r256_adm", 10, False), ("ru_adm_auto", 10, False), ("ru_adm_none_auto", 8, True), ("r256_adm_auto_n1", 10, False), ("ru_adm_auto_n1", 11, False),
-       ("r256_base_cb", 9, False), ("r256_auto_cb", 9, False), ("ru_auto_cb", 10, False), ("ru_adm_auto_cb", 9, False),
-       ("ru_v2_n1", 12, False), ("r256_v2_n1", 12, False), ("ru_adm_v2_n1", 11, False), ("ru_v2_cb", 9, False), ("ru_auto_v2", 12, False)]
-if FINAL:   # final は選んだ方式を全部（CacheLib の n=0〜3 の線以外）点で
-    PTS = [p for p in PTS if p[0] in SEL] + [(c, 9, False) for c in SEL if c not in {p[0] for p in PTS} | {c for c, _ in CURVE}]
-
+PT_BIG = {"ru_auto_v2": 12, "ru_v2_n1": 12, "r256_v2_n1": 12, "ru_auto": 11, "r256_auto_n1": 11, "ru_auto_n1": 10, "ru_adm_auto_n1": 11}   # 強調の大きさ（無ければ 9）
+PT_HOLLOW = {"ru_ff90_h3", "ru_none_auto", "r256_none_auto", "ru_adm_none_auto"}                                                 # 切り分け用は白抜き
+PTS = [(c, PT_BIG.get(c, 9), c in PT_HOLLOW) for c in cfgs if c not in {k for k, _ in CURVE}]   # 系列は全部点で（CacheLib の n=0〜3 は線）
 
 def tradeoff(keys):
     f = Fig()
     f.add_legend([(T("CacheLib（R=256MiB）n=0〜3", "CacheLib (R=256MiB) n=0..3"), "#4d4d4d", "line")] +
-                 [(nm(c), COL.get(c, "#888"), "hollow" if hol else "dot") for c, _, hol in PTS if any(c in runs[n]["runs"] for n in keys)])
+                 [(nm(c), colr(c), "hollow" if hol else "dot") for c, _, hol in PTS if any(c in runs[n]["runs"] for n in keys)])
     top = f.legend_h() + 50; cols = min(3, len(keys)); rows_ = (len(keys) + cols - 1) // cols
     W = (1600 - 110 - 30 - 115 * (cols - 1)) // cols; H = (870 - top - 70 * (rows_ - 1)) // rows_
     for i, n in enumerate(keys):
@@ -404,7 +517,7 @@ def tradeoff(keys):
         cur.sort(key=lambda t: t[0][0])
         a.line([p[0] for p, _ in cur], [p[1] for p, _ in cur], "#4d4d4d", w=3, marker=True)
         for p, lab in cur: f.t(a.X(p[0]) + 10, a.Y(p[1]) - 10, lab, 18, "start", "#4d4d4d")
-        for p, c, r, hol in dots: a.dot(p[0], p[1], COL.get(c, "#888"), r, hollow=hol)
+        for p, c, r, hol in dots: a.dot(p[0], p[1], colr(c), r, hollow=hol)
     return f.svg()
 
 
@@ -456,7 +569,7 @@ for n in names:
     w0 = max(base[0]["flash_region_write_bytes"], full_w * 1e-3, 1)
     grid = sorted({idx_of(min(full_w, w0 * (full_w / w0) ** (k / 59))) for k in range(60)})
     xs = [base[i]["flash_region_write_bytes"] / 1e12 for i in grid]
-    f = Fig(); f.add_legend([(nm(c), COL.get(c, PAL[j % len(PAL)]), "line") for j, c in enumerate(others) if c in C] + [(T("指定した書き込み量", "write marks"), "#c0504a", "dash")])
+    f = Fig(); f.add_legend([(nm(c), colr(c), "line") for j, c in enumerate(others) if c in C] + [(T("指定した書き込み量", "write marks"), "#c0504a", "dash")])
     top = f.legend_h() + 50
     for k, (title, ylab, fn, ref) in enumerate([
             (T("ΔBMR（CacheLib 比、下が良い）", "ΔBMR vs. CacheLib (lower is better)"), "ΔBMR [pt]", lambda c, i: at(C[c][i])[0] - at(base[i])[0], 0.0),
@@ -468,7 +581,7 @@ for n in names:
                xlabel=T("CacheLib が SSD に書いた量 [TB]（= 先頭の部分トレースの長さ）", "Bytes CacheLib wrote to SSD [TB] (= prefix length)"), ylabel=ylab, title=title)
         a.hline(ref, col="#4d4d4d")
         for j, c in enumerate(others):
-            if c in C: a.line(xs, ys[c], COL.get(c, PAL[j % len(PAL)]), w=3)
+            if c in C: a.line(xs, ys[c], colr(c), w=3)
         for w in marks: a.vline(w / 1e12, label=f"{w / 1e12:g}TB")
     slug = f"fig_marks_{n}"; open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(f.svg()); mk.append(slug)
 if mrows:
@@ -482,7 +595,7 @@ if mrows:
     open(f"{D}/table_marks.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
         "各セル = ΔBMR [pt]（構成 − CacheLib）/ 書き込みの比（構成 ÷ CacheLib）。印 = CacheLib の累積 SSD 書き込みがその量に達した時点（先頭の割合 = そこまでの要求の割合）。✗ = 全量と差の向きが違う。\n",
         "Each cell: ΔBMR [pt] (config − CacheLib) / write ratio (config ÷ CacheLib), at the point where CacheLib has written that much to the SSD. ✗ = sign differs from the full trace.\n"))
-png = to_png(D, list(FIGS) + tl + tr + mk)
+png = to_png(D, list(FIGS) + tl + tr + mk + kn)
 
 # ---------------------------------------------------------------- 説明のページ
 def mean_of(fn, c):
@@ -508,7 +621,12 @@ img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}
 青 = RU＋書き込み時のサイズ分類（手動 / 自動）。橙 = 256 MiB＋分類（分類の効果が Region の大きさによらないかの確認）。</p>
 """ + ("<h2>補足：時間変化</h2><p class='m'>fig_ops_* = 横軸が処理した要求数（BMR・OHR は区間ごと、SSD 書き込みは累積）。"
        "fig_wr_* = 横軸がその構成の累積 SSD 書き込み量（BMR・OHR はそこまでの累積。同じ量を書いた時点での比較）。破線 = 基準。</p>"
-       + "".join(f'<h3>{s}</h3><img src="{s}.svg" alt="{s}">' for s in tl) if tl else "") + f"""
+       + "".join(f'<h3>{s}</h3><img src="{s}.svg" alt="{s}">' for s in tl) if tl else "") + (
+    "<h2>自分で決める値の動き：fig_knobs_&lt;trace&gt;.svg</h2><p class='m'>左から 閾値 τ、各分類の容量の割合と大の分類の下限（細い薄い線）、"
+    "書き直しの基準（名簿の限界の価値）、実質の n（その時点で書き直す最少のヒット数。CacheLib の n に当たる）。色 = 方式、破線 = 分類 0（小）、実線 = 分類 1（大）。下限は同じ色の細い薄い線（大の分類が最低限持つ割合）、割合は封じた Region のうちその分類の物の割合。"
+    "どこに落ち着いたかは table_knobs.md（最後の 4 分の 1 の平均と、下限が落ち着いた区間）。</p>"
+    + "".join(f'<h3>{s_}</h3><img src="{s_}.svg" alt="{s_}">' for s_ in kn)
+    + (f"<pre>{open(f'{D}/table_knobs.md', encoding='utf-8').read()}</pre>" if KN else "") if kn else "") + f"""
 """ + ("<h2>書き込み量の印での結果（部分トレースで足りるか）</h2><p class='m'>fig_marks_&lt;trace&gt;：横 = CacheLib が SSD に書いた量（先頭の部分トレースの長さ）、縦 = ΔBMR と書き込みの比。"
        "線が右端（全量）の値に早く落ち着き、赤い縦線（指定した書き込み量）の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。数値は table_marks.md / .csv（✗ = 全量と向きが違う）。</p>"
        + "".join(f'<img src="{s_}.svg" alt="{s_}">' for s_ in mk) + (f"<pre>{open(f'{D}/table_marks.md', encoding='utf-8').read()}</pre>" if mrows else "") if mk else "") + f"""

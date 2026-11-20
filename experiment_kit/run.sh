@@ -17,13 +17,14 @@
 #   paper-robust [name..]  頑健性の確認（PAPER_ROBUST_METHODS）                    → work/paper/robust/
 #   paper [name..]         検討用の全部（PAPER_METHODS）                           → work/paper/
 #   paper-ext [name..]     CacheLib の書き直しの閾値違い（PAPER_EXT_METHODS）        → work/paper/ext/
+#   paper-sens [name..]    感度：SSD 容量・DRAM・RU を一つずつ変える（PAPER_SENS_METHODS × SENS_*）→ work/paper/sens/
 #                          （final 系は paper・ext の場所に回して結果を共有し、図と表だけ final*/ に出す）
 #   all                    setup → validity → synth → aggregate
 # 図と表だけ作り直す（回さない）
 #   aggregate [--by category,source]   validity・tune の集計（CSV と report.html）  → work/results/
 #   tune-figs              tune の図                                              → work/tune/figs/
 #   che-report             che の表と図                                            → work/che/report.html
-#   paper-figs [--final2 | --final | --ext | --robust]  paper の図と表（引数なし = 結果のあるもの全部）
+#   paper-figs [--final2 | --final | --ext | --robust | --sens]  paper の図と表（引数なし = 結果のあるもの全部）
 set -u
 KIT=$(cd "$(dirname "$0")" && pwd)
 . "$KIT/config.sh"
@@ -281,7 +282,8 @@ trace_cfg() {  # trace_cfg <name> <path> <fmt> <params> <ssd指定>: tune / che 
   [ -s "$O/$var/info.json" ] || env $SENV "$B/og_info" "$tr" > "$O/$var/info.json" || die "$name: og_info 失敗"
   fp=$(jq1 "$O/$var/info.json" footprint)
   fp=$(awk -v f="$fp" -v k="${TR_AMP_KEY:-1}" -v a="${TR_AMP_SIZE:-1}" 'BEGIN{printf "%.0f", f * k * a}')   # 増幅したトレースのフットプリント
-  SSD=$(ssd_bytes "$5" "$fp"); DRAM=$((SSD / DRAM_DIV))
+  SSD=$(ssd_bytes "$5" "$fp"); [ -n "${SSD_MULT:-}" ] && SSD=$(awk -v s="$SSD" -v m="$SSD_MULT" 'BEGIN{printf "%.0f", s * m}')   # paper-sens
+  DRAM=$((SSD / DRAM_DIV))
   R=${REGION_BYTES:-$((SSD / REGION_N / 1048576 * 1048576))}; [ $R -lt 1048576 ] && R=1048576
   CH=$(numfmt --from=iec "$CHUNK"); [ $CH -gt $R ] && CH=$R
   u=$(awk -v n="$(jq1 "$O/$var/info.json" uniq)" -v k="${TR_AMP_KEY:-1}" 'BEGIN{printf "%.0f", n * k}')   # amp_key 倍の物（メモリも K 倍）
@@ -362,19 +364,30 @@ EOF
   done
 }
 tune_figs() { TUNE_W=$TUNE_W python3 "$KIT/py/tune_figs.py" "$WORK" "$@"; }
+paper_refresh() {  # 11-20: 図の系列 = いまの config.sh の選択。結果のある組の methods.tsv を、回さずに作り直す（カタログに無い id があれば止まる）
+  local g v r sub sel dir b
+  for g in "PAPER_METHODS paper base" "PAPER_EXT_METHODS paper/ext -" "PAPER_FINAL_METHODS paper/final base" "PAPER_FINAL2_METHODS paper/final2 base" "PAPER_ROBUST_METHODS paper/robust -" "PAPER_SENS_METHODS paper/sens base"; do
+    v=${g%% *}; r=${g#* }; sub=${r%% *}; b=${r##* }; sel=${!v}; dir=$WORK/$sub
+    [ -d "$dir" ] && [ -n "$(ids_of "$sel")" ] || continue
+    ( paper_pick "$sel" "$dir" "$b" ) 2>&1 | grep -v '方式（' >&2 || true
+  done
+}
 paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。--ext / --robust ならその部分だけ
   local robust_all=0
+  paper_refresh
   if [ $# -eq 0 ]; then
     python3 "$KIT/py/paper_figs.py" "$WORK" || return
     ls "$WORK"/paper/ext/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_figs.py" "$WORK" --ext
     [ -s "$WORK/paper/final/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final
     [ -s "$WORK/paper/final2/methods.tsv" ] && python3 "$KIT/py/paper_figs.py" "$WORK" --final2
+    ls "$WORK"/paper/sens/*/*.json >/dev/null 2>&1 && python3 "$KIT/py/paper_sens_figs.py" "$WORK"
     ls "$WORK"/paper/robust/*.json >/dev/null 2>&1 && robust_all=1
   fi
   if [ $robust_all = 1 ] || [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
     python3 "$KIT/py/paper_robust_figs.py" "$WORK"
     local c; for c in $(ids_of "$PAPER_ROBUST_METHODS" | grep -oE '_(c0m|c0|f1|s[0-9]+)$' | tr -d _ | sort -u); do   # 選んだ方式の条件ごと
       python3 "$KIT/py/paper_figs.py" "$WORK" --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
+  elif [[ " $* " == *" --sens "* ]]; then python3 "$KIT/py/paper_sens_figs.py" "$WORK"
   elif [ $# -gt 0 ]; then python3 "$KIT/py/paper_figs.py" "$WORK" "$@"; fi
 }
 
@@ -443,18 +456,34 @@ paper_final() {  # 論文の本番用（PAPER_FINAL_METHODS）。結果は paper
   paper_set "$main" "$WORK/paper" base "$F/run_paper.tsv" "$@"        # paper の方式（work/paper/methods.tsv は変えない）
   paper_set "$ext" "$WORK/paper/ext" - "$F/run_ext.tsv" "$@"          # CacheLib の n=0・2・3 は paper-ext の場所へ
 }
+paper_sens() {  # 11-20: 感度。既定の点（work/paper と共有）と、SSD・DRAM・RU を一つずつ変えた点（work/paper/sens/<点>/）
+  local S=$WORK/paper/sens x
+  paper_pick "$PAPER_SENS_METHODS" "$S" base                                  # sens/methods.tsv = 図の並び
+  paper_set "$PAPER_SENS_METHODS" "$WORK/paper" base "$S/run_paper.tsv" "$@"  # 既定の点
+  for x in $SENS_SSD; do ( SSD_MULT=$x; sens_point "$S/ssd_x$x" 0 "$@" ) || return; done
+  for x in $SENS_DRAM; do ( DRAM_DIV=$x; sens_point "$S/dram_$x" 0 "$@" ) || return; done
+  for x in $SENS_RU; do ( REGION_BYTES=$x; sens_point "$S/ru_$((x / 1048576))M" 1 "$@" ) || return; done
+}
+sens_point() {  # sens_point <出力先> <1 = region-size を自分で持つ構成を外す（RU の点。既定の点と同じ run）> [name..]
+  local o=$1 drop=$2 s k=(); shift 2
+  paper_pick "$PAPER_SENS_METHODS" "$o" base
+  [ "$drop" = 1 ] && { for s in "${PICKED[@]}"; do [[ $s == *region-size=* ]] || k+=("$s"); done; PICKED=("${k[@]}"); }
+  [ ${#PICKED[@]} -gt 0 ] || return 0
+  RUN_JOBS=PICKED RUN_ROOT=$o each_trace tune_one "$@"
+}
 methods() {  # カタログの全部と、どの組で選ばれているか（● = 選択）
   local P E R s id sl lb bad
   P=" $(ids_of "$PAPER_METHODS" | tr '\n' ' ') $BASE_ID "; E=" $(ids_of "$PAPER_EXT_METHODS" | tr '\n' ' ') "
   R=" $(ids_of "$PAPER_ROBUST_METHODS" | tr '\n' ' ') "; local Fi=" $(ids_of "$PAPER_FINAL_METHODS" | tr '\n' ' ') $BASE_ID "
-  local F2=" $(ids_of "$PAPER_FINAL2_METHODS" | tr '\n' ' ') $BASE_ID "
-  printf '%-18s %-7s %-6s %-6s %-4s %-7s %s\n' id final2 final paper ext robust "RegionFlash の指定（| 図の名前）"
+  local F2=" $(ids_of "$PAPER_FINAL2_METHODS" | tr '\n' ' ') $BASE_ID " Se=" $(ids_of "$PAPER_SENS_METHODS" | tr '\n' ' ') $BASE_ID "
+  printf '%-18s %-7s %-6s %-6s %-4s %-7s %-5s %s\n' id final2 final paper ext robust sens "RegionFlash の指定（| 図の名前）"
   for s in "${PAPER_CATALOG[@]}"; do
     id=${s%%|*}; sl=$(cat_get "$id"); lb=${sl#*$'\t'}
-    printf '%-18s %-7s %-6s %-6s %-4s %-7s %s\n' "$id" "$([[ $F2 == *" $id "* ]] && echo yes)" "$([[ $Fi == *" $id "* ]] && echo yes)" \
-      "$([[ $P == *" $id "* ]] && echo yes)" "$([[ $E == *" $id "* ]] && echo yes)" "$([[ $R == *" $id "* ]] && echo yes)" "${sl%%$'\t'*}${lb:+ | $lb}"
+    printf '%-18s %-7s %-6s %-6s %-4s %-7s %-5s %s\n' "$id" "$([[ $F2 == *" $id "* ]] && echo yes)" "$([[ $Fi == *" $id "* ]] && echo yes)" \
+      "$([[ $P == *" $id "* ]] && echo yes)" "$([[ $E == *" $id "* ]] && echo yes)" "$([[ $R == *" $id "* ]] && echo yes)" \
+      "$([[ $Se == *" $id "* ]] && echo yes)" "${sl%%$'\t'*}${lb:+ | $lb}"
   done
-  bad=$(for id in $(ids_of "$PAPER_METHODS $PAPER_EXT_METHODS $PAPER_ROBUST_METHODS $PAPER_FINAL_METHODS $PAPER_FINAL2_METHODS"); do cat_get "$id" >/dev/null || echo "$id"; done)
+  bad=$(for id in $(ids_of "$PAPER_METHODS $PAPER_EXT_METHODS $PAPER_ROBUST_METHODS $PAPER_FINAL_METHODS $PAPER_FINAL2_METHODS $PAPER_SENS_METHODS"); do cat_get "$id" >/dev/null || echo "$id"; done)
   [ -z "$bad" ] || echo "注意: カタログに無い id が選ばれている（選択から外すか、カタログに足す）:" $bad
 }
 
@@ -484,6 +513,7 @@ case $cmd in
   paper-ext)    need_traces; need_build; paper_set "$PAPER_EXT_METHODS" "$WORK/paper/ext" - "" "$@"; paper_figs --ext ;;
   paper-final)  need_traces; need_build; paper_final "$@"; paper_figs --final ;;
   paper-final2) need_traces; need_build; PF_METHODS=$PAPER_FINAL2_METHODS PF_DIR=final2 paper_final "$@"; paper_figs --final2 ;;
+  paper-sens)   need_traces; need_build; paper_sens "$@"; paper_figs --sens ;;
   paper-robust) need_traces; need_build; paper_set "$PAPER_ROBUST_METHODS" "$WORK/paper/robust" - "" "$@"
                 python3 "$KIT/py/paper_check.py" "$WORK" --robust; paper_figs --robust ;;
   all)          setup && check && each_trace validity_one && synth && aggregate ;;

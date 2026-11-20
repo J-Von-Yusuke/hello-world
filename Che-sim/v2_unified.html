@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ru_auto_v2 の統一言語</title>
+<style>
+:root { --ink:#14213D; --body:#3D4656; --mute:#6B7486; --paper:#F7F6F2; --card:#FBFBF8; --line:#CFCBBF;
+  --blue:#2F6FB0; --orange:#D9692A; --green:#2E7D4F; --purple:#7A4FA3; --blue-soft:#DCE7F3; --orange-soft:#F6E0D2; --green-soft:#DCEFE3; --purple-soft:#E9E0F2; --bad:#B23A2E; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --green:#6CC08F; --purple:#B993E0; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --green-soft:#1D3A2A; --purple-soft:#33264A; --bad:#E07A6E; } }
+:root[data-theme="dark"] { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --green:#6CC08F; --purple:#B993E0; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --green-soft:#1D3A2A; --purple-soft:#33264A; --bad:#E07A6E; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--body); font-family:"Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif; line-height:1.8; }
+main { max-width:960px; margin:0 auto; padding:32px 16px 96px; }
+h1 { color:var(--ink); font-size:30px; margin:0 0 6px; line-height:1.3; }
+h2 { color:var(--ink); font-size:23px; margin:48px 0 12px; padding-top:14px; border-top:2px solid var(--line); }
+h3 { color:var(--ink); font-size:18px; margin:24px 0 8px; }
+p, li { font-size:16px; } ul, ol { padding-left:1.4em; } li { margin:4px 0; }
+.small { font-size:13px; color:var(--mute); }
+.box { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:14px 0; }
+.box.blue { background:var(--blue-soft); border-color:var(--blue); } .box.orange { background:var(--orange-soft); border-color:var(--orange); }
+.box.green { background:var(--green-soft); border-color:var(--green); } .box.purple { background:var(--purple-soft); border-color:var(--purple); }
+.eq { background:var(--card); border-left:6px solid var(--blue); padding:10px 18px; margin:12px 0; font-size:18px; color:var(--ink); overflow-x:auto; white-space:nowrap; }
+.eq .why { display:block; white-space:normal; font-size:14px; color:var(--mute); margin-top:4px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; }
+.tw { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; font-size:14px; font-variant-numeric:tabular-nums; margin:8px 0; }
+th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+th { color:var(--ink); }
+.good { color:var(--green); font-weight:700; } .bad { color:var(--bad); font-weight:700; }
+code { font-size:13px; }
+var { font-style:italic; font-family:"Times New Roman",serif; font-size:1.08em; color:var(--ink); }
+svg { width:100%; height:auto; display:block; } svg text { font-family:inherit; fill:var(--body); }
+nav a { color:var(--blue); }
+</style></head><body><main>
+<h1>ru_auto_v2 の統一言語：三つの判断を一つの物差しで</h1>
+<p class="small">2026-11-20。<code>ru_auto_v2_theory.html</code> の続き。ご質問の 5 点（閾値の改善・大津の式の追従・配分を二分法にしない理由・n=cb の理論式・三つのつながりの図）に答える。</p>
+<nav class="small">1 物差し ／ 2 全体の図 ／ 3 書き直しの理論式 ／ 4 配分：二分法にしない理由 ／ 5 大津の式の追従 ／ 6 st との違い ／ 7 次の一手</nav>
+
+<div class="grid">
+<div class="box blue"><b>統一言語</b><br>三つとも同じ量を比べている。「SSD に 1 バイトを 1 滞在置いたら、何回要求されるか」（ヒット密度）。違うのは<b>どこの</b>密度を見るかだけ：ビンの平均（閾値）、分類の端（配分）、書き直す物の予測（書き直し）。</div>
+<div class="box orange"><b>n=cb の式</b><br>書き直すのは、次の滞在の期待ヒット密度 <var>ĥ</var> ≥ 名簿で測った端の密度 <var>v</var> ＋ 書き込みの値段 <var>λ</var> のとき。<var>v</var> ＝ 名簿の当たりバイト ÷（0.05 × 追い出したバイト）。式の導出は §3。</div>
+<div class="box green"><b>二分法</b><br>使わない理由は四つ。容量は追い出しを通してしか動かない（遅れがある）。遠くを試すと損が大きい（w01 で 0.5 から始めると +0.73 pt）。向きを一度読み違えると最適を永久に捨てる。最適が時間で動く。ただし「粗く→細かく」の考えは、遠くへ跳ばない形（Kesten 型の歩幅）なら取り入れられる。</div>
+<div class="box purple"><b>大津の式の追従</b><br>閾値はいちばん遅い輪（配分より遅くないと配分が追いつかない）。追従は「減衰」ではなく「変化を検出したら数え直す」がよい。検出には、以前 JS ダイバージェンスで確かめた窓の長さが使える。</div>
+</div>
+<p><code>ff=0</code> はご理解の通りです。下限なし、つまり分類どうしが Region LRU の自然な配分のまま奪い合う状態から始めます。下限は、名簿が「大の分類にもっと容量があれば当たった」と言うときだけ上がります。</p>
+
+<h2>1. 物差し：1 バイト・1 滞在あたりのヒット</h2>
+<p>BMR を下げるとは、オリジンから運ぶバイトを減らすことです。ある物を SSD に置き、1 回当たると、その大きさのバイトを運ばずに済みます。これを 1 バイトあたりに直すと大きさは消え、残るのは「置いている間に何回要求されたか」だけです。SSD の場所は「バイト × 時間」で使うので、時間の単位として<b>その分類の 1 滞在</b>（追い出されるまでの平均の時間）を使います。</p>
+<div class="eq">ヒット密度 ＝ 当たったバイト ÷（置いたバイト × 滞在の回数）<span class="why">単位は「回」。1 なら、書いた 1 バイトが 1 滞在の間に平均 1 回当たったという意味。三つの判断は、すべてこの量の大小で決まる。</span></div>
+<div class="tw"><table>
+<tr><th>判断</th><th>見る密度</th><th>どこで測るか</th><th>比べ方</th><th>速さ</th></tr>
+<tr><td>① 閾値</td><td><b>平均</b>（大きさのビンごと）</td><td>要求されたバイト ÷ 書いたバイト（logreq）</td><td>対数で 2 組に分け、組の中のばらつきを最小に（大津の式）</td><td>遅い（10 万書き込みごと、4 回続いたら動く、累積）</td></tr>
+<tr><td>② 配分</td><td><b>端</b>（分類ごと）</td><td>名簿：出て間もない物へのミス</td><td>分類どうしでそろえる（大 − 他 → 下限を動かす）</td><td>中（N/2 回の追い出しごと）</td></tr>
+<tr><td>③ 書き直し</td><td><b>予測</b>（当たり回数の段ごと）</td><td>過去に書き直した物が次の滞在で当たった数</td><td>② と同じ端の密度 ＋ λ と比べる</td><td>速い（追い出す 1 個ごと）</td></tr>
+</table></div>
+<p>平均と端を使い分ける理由：閾値は「同じ LRU に入れても損が少ない物をまとめる」問題なので、組の<b>中身全体</b>の密度（平均）がそろうことが大事です。配分と書き直しは「あと 1 バイトの場所をどこに使うか」の問題なので、場所を足し引きしたときに出入りする<b>端</b>の密度が大事です。</p>
+
+<h2>2. 全体の図：データの流れと三つの輪</h2>
+<svg viewBox="0 0 920 560" role="img" aria-label="ru_auto_v2 のデータの流れ">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mute)"/></marker>
+<marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--blue)"/></marker>
+<marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--orange)"/></marker>
+<marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--green)"/></marker></defs>
+<!-- request stream -->
+<rect x="20" y="230" width="110" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+<text x="75" y="256" text-anchor="middle" font-size="14" font-weight="700">要求</text><text x="75" y="276" text-anchor="middle" font-size="12">ID・大きさ</text>
+<!-- classify -->
+<rect x="170" y="225" width="120" height="70" rx="8" fill="var(--purple-soft)" stroke="var(--purple)"/>
+<text x="230" y="252" text-anchor="middle" font-size="14" font-weight="700">分類</text><text x="230" y="272" text-anchor="middle" font-size="12">大きさ ≥ τ なら大</text>
+<line x1="130" y1="260" x2="168" y2="260" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<!-- SSD -->
+<rect x="330" y="150" width="270" height="220" rx="10" fill="var(--card)" stroke="var(--ink)"/>
+<text x="465" y="174" text-anchor="middle" font-size="14" font-weight="700">SSD（Region の LRU、全分類で共有）</text>
+<rect x="350" y="190" width="230" height="60" rx="6" fill="var(--blue-soft)" stroke="var(--blue)"/>
+<text x="465" y="214" text-anchor="middle" font-size="13">小の分類の Region</text><text x="465" y="234" text-anchor="middle" font-size="12">割合 1 − 大の割合</text>
+<rect x="350" y="262" width="230" height="60" rx="6" fill="var(--orange-soft)" stroke="var(--orange)"/>
+<text x="465" y="286" text-anchor="middle" font-size="13">大の分類の Region</text><text x="465" y="306" text-anchor="middle" font-size="12">割合 ≥ 下限 ff</text>
+<text x="465" y="352" text-anchor="middle" font-size="12">古い Region から追い出す →</text>
+<line x1="290" y1="250" x2="348" y2="220" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<line x1="290" y1="270" x2="348" y2="292" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<!-- eviction -->
+<rect x="650" y="225" width="120" height="70" rx="8" fill="var(--card)" stroke="var(--line)"/>
+<text x="710" y="252" text-anchor="middle" font-size="14" font-weight="700">追い出し</text><text x="710" y="272" text-anchor="middle" font-size="12">1 個ずつ判定</text>
+<line x1="600" y1="260" x2="648" y2="260" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<!-- rewrite back -->
+<path d="M710 225 C710 120 520 120 520 188" fill="none" stroke="var(--orange)" stroke-width="2.5" marker-end="url(#ao)"/>
+<text x="640" y="128" font-size="13" fill="var(--orange)" font-weight="700">③ 書き直し：ĥ ≥ v＋λ</text>
+<!-- ghost -->
+<rect x="650" y="400" width="250" height="80" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+<text x="775" y="426" text-anchor="middle" font-size="14" font-weight="700">名簿（出た物の ID と時刻）</text>
+<text x="775" y="446" text-anchor="middle" font-size="12">ミスが滞在の 5% 以内に来たら</text><text x="775" y="464" text-anchor="middle" font-size="12">「容量 5% 増なら当たった」</text>
+<line x1="710" y1="295" x2="740" y2="398" stroke="var(--green)" stroke-width="2" marker-end="url(#ag)"/>
+<text x="735" y="345" font-size="12" fill="var(--green)">出た物</text>
+<!-- v -->
+<rect x="360" y="420" width="220" height="60" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+<text x="470" y="444" text-anchor="middle" font-size="14" font-weight="700">端の密度 v（分類ごと）</text><text x="470" y="464" text-anchor="middle" font-size="12">名簿の当たり ÷（0.05 × 出たバイト）</text>
+<line x1="650" y1="450" x2="582" y2="450" stroke="var(--green)" stroke-width="2" marker-end="url(#ag)"/>
+<!-- v to rewrite -->
+<path d="M560 420 C640 380 700 330 712 298" fill="none" stroke="var(--green)" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ag)"/>
+<!-- v to floor -->
+<rect x="330" y="500" width="290" height="46" rx="8" fill="var(--card)" stroke="var(--green)"/>
+<text x="475" y="528" text-anchor="middle" font-size="13" font-weight="700">② 配分：大 − 他 の傾きで下限を動かす</text>
+<line x1="470" y1="480" x2="470" y2="498" stroke="var(--green)" stroke-width="2" marker-end="url(#ag)"/>
+<path d="M620 523 C640 523 640 300 582 300" fill="none" stroke="var(--green)" stroke-width="2.5" marker-end="url(#ag)"/>
+<!-- size bins -> otsu -->
+<rect x="20" y="40" width="270" height="80" rx="8" fill="var(--purple-soft)" stroke="var(--purple)"/>
+<text x="155" y="66" text-anchor="middle" font-size="14" font-weight="700">大きさのビンごとの平均密度</text>
+<text x="155" y="86" text-anchor="middle" font-size="12">要求されたバイト ÷ 書いたバイト</text><text x="155" y="104" text-anchor="middle" font-size="12">（累積で数える）</text>
+<path d="M75 230 C75 180 100 150 110 122" fill="none" stroke="var(--purple)" stroke-width="2" marker-end="url(#a)"/>
+<path d="M465 150 C465 100 380 80 292 80" fill="none" stroke="var(--purple)" stroke-width="2" marker-end="url(#a)"/>
+<text x="400" y="96" font-size="12" fill="var(--purple)">書いたバイト</text>
+<path d="M200 122 C210 170 225 190 228 223" fill="none" stroke="var(--purple)" stroke-width="2.5" marker-end="url(#a)"/>
+<text x="238" y="150" font-size="13" fill="var(--purple)" font-weight="700">① 閾値 τ</text><text x="238" y="167" font-size="12" fill="var(--purple)">（大津の式）</text>
+<!-- legend of loops -->
+<text x="20" y="556" font-size="12" fill="var(--mute)">速さ：③ 1 個ごと ＞ ② N/2 回の追い出しごと ＞ ① 10 万書き込み × 4 回</text>
+</svg>
+<p class="small">緑の線（名簿 → 端の密度 v）が、配分と書き直しで共有している物差しです。紫の線（ビンの平均密度 → 閾値）だけが別の量を使い、いちばん遅く回ります。</p>
+
+<h3>三つの輪がぶつからない理由：速さを分ける</h3>
+<p>三つは互いの結果を前提にしています。書き直しは今の配分の端の密度を使います。配分は今の分類を前提に傾きを測ります。閾値が変わると分類が入れ替わり、配分も書き直しの統計も測り直しになります。同時に同じ速さで動くと、互いの動きを雑音として拾って揺れます。そこで、<b>内側の輪ほど速く、外側の輪ほど遅く</b>します。外側から見ると、内側はいつも落ち着いた状態にあるように見えます（制御の言葉では「時間尺度の分離」、確率近似の言葉では二重時間尺度）。</p>
+<ul>
+<li>書き直し（追い出す 1 個ごと）：今の v を定数とみなしてよい。</li>
+<li>配分（N/2 回の追い出し ≒ 半周ごと）：その間に書き直しの統計は落ち着いている。</li>
+<li>閾値（累積・hold=4）：配分が新しい分類に合わせ直すより遅くないといけない。<b>だから大津の式は速く追従させにくい。</b>これが §5 の悩みの根本です。</li>
+</ul>
+
+<h2>3. 書き直し（n=cb、base=marg）の理論式</h2>
+<h3>3.1 記号（それぞれ何のために置くか）</h3>
+<div class="tw"><table>
+<tr><th>記号</th><th>意味</th><th>置く理由</th></tr>
+<tr><td><var>C</var></td><td>ある分類が持つ容量（バイト）</td><td>場所の量</td></tr>
+<tr><td><var>T</var></td><td>その分類の平均の滞在時間（要求の回数で数える）</td><td>場所を使う時間の単位</td></tr>
+<tr><td><var>D</var></td><td>測る期間の長さ（要求の回数）</td><td>数えた量を速さに直すため</td></tr>
+<tr><td><var>E</var></td><td>期間中にその分類から出たバイト（追い出し＋書き直し）</td><td>流れの量</td></tr>
+<tr><td><var>γ</var></td><td>名簿の窓の幅＝平均の滞在の 0.05 倍（<code>gfrac</code>）</td><td>容量を少しだけ足す実験の幅</td></tr>
+<tr><td><var>G</var></td><td>名簿の当たりのバイト：出てから <var>γT</var> 以内に来たミスの大きさの合計</td><td>足した容量で増えるヒット</td></tr>
+<tr><td><var>s</var>、<var>b</var></td><td>書き直すか決める物の大きさ、今の滞在で当たった回数（1〜8 以上の段）</td><td>判定の対象</td></tr>
+<tr><td><var>ĥ<sub>b</sub></var></td><td>段 <var>b</var> で書き直した物が、次の滞在で 1 バイトあたり何回当たったかの平均</td><td>得の予測（観測から）</td></tr>
+<tr><td><var>λ</var></td><td>書き込み 1 バイトの値段（ヒット密度に換算。既定 0）</td><td>書き込み寿命の費用</td></tr>
+</table></div>
+
+<h3>3.2 導出（5 段）</h3>
+<p><b>段 1：リトルの法則。</b>容量は「流れの速さ × 滞在時間」です。</p>
+<div class="eq"><var>C</var> ＝（<var>E</var> ÷ <var>D</var>）× <var>T</var><span class="why">1 秒に入って出ていくバイト × 1 個がいる時間 ＝ いつも中にいるバイト。仮定は「入る量と出る量が釣り合っている」だけ。</span></div>
+
+<p><b>段 2：名簿は「容量を γ 倍だけ足す実験」。</b>容量を <var>γC</var> 足すと、段 1 から滞在が <var>γT</var> 延びます（流れの速さは同じとみなす）。延びた分だけ長くいれば当たった物とは、出てから <var>γT</var> 以内にまた要求された物です。それを数えたのが <var>G</var> なので：</p>
+<div class="eq">容量 <var>γC</var> を足したときに増えるヒットのバイト ≒ <var>G</var><span class="why">LRU では、出る順番は「最後に使われた順」なので、延長した分は端（最も長く使われていない物）から順に救われる。だから G は平均ではなく端の価値を測っている。</span></div>
+
+<p><b>段 3：端の密度に直す。</b>足した容量 <var>γC</var> を期間 <var>D</var> の間使ったので、使った場所は「バイト × 時間」で <var>γC·D</var>。1 滞在 <var>T</var> を単位にすると <var>γC·D/T</var> ＝ <var>γE</var>（段 1 を代入）。だから：</p>
+<div class="eq"><var>v</var> ＝ <var>G</var> ÷（<var>γ</var> × <var>E</var>）<span class="why">「端の 1 バイトを 1 滞在置いたら何回当たるか」。コードの <code>rf_re_base</code>（base=marg）は gh_b ÷（gfrac × ev_b）で、これと同じ。C も T も D も消え、数えるのは名簿の当たりバイトと出たバイトだけ。</span></div>
+
+<p><b>段 4：書き直しの損得。</b>追い出す物（<var>s</var> バイト、段 <var>b</var>）を書き直すと：</p>
+<ul>
+<li>得：次の滞在で <var>ĥ<sub>b</sub></var> × <var>s</var> バイトのヒット。</li>
+<li>場所の費用：SSD は満杯なので、書き直した <var>s</var> バイトが 1 滞在いる間、代わりに端の <var>s</var> バイトが早く追い出されます。言いかえると、書き直さなければその分類は <var>s</var> バイト多い容量を 1 滞在使えた。その価値は段 3 から <var>v</var> × <var>s</var>。</li>
+<li>書き込みの費用：<var>λ</var> × <var>s</var>。</li>
+</ul>
+<div class="eq">書き直す ⇔ <var>ĥ<sub>b</sub></var> × <var>s</var> ≥ <var>v</var> × <var>s</var> ＋ <var>λ</var> × <var>s</var> ⇔ <b><var>ĥ<sub>b</sub></var> ≥ <var>v</var> ＋ <var>λ</var></b><span class="why">3 項とも s に比例するので大きさが消える。比べるのは密度だけ。</span></div>
+
+<p><b>段 5：<var>ĥ<sub>b</sub></var> の推定。</b>段 <var>b</var> で書き直した物が次に出ていくとき、その滞在で当たった回数 <var>h</var> を数えます：</p>
+<div class="eq"><var>ĥ<sub>b</sub></var> ＝ Σ（<var>h</var> × <var>s</var>）÷ Σ <var>s</var>（段 <var>b</var> で書き直した物について）<span class="why">コードの re_hb ÷ re_sb。バイトで重みを付けた平均なので、BMR の目的と単位がそろう。段ごとに 32 件たまるまでは書き直す（学習中）。</span></div>
+
+<h3>3.3 なぜ「端」と比べるのが正しいか（base の意味）</h3>
+<svg viewBox="0 0 860 210" role="img" aria-label="LRU の端と書き直しの機会費用">
+<rect x="40" y="60" width="640" height="56" rx="6" fill="var(--card)" stroke="var(--line)"/>
+<defs><linearGradient id="gr" x1="0" x2="1"><stop offset="0" stop-color="var(--orange)" stop-opacity="0.85"/><stop offset="1" stop-color="var(--orange)" stop-opacity="0.12"/></linearGradient></defs>
+<rect x="40" y="60" width="640" height="56" rx="6" fill="url(#gr)"/>
+<text x="50" y="50" font-size="13">新しい（最近使われた）</text><text x="680" y="50" text-anchor="end" font-size="13">古い＝端（次に追い出される）</text>
+<text x="360" y="93" text-anchor="middle" font-size="13" fill="var(--ink)">中身の密度：左ほど高い（よく使われる物ほど前にいる）</text>
+<rect x="600" y="60" width="80" height="56" fill="none" stroke="var(--green)" stroke-width="3"/>
+<text x="640" y="140" text-anchor="middle" font-size="13" fill="var(--green)" font-weight="700">端の密度 v</text>
+<text x="640" y="158" text-anchor="middle" font-size="12" fill="var(--green)">書き直しで押し出される物</text>
+<path d="M720 88 C790 88 790 20 400 20 C60 20 40 40 44 56" fill="none" stroke="var(--orange)" stroke-width="2" marker-end="url(#ao)"/>
+<text x="760" y="70" font-size="13" fill="var(--orange)">書き直し</text>
+<text x="40" y="190" font-size="13">平均（base=all・first）と比べると、押し出されるのが端の物なのに「中身全体」の価値を費用に数えてしまい、厳しすぎる。</text>
+</svg>
+<div class="tw"><table>
+<tr><th>base</th><th>比べる <var>v</var></th><th>意味</th><th>nha の結果（CacheLib n=1 との差）</th></tr>
+<tr><td><code>marg</code>（採用）</td><td>名簿の端の密度（分類ごと）</td><td>段 4 の場所の費用そのもの</td><td>答えは n=1 とほぼ同じ（−0.127 pt・NAND 0.696）</td></tr>
+<tr><td><code>first</code></td><td>初めて書いた物の平均の密度</td><td>新しく書く物と場所を争うとみなす近似。より厳しい</td><td>NAND 0.647、BMR −0.081（書き込みを減らす側）</td></tr>
+<tr><td><code>all</code></td><td>全部の滞在の平均の密度</td><td>中身全体と比べる。厳しすぎる</td><td>—</td></tr>
+<tr><td><code>gmarg</code></td><td>全分類をまとめた名簿の端の密度</td><td>Region LRU は分類をまたいで追い出す、という見方</td><td>—</td></tr>
+</table></div>
+
+<h3>3.4 数字で見ると：なぜ CacheLib の n=1 になるのか</h3>
+<svg viewBox="0 0 760 230" role="img" aria-label="段ごとの次の滞在の密度と端の密度">
+<line x1="60" y1="190" x2="720" y2="190" stroke="var(--line)"/><line x1="60" y1="20" x2="60" y2="190" stroke="var(--line)"/>
+<text x="30" y="194" font-size="11">0</text><text x="30" y="126" font-size="11">2</text><text x="30" y="58" font-size="11">4</text>
+<rect x="100" y="175.0" width="60" height="15.0" fill="var(--orange)"/><text x="130" y="168" text-anchor="middle" font-size="12">0.44</text><text x="130" y="210" text-anchor="middle" font-size="12">1 回</text>
+<rect x="190" y="160.4" width="60" height="29.6" fill="var(--orange)"/><text x="220" y="153" text-anchor="middle" font-size="12">0.87</text><text x="220" y="210" text-anchor="middle" font-size="12">2 回</text>
+<text x="400" y="150" text-anchor="middle" font-size="12" fill="var(--mute)">…（段が上がるほど高い）</text>
+<rect x="580" y="21.0" width="60" height="169.0" fill="var(--orange)"/><text x="610" y="16" text-anchor="middle" font-size="12">4.97</text><text x="610" y="210" text-anchor="middle" font-size="12">8 回以上</text>
+<rect x="60" y="180.8" width="660" height="2.0" fill="var(--green)"/>
+<text x="400" y="174" text-anchor="middle" font-size="12" fill="var(--green)" font-weight="700">端の密度 v ≈ 0.21〜0.27</text>
+<text x="390" y="228" text-anchor="middle" font-size="12">今の滞在で当たった回数の段（nha 大の分類）</text>
+</svg>
+<p>どの段も端の密度より高いので、1 回以上当たった物は全部書き直されます。つまり、CacheLib の経験則 n=1 は「λ=0 の損得」から出てきます。0 回の物は書き直しません（コードでも h=0 は対象外）。実測でも、ru_auto_v2 の書き直しは n=1 版とほぼ同じでした（nha 8.86 TB 対 8.91 TB、BMR の差 0.001 pt）。n=cb の価値は、n=1 を言い当てることそのものより、<b>λ を入れると同じ式のまま書き込みを減らす向きに動く</b>ことと、ワークロードが変わって端の密度が上がれば自動で厳しくなることにあります。</p>
+
+<h2>4. 配分：二分法にしなかった理由と、取り入れられる形</h2>
+<h3>4.1 実際の動き（下限 0 から出発）</h3>
+<svg viewBox="0 0 640 250" role="img" aria-label="nha の下限の推移">
+<line x1="40" y1="200" x2="590" y2="200" stroke="var(--line)"/><line x1="40" y1="20" x2="40" y2="200" stroke="var(--line)"/>
+<text x="12" y="204" font-size="11">0</text><text x="6" y="114" font-size="11">0.5</text><text x="12" y="24" font-size="11">1</text>
+<line x1="40" y1="76.3" x2="590" y2="76.3" stroke="var(--green)" stroke-dasharray="5 4"/><text x="588" y="70" text-anchor="end" font-size="12" fill="var(--green)">最後の 4 分の 1 の平均 0.687</text>
+<polyline fill="none" stroke="var(--orange)" stroke-width="2.5" points="40,200 73.75,140.6 107.5,104.6 141.25,102.8 175,90.2 208.75,90.2 242.5,81.2 276.25,88.4 310,84.8 343.75,77.6 377.5,66.8 411.25,84.8 445,70.4 478.75,79.4 512.5,72.2 546.25,75.8 580,81.2"/>
+<line x1="182.3" y1="20" x2="182.3" y2="200" stroke="var(--mute)" stroke-dasharray="3 3"/><text x="186" y="36" font-size="12">窓 97：±0.05 に入る</text>
+<text x="315" y="230" text-anchor="middle" font-size="12">配分の窓（N/2 回の追い出し）、全 379 窓</text>
+</svg>
+<div class="tw"><table>
+<tr><th>トレース</th><th>窓の数（全体）</th><th>最後の下限</th><th>±0.05 に入った窓</th></tr>
+<tr><td>nha</td><td>379</td><td>0.69</td><td>97（約 4 分の 1）</td></tr>
+<tr><td>Tencent（縮小版）</td><td>78</td><td>0.21</td><td>5</td></tr>
+<tr><td>w01</td><td>5</td><td>0.06</td><td>1</td></tr>
+<tr><td>msr</td><td>5</td><td>0.16</td><td>3（まだ登っている途中）</td></tr>
+</table></div>
+<p class="small">ru_auto_v2（move=2）、種 0。<code>~/ttab/*/v2_s0.json</code> の report の trace から。</p>
+
+<h3>4.2 二分法が合わない四つの理由</h3>
+<ol>
+<li><b>容量は追い出しを通してしか動かない（遅れ）。</b>下限を 0.5 にしても、大の分類の Region が実際に増えるのは、他の分類の Region が追い出されて大の分類が書き込むときです。新しい割合に落ち着くまで約 1 周かかります。二分法は「試した点で符号を読む」ので、読むのは落ち着く前の、前の点の状態です。落ち着くまで待つと、1 回の試しに 1 周以上かかります。</li>
+<li><b>遠くを試すと損が大きい。</b>二分法の最初の試しは真ん中（0.5）です。w01 は大の分類の物がほぼ一度きりの物なので、0.5 を与えると無駄な物で場所が埋まり、戻すのにまた 1 周かかります。w01 では 0.5 から出発すると +0.73 pt、0 から出発すると −3.78 pt でした。全体で 5 窓しかないトレースでは、1 回の遠い試しが結果をそのまま決めます。</li>
+<li><b>向きを一度読み違えると、最適を永久に捨てる。</b>二分法は区間を捨てながら進みます。名簿の傾きには雑音があるので（平滑して使っている）、初めの数回で一度でも符号を間違えると、最適を含む側を捨て、二度と戻りません。雑音に強い二分法（確率的二分法）もありますが、同じ点を何度も測るので、遅れのある系では遅くなります。</li>
+<li><b>最適が時間で動く。</b>二分法は区間を縮め切ったら終わりで、負荷が変わったときに追いかけられません。今の傾きに比例した一歩は、いつでも動き続けます。</li>
+</ol>
+<p>「粗く速く → 細かく」の考えは、すでに一部入っています。move=2 は、下限が効いていない間（自然な割合より下）で傾きが強く正なら、今の割合との差を毎窓半分詰めます。これは「動ける区間を毎回半分にする」という点で二分法に近い動きです。しかも、自然な割合という<b>実際に今ある点</b>までしか跳ばないので、遅れと遠い試しの損がありません。</p>
+
+<h3>4.3 取り入れられる形：Kesten 型の歩幅</h3>
+<div class="box green">
+<b>案</b>：同じ向きの傾きが続く間は歩幅を倍にし（粗く）、向きが反転したら半分にする（細かく）。最初は 0.02 から始め、上限（例 0.16）と下限（例 0.005）を置く。<br>
+二分法の「行き過ぎたら幅を半分にする」部分だけを取り、遠くへは跳ばない形です。確率近似の Kesten の規則（1958）と同じ考えで、雑音で一度反転しても歩幅が半分になるだけで、区間は捨てません。負荷が変われば、同じ向きが続くのでまた歩幅が伸びます。
+</div>
+<p>期待できる得は正直に言うと小さいです。nha で最適に届くまでの 97 窓は、数十窓まで縮むと見込みます。ただし、0 から登る遅れで失っている分は 0.016〜0.02 pt です。w01・msr は全部で 5 窓なので、どの探し方でもほとんど変わりません。msr は 5 窓で 0.16 まで登っている途中で終わっており、歩幅を伸ばすと、名簿の向きと結果が合わないという未解決の問題がそのまま大きく出るおそれがあります。</p>
+
+<h2>5. 大津の式の追従：減衰ではなく「変化したら数え直す」</h2>
+<p>累積にした理由は、閾値が動くこと自体が損だからです（書き込み中の Region を封じ直し、配分と書き直しの統計も測り直し）。減衰させると、w01 で 57 回往復して −2.33 pt でした。累積なら 7 回で −3.59 pt です。さらに §2 のとおり、閾値は配分より遅くないといけません。だから、ふだんの小さな揺れに追従するのは目的に反します。追従が必要なのは<b>分布が本当に変わったとき</b>だけです。</p>
+<svg viewBox="0 0 860 200" role="img" aria-label="変化検出による数え直し">
+<rect x="20" y="40" width="250" height="70" rx="8" fill="var(--purple-soft)" stroke="var(--purple)"/>
+<text x="145" y="68" text-anchor="middle" font-size="13" font-weight="700">累積の表（今の閾値の元）</text><text x="145" y="90" text-anchor="middle" font-size="12">ビンごとの要求バイト・書いたバイト</text>
+<rect x="20" y="125" width="250" height="60" rx="8" fill="var(--card)" stroke="var(--purple)" stroke-dasharray="5 4"/>
+<text x="145" y="150" text-anchor="middle" font-size="13" font-weight="700">最近の窓の表</text><text x="145" y="170" text-anchor="middle" font-size="12">長さ＝JS で確かめた窓</text>
+<rect x="320" y="80" width="240" height="70" rx="8" fill="var(--card)" stroke="var(--ink)"/>
+<text x="440" y="108" text-anchor="middle" font-size="13" font-weight="700">JS ダイバージェンス</text><text x="440" y="130" text-anchor="middle" font-size="12">窓の自己の揺れより大きいか</text>
+<line x1="270" y1="75" x2="318" y2="105" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<line x1="270" y1="155" x2="318" y2="128" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<rect x="610" y="30" width="230" height="56" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+<text x="725" y="54" text-anchor="middle" font-size="13">小さい：累積のまま</text><text x="725" y="74" text-anchor="middle" font-size="12">（今の動きと同じ）</text>
+<rect x="610" y="120" width="230" height="56" rx="8" fill="var(--orange-soft)" stroke="var(--orange)"/>
+<text x="725" y="144" text-anchor="middle" font-size="13">大きい：累積を窓で置き換え</text><text x="725" y="164" text-anchor="middle" font-size="12">大津の式を即時に計算し直す</text>
+<line x1="560" y1="105" x2="608" y2="62" stroke="var(--green)" stroke-width="2" marker-end="url(#ag)"/>
+<line x1="560" y1="125" x2="608" y2="146" stroke="var(--orange)" stroke-width="2" marker-end="url(#ao)"/>
+</svg>
+<ul>
+<li><b>検出の基準を決め打ちにしない方法</b>：最近の窓を前半と後半に分け、その間の JS ダイバージェンスを「窓の自己の揺れ」として数えておきます。累積と窓の差がその数倍（例 3 倍）を超えたら変化とみなします。窓の長さは、以前「十分長くすれば全体の分布と区別できる」と確かめた長さを使えます。</li>
+<li><b>数え直した後</b>は hold=4 を飛ばして一度だけ動かし、その後は再び累積で落ち着かせます。名簿の配分は閾値の変化を受けて自然に測り直すので、配分の側は変えなくてよいはずです。</li>
+<li><b>見込み</b>：大きさの分布が途中で変わる合成負荷（今は分けない CacheLib に負ける）が、この案の効き目を確かめる場所です。定常なトレース（nha・w01・Tencent）では検出が起きず、今と同じ結果になるはずです。これも確かめる必要があります。</li>
+</ul>
+
+<h2>6. st との違い：なぜ BMR・OHR ともに改善するのか</h2>
+<p>st の閾値（既定 lambda=0）は、数で数えた大きさの中央値と、バイトで数えた中央値の、対数の真ん中です。大きさの分布だけを見ていて、<b>どの大きさがどれだけ再利用されるか（密度）を見ていません</b>。たいていのトレースで「数は小さい物、バイトは大きい物が占める」ので、その真ん中は密度の切れ目と 1〜2 オクターブの範囲で重なることが多く、だからそこそこ当たっていました。st は「密度の切れ目は、数とバイトの重心の間にあることが多い」という経験則として良い手段です。外れるのは、nha の 50 MiB の塊のように、大きさの分布と密度の分布が食い違う所です。logreq の大津の式は密度そのものを分けるので、組の中の密度がそろいます。すると同じ LRU の年齢が組の中で合うようになり、小さい物（OHR を稼ぐ）と大きい物（BHR を稼ぐ）がお互いの場所を食わなくなります。BMR と OHR が同時に良くなるのはこのためです。</p>
+
+<h2>7. 次の一手（試していない）</h2>
+<div class="tw"><table>
+<tr><th>案</th><th>変える所</th><th>確かめる場所</th><th>見込み</th></tr>
+<tr><td>Kesten 型の歩幅</td><td>region_basic.c の auto=2 の一歩（向きが続けば倍、反転で半分）</td><td>nha・Tencent・w01・msr</td><td>nha の収束 97 窓 → 数十窓。BMR の得は 0.02 pt 以下。msr は悪化に注意</td></tr>
+<tr><td>JS で変化を検出して数え直す</td><td>st_otsu.c に最近の窓の表と検出を足す</td><td>大きさが途中で変わる合成負荷、と定常の 3 本</td><td>合成負荷で分けない CacheLib との差を縮める。3 本は変化なしのはず</td></tr>
+</table></div>
+<p class="small">関連：<code>ru_auto_v2_theory.html</code>（各部品の詳細）、<code>reinsert_cb_slides.html</code>（n=cb の経緯）、<code>summary_1120.html</code>（数字の一覧）。</p>
+</main></body></html>

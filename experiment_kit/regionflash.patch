@@ -521,10 +521,10 @@ index 9c32668..fdeb31f 100644
  #ifdef __cplusplus
 diff --git a/libCacheSim/cache/eviction/flash/RegionFlash.c b/libCacheSim/cache/eviction/flash/RegionFlash.c
 new file mode 100644
-index 0000000..7f6f20e
+index 0000000..4d4b425
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/RegionFlash.c
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,526 @@
 +//
 +//  RegionFlash.c — DRAM (object unit) + SSD two-tier flash cache, ported from
 +//  cachesim (docs/re-DESIGN.md §1, §6).
@@ -861,6 +861,7 @@ index 0000000..7f6f20e
 +    fclose(p->f_iv);
 +    fclose(p->f_ivc);
 +    fclose(p->f_ivs);
++    fclose(p->f_kn);
 +  }
 +  if (getenv("RF_ENDDUMP")) {  // 計測用：終了時に残っている Region（状態 分類 封じた時刻 touch 数 物ID...）
 +    FILE *f = fopen(getenv("RF_ENDDUMP"), "w");
@@ -2421,10 +2422,10 @@ index 0000000..212159d
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/core/rf_report.c b/libCacheSim/cache/eviction/flash/core/rf_report.c
 new file mode 100644
-index 0000000..adef7f4
+index 0000000..8f4787d
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/core/rf_report.c
-@@ -0,0 +1,391 @@
+@@ -0,0 +1,436 @@
 +//
 +//  rf_report.c — RegionFlash's counters out: the end-of-run table, P.json,
 +//  P.class.csv, P.sizebin.csv, the per-interval CSVs, and the size-bin views
@@ -2577,7 +2578,51 @@ index 0000000..adef7f4
 +  return f;
 +}
 +
++/* P.knobs.csv (11-20): what the self-tuning parts have chosen, at each interval end, one column per class where the value is
++ * per class. tau_i = the hint's i-th bound (empty if it has fewer now), floor = the lower bound of class floor_class's share
++ * (fraction of N; empty if the region policy has none), share_c = class c's sealed regions / N, bar_c = n=cb's bar of class c
++ * (hits per byte per stay, without lambda; empty if not n=cb or no data yet), n_c = the smallest hit count whose bucket passes
++ * the bar now (still-learning buckets pass; 9 = none: n=cb's counterpart of CacheLib's n), lambda = the write price */
++static void rf_knobs_open(rf_params_t *p) {
++  p->f_kn = rf_open(p, ".knobs.csv");
++  fputs("interval,t_end,n_tau", p->f_kn);
++  for (uint32_t i = 1; i < p->kmax; i++) fprintf(p->f_kn, ",tau_%u", i);
++  fputs(",floor_class,floor", p->f_kn);
++  for (uint32_t c = 0; c < p->kmax; c++) fprintf(p->f_kn, ",share_%u", c);
++  for (uint32_t c = 0; c < p->kmax; c++) fprintf(p->f_kn, ",bar_%u", c);
++  for (uint32_t c = 0; c < p->kmax; c++) fprintf(p->f_kn, ",n_%u", c);
++  fputs(",lambda\n", p->f_kn);
++}
++
++static void rf_knobs_row(rf_params_t *p) {
++  uint32_t cnt[RF_KMAX] = {0};
++  double ff = 0;
++  int fc = p->rops && p->rops->floor ? p->rops->floor(p->rpol, &ff) : -1;
++  for (uint32_t r = 0; r < p->N; r++)
++    if (p->reg[r].state == RF_R_SEALED && p->reg[r].cls < RF_KMAX) cnt[p->reg[r].cls]++;
++  fprintf(p->f_kn, "%llu,%lld,%u", (unsigned long long)p->n_ival, (long long)p->t, p->ntau);
++  for (uint32_t i = 0; i + 1 < p->kmax; i++)
++    if (i < p->ntau) fprintf(p->f_kn, ",%lld", (long long)p->taus[i]); else fputc(',', p->f_kn);
++  if (fc >= 0) fprintf(p->f_kn, ",%d,%.4f", fc, ff); else fputs(",,", p->f_kn);
++  for (uint32_t c = 0; c < p->kmax; c++) fprintf(p->f_kn, ",%.4f", p->N ? (double)cnt[c] / p->N : 0.0);
++  for (uint32_t c = 0; c < p->kmax; c++) {
++    double v = p->re_on && p->re_auto && p->re_cb ? rf_re_base(p, c) : -1;
++    if (v >= 0) fprintf(p->f_kn, ",%.5g", v); else fputc(',', p->f_kn);
++  }
++  for (uint32_t c = 0; c < p->kmax; c++) {
++    double v = p->re_on && p->re_auto && p->re_cb ? rf_re_base(p, c) : -1;
++    uint32_t n = 9;
++    if (v < 0 && p->re_on && p->re_auto && p->re_cb) n = 1;  // nothing to compare with yet: every hit bucket is rewritten
++    else if (v >= 0)
++      for (uint32_t b = 1; b <= 8 && n == 9; b++)
++        if (p->re_try[c][b] < 32 || p->re_hb[c][b] >= (v + p->re_lambda) * p->re_sb[c][b]) n = b;
++    if (p->re_on && p->re_auto && p->re_cb) fprintf(p->f_kn, ",%u", n); else fputc(',', p->f_kn);
++  }
++  fprintf(p->f_kn, ",%.5g\n", p->re_lambda);
++}
++
 +void rf_interval_open(rf_params_t *p) {
++  rf_knobs_open(p);
 +  p->f_iv = rf_open(p, ".interval.csv");
 +  fputs("interval,kind,phase,t_start,t_end,clock_time", p->f_iv);
 +  rf_csv_head(p->f_iv);
@@ -2618,6 +2663,7 @@ index 0000000..adef7f4
 +      fputc('\n', p->f_ivs);
 +    }
 +  }
++  rf_knobs_row(p);
 +  memcpy(p->sb_last, p->sb_cur, sizeof(p->sb_last));
 +  memset(p->sb_cur, 0, sizeof(p->sb_cur));
 +  memset(&p->win, 0, sizeof(p->win));
@@ -2951,10 +2997,10 @@ index 0000000..18fa17b
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_basic.c b/libCacheSim/cache/eviction/flash/evict/region_basic.c
 new file mode 100644
-index 0000000..89e428e
+index 0000000..3628573
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_basic.c
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,413 @@
 +//
 +//  region_basic.c — the Region eviction policies ported from cachesim
 +//  (rpolicy/reg_basic.c):
@@ -3352,19 +3398,25 @@ index 0000000..89e428e
 +  return best;
 +}
 +
++/* P.knobs.csv: the floor of class fc (lru with a floor: ff given or auto) */
++static int lru_floor(const rf_rpol_t *x, double *ff) {
++  *ff = x->ff;
++  return x->mode == M_LRU && (x->on || x->ff > 0) ? (int)x->fc : -1;
++}
++
 +const rf_rpol_ops_t rf_rpol_fifo_ops = {"fifo", fifo_create, destroy, on_seal, on_touch,
-+                                        pick, NULL, NULL, NULL};
++                                        pick, NULL, NULL, NULL, NULL};
 +const rf_rpol_ops_t rf_rpol_lru_ops = {"lru", lru_create, destroy, on_seal, on_touch,
-+                                       pick, NULL, NULL, lru_report};
++                                       pick, NULL, NULL, lru_report, lru_floor};
 +const rf_rpol_ops_t rf_rpol_beta_ops = {"beta", beta_create, destroy, on_seal, on_touch,
-+                                        pick, NULL, NULL, NULL};
++                                        pick, NULL, NULL, NULL, NULL};
 +
 +#ifdef __cplusplus
 +}
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_gl.c b/libCacheSim/cache/eviction/flash/evict/region_gl.c
 new file mode 100644
-index 0000000..acbded2
+index 0000000..06b5cb5
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_gl.c
 @@ -0,0 +1,370 @@
@@ -3733,7 +3785,7 @@ index 0000000..acbded2
 +}
 +
 +const rf_rpol_ops_t rf_rpol_gl_ops = {"gl", create, destroy, on_seal, on_touch, pick,
-+                                      on_request, on_delete, report};
++                                      on_request, on_delete, report, NULL};
 +
 +#ifdef __cplusplus
 +}
@@ -3837,7 +3889,7 @@ index 0000000..860b154
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_mv.c b/libCacheSim/cache/eviction/flash/evict/region_mv.c
 new file mode 100644
-index 0000000..c89d940
+index 0000000..92cbb23
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_mv.c
 @@ -0,0 +1,123 @@
@@ -3959,14 +4011,14 @@ index 0000000..c89d940
 +  fprintf(f, "]}");
 +}
 +
-+const rf_rpol_ops_t rf_rpol_mv_ops = {"mv", create, destroy, on_seal, on_touch, pick, NULL, NULL, report};
++const rf_rpol_ops_t rf_rpol_mv_ops = {"mv", create, destroy, on_seal, on_touch, pick, NULL, NULL, report, NULL};
 +
 +#ifdef __cplusplus
 +}
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_oracle.c b/libCacheSim/cache/eviction/flash/evict/region_oracle.c
 new file mode 100644
-index 0000000..237efa3
+index 0000000..2346d34
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_oracle.c
 @@ -0,0 +1,113 @@
@@ -4078,7 +4130,7 @@ index 0000000..237efa3
 +}
 +
 +const rf_rpol_ops_t rf_rpol_oracle_ops = {"oracle", create, destroy, NULL, NULL, pick,
-+                                          on_request, NULL, report};
++                                          on_request, NULL, report, NULL};
 +
 +#ifdef __cplusplus
 +}
@@ -4235,10 +4287,10 @@ index 0000000..471465b
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_policy.h b/libCacheSim/cache/eviction/flash/evict/region_policy.h
 new file mode 100644
-index 0000000..e64a1b7
+index 0000000..6fb5b06
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_policy.h
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,102 @@
 +//
 +//  region_policy.h — which sealed Region RegionFlash evicts next.
 +//
@@ -4294,6 +4346,9 @@ index 0000000..e64a1b7
 +  void (*on_request)(rf_rpol_t *x, const request_t *req, cache_obj_t *o);
 +  void (*on_delete)(rf_rpol_t *x, const cache_obj_t *o);
 +  void (*report)(const rf_rpol_t *x, FILE *f);
++  /* 11-20, optional: the class whose share a lower bound protects (< 0: none) and that bound now (fraction of N), for
++   * P.knobs.csv */
++  int (*floor)(const rf_rpol_t *x, double *ff);
 +} rf_rpol_ops_t;
 +
 +/* the built-in policy called name, NULL if none */
@@ -4340,7 +4395,7 @@ index 0000000..e64a1b7
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_sfifo.c b/libCacheSim/cache/eviction/flash/evict/region_sfifo.c
 new file mode 100644
-index 0000000..6240566
+index 0000000..7d305a7
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_sfifo.c
 @@ -0,0 +1,101 @@
@@ -4440,7 +4495,7 @@ index 0000000..6240566
 +}
 +
 +const rf_rpol_ops_t rf_rpol_sfifo_ops = {"sfifo", create, destroy, on_seal, NULL, pick,
-+                                         NULL, NULL, report};
++                                         NULL, NULL, report, NULL};
 +
 +#ifdef __cplusplus
 +}
@@ -6633,10 +6688,10 @@ index 0000000..baf18a3
 +    NULL,                  epoch,  bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/hint/st_otsu.c b/libCacheSim/cache/eviction/flash/hint/st_otsu.c
 new file mode 100644
-index 0000000..d9d4bb6
+index 0000000..7e75b5e
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/st_otsu.c
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,236 @@
 +/* st_otsu.c — 物を大きさの閾値 τ で 2 分類するヒント（hint=st_otsu、2026-11-20）。
 + * τ は大津の二値化と同じ規則で選ぶ: 大きさのビン b ごとに、書いたバイト A_b と、書いてから一度も当たらずに
 + * 追い出されたバイト K_b を数え、ビンの価値 v_b = 1 − K_b / A_b（書いたバイトのうち再利用された割合）とする。
@@ -6670,6 +6725,12 @@ index 0000000..d9d4bb6
 +  int ghost, logreq;
 +  double Q[OT_NB];  // val=logreq: requested bytes per bin
 +  int64_t tau;  // < 0: no split
++  /* cd=W (val=logreq, 11-20): change detection. The last W recalc periods' counts sit in a ring; at each recalc, the JS
++   * divergence of the window's requested bytes per bin against everything before it is compared with the window's own
++   * noise (JS of its first half against its second half). Above cdk times that noise: the counts restart from the window and tau is set at once. */
++  uint32_t cd, cdk, rn, nres, force;
++  double PA[OT_NB], PQ[OT_NB], *RA, *RQ, cdlast, cdnoise;
++  uint64_t rest[16];
 +};
 +
 +static const param_spec_t P_OT[] = {
@@ -6680,6 +6741,8 @@ index 0000000..d9d4bb6
 +    {"hold", P_UINT, "1", NULL, "同じ向きの候補がこの回数続いたら採用（1 = 即時）"},
 +    {"band", P_UINT, "0", NULL, "今の τ からこのビン数未満の変化は無視（0 = 無効）"},
 +    {"val", P_ENUM, "reuse", "reuse|ghost|logreq", "ビンの価値: reuse（再利用された割合）| ghost（名簿で測る限界の価値）"},
++    {"cd", P_UINT, "0", NULL, "変化の検出の窓（再計算の回数、偶数。0 = しない。val=logreq のみ）"},
++    {"cdk", P_UINT, "3", NULL, "窓とそれ以前の JS が、窓の前半と後半の JS の何倍を超えたら数え直すか"},
 +    {NULL}};
 +
 +static int create(rf_hint_t **out, const param_vals_t *v, const hint_env_t *env) {
@@ -6693,11 +6756,49 @@ index 0000000..d9d4bb6
 +  h->hold = (uint32_t)pv_int(v, "hold"), h->band = (uint32_t)pv_int(v, "band");
 +  if (!h->hold) die("st_otsu: hold must be >= 1");
 +  if (h->bins < 1 || h->bins > 4 || !h->recalc) die("st_otsu: bins must be 1..4 and recalc > 0");
++  h->cd = (uint32_t)pv_int(v, "cd"), h->cdk = (uint32_t)pv_int(v, "cdk");
++  if (h->cd && (!h->logreq || h->cd % 2 || h->ema_den > 1)) die("st_otsu: cd needs val=logreq, ema_den=0 and an even window");
++  if (h->cd) h->RA = xcalloc((size_t)h->cd * OT_NB, sizeof(double)), h->RQ = xcalloc((size_t)h->cd * OT_NB, sizeof(double));
 +  h->tau = -1;
 +  *out = h;
 +  return 0;
 +}
-+static void destroy(rf_hint_t *h) { free(h); }
++static void destroy(rf_hint_t *h) { free(h->RA), free(h->RQ), free(h); }
++
++/* Jensen-Shannon divergence (bits) of two histograms, each normalised to 1; 0 if either is empty */
++static double ot_js(const double *x, const double *y) {
++  double sx = 0, sy = 0, d = 0;
++  for (int b = 0; b < OT_NB; b++) sx += x[b], sy += y[b];
++  if (sx <= 0 || sy <= 0) return 0;
++  for (int b = 0; b < OT_NB; b++) {
++    double p = x[b] / sx, q = y[b] / sy, m = 0.5 * (p + q);
++    if (p > 0) d += 0.5 * p * log2(p / m);
++    if (q > 0) d += 0.5 * q * log2(q / m);
++  }
++  return d;
++}
++
++/* cd: at a recalc, push this period into the ring and test the window against everything before it */
++static void ot_detect(rf_hint_t *h) {
++  memcpy(h->RA + (size_t)(h->rn % h->cd) * OT_NB, h->PA, sizeof(h->PA));
++  memcpy(h->RQ + (size_t)(h->rn % h->cd) * OT_NB, h->PQ, sizeof(h->PQ));
++  memset(h->PA, 0, sizeof(h->PA)), memset(h->PQ, 0, sizeof(h->PQ));
++  if (++h->rn < h->cd) return;
++  double WA[OT_NB] = {0}, WQ[OT_NB] = {0}, Q1[OT_NB] = {0}, Q2[OT_NB] = {0}, BQ[OT_NB];
++  for (uint32_t i = 0; i < h->cd; i++) {  // i = 0 is the oldest slot
++    const double *a = h->RA + (size_t)((h->rn + i) % h->cd) * OT_NB, *q = h->RQ + (size_t)((h->rn + i) % h->cd) * OT_NB;
++    double *hq = i < h->cd / 2 ? Q1 : Q2;
++    for (int b = 0; b < OT_NB; b++) WA[b] += a[b], WQ[b] += q[b], hq[b] += q[b];
++  }
++  for (int b = 0; b < OT_NB; b++) BQ[b] = fmax(0, h->Q[b] - WQ[b]);
++  /* only the requested bytes: they are the load itself. The written bytes also move with the cache's own state (the
++   * allocation, the fill), and testing them fired at every window on a stationary load (cd_drift.sh, 11-20) */
++  h->cdnoise = ot_js(Q1, Q2), h->cdlast = ot_js(BQ, WQ);
++  if (h->cdlast <= h->cdk * h->cdnoise || h->cdlast <= 0) return;
++  memcpy(h->A, WA, sizeof(WA)), memcpy(h->Q, WQ, sizeof(WQ)), memset(h->K, 0, sizeof(h->K));  // restart from the window
++  if (h->nres < 16) h->rest[h->nres] = h->nobs;
++  h->nres++, h->rn = 0, h->force = 1;  // a full new window before the next test; tau moves without the hold
++}
 +
 +static int ot_bin(const rf_hint_t *h, uint64_t s) {
 +  int b = (int)floor(log2((double)(s ? s : 1)) * h->bins);
@@ -6736,6 +6837,11 @@ index 0000000..d9d4bb6
 +
 +/* adopt candidate t through the hysteresis (hold, band) */
 +static void ot_set(rf_hint_t *h, int64_t t) {
++  if (h->force) {  // cd: the counts were restarted
++    h->force = 0, h->pend = 0;
++    if (t != h->tau) h->tau = t, h->ep++, h->nchg++;
++    return;
++  }
 +  if (t == h->tau) { h->pend = 0; return; }
 +  if (t >= 0 && h->tau >= 0 && fabs(log2((double)t + 1) - log2((double)h->tau + 1)) * h->bins < h->band) { h->pend = 0; return; }
 +  int dir = t < 0 ? 3 : h->tau < 0 ? 4 : t > h->tau ? 1 : 2;
@@ -6769,7 +6875,9 @@ index 0000000..d9d4bb6
 +static uint32_t on_insert(rf_hint_t *h, const rf_hint_ev_t *e) {
 +  int b = ot_bin(h, e->size);
 +  h->A[b] += (double)e->size;
++  if (h->cd) h->PA[b] += (double)e->size;
 +  if (++h->nobs % h->recalc == 0) {
++    if (h->cd) ot_detect(h);
 +    ot_recompute(h);
 +    if (h->ema_den > 1 && !h->ghost)
 +      for (int i = 0; i < OT_NB; i++)
@@ -6781,7 +6889,10 @@ index 0000000..d9d4bb6
 +
 +/* val=logreq: every request, by its size */
 +static void on_get(rf_hint_t *h, const rf_hint_ev_t *e) {
-+  if (h->logreq) h->Q[ot_bin(h, e->size)] += (double)e->size;
++  if (!h->logreq) return;
++  int b = ot_bin(h, e->size);
++  h->Q[b] += (double)e->size;
++  if (h->cd) h->PQ[b] += (double)e->size;
 +}
 +
 +/* 書いてから一度も当たらずに出た物（freq ≤ 1）のバイト */
@@ -6799,6 +6910,11 @@ index 0000000..d9d4bb6
 +static void report(rf_hint_t *h, FILE *f) {
 +  fprintf(f, "{\"tau\": %lld, \"changes\": %u, \"tau_log2_mean\": %g, \"bins\": %u, \"ema_den\": %u", (long long)h->tau,
 +          h->nchg, h->lcnt > 0 ? h->lsum / h->lcnt : 0.0, h->bins, h->ema_den);
++  if (h->cd) {  // resets: how many, at which write counts (first 16); the last test's divergence and noise
++    fprintf(f, ", \"cd\": %u, \"resets\": %u, \"cd_last\": %g, \"cd_noise\": %g, \"reset_at\": [", h->cd, h->nres, h->cdlast, h->cdnoise);
++    for (uint32_t i = 0; i < h->nres && i < 16; i++) fprintf(f, "%s%llu", i ? ", " : "", (unsigned long long)h->rest[i]);
++    fputs("]", f);
++  }
 +  if (h->ghost) {  // the last decayed sums per bin: [log2 of the bin's lower edge, bytes that left, ghost-hit bytes per byte]
 +    fputs(", \"ghost_bins\": [", f);
 +    for (int b = 0, n = 0; b < OT_NB; b++)
@@ -7074,10 +7190,10 @@ index 0000000..8cd7a6a
 +    on_evict, epoch, bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/regionflash_internal.h b/libCacheSim/cache/eviction/flash/regionflash_internal.h
 new file mode 100644
-index 0000000..f7131a4
+index 0000000..007bebb
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/regionflash_internal.h
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,354 @@
 +//
 +//  regionflash_internal.h — RegionFlash's state and the functions its modules
 +//  share. Not for use outside cache/eviction/flash/.
@@ -7315,6 +7431,7 @@ index 0000000..f7131a4
 +  rf_sb_ctr_t sb_cum[RF_SB_N], sb_cur[RF_SB_N], sb_last[RF_SB_N];
 +  uint64_t interval, n_ival, ival_start;
 +  FILE *f_iv, *f_ivc, *f_ivs;  // P.interval*.csv
++  FILE *f_kn;                  // P.knobs.csv (11-20): the self-set parameters at each interval end
 +} rf_params_t;
 +
 +#define CNT(p, f, c, v)                                   \

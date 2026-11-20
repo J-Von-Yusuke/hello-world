@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>論文のストーリーと計測</title>
+<style>
+:root { --ink:#14213D; --body:#3D4656; --mute:#6B7486; --paper:#F7F6F2; --card:#FBFBF8; --line:#CFCBBF;
+  --blue:#2F6FB0; --orange:#D9692A; --green:#2E7D4F; --purple:#7A4FA3; --blue-soft:#DCE7F3; --orange-soft:#F6E0D2; --green-soft:#DCEFE3; --purple-soft:#E9E0F2; --bad:#B23A2E; --bad-soft:#F5DCD8; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --green:#6CC08F; --purple:#B993E0; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --green-soft:#1D3A2A; --purple-soft:#33264A; --bad:#E07A6E; --bad-soft:#4A2522; } }
+:root[data-theme="dark"] { --ink:#EEF1F6; --body:#C9D0DC; --mute:#97A1B3; --paper:#151B27;
+  --card:#202A3B; --line:#3A4558; --blue:#6EA4DC; --orange:#F0935A; --green:#6CC08F; --purple:#B993E0; --blue-soft:#1F3550; --orange-soft:#4A2E1E; --green-soft:#1D3A2A; --purple-soft:#33264A; --bad:#E07A6E; --bad-soft:#4A2522; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--body); font-family:"Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif; line-height:1.8; }
+main { max-width:980px; margin:0 auto; padding:32px 16px 96px; }
+h1 { color:var(--ink); font-size:30px; margin:0 0 6px; line-height:1.3; }
+h2 { color:var(--ink); font-size:23px; margin:48px 0 12px; padding-top:14px; border-top:2px solid var(--line); }
+h3 { color:var(--ink); font-size:18px; margin:24px 0 8px; }
+p, li { font-size:16px; } ul, ol { padding-left:1.4em; } li { margin:4px 0; }
+.small { font-size:13px; color:var(--mute); }
+.box { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:14px 0; }
+.box.blue { background:var(--blue-soft); border-color:var(--blue); } .box.orange { background:var(--orange-soft); border-color:var(--orange); }
+.box.green { background:var(--green-soft); border-color:var(--green); } .box.purple { background:var(--purple-soft); border-color:var(--purple); }
+.box.bad { background:var(--bad-soft); border-color:var(--bad); }
+.thesis { font-size:19px; color:var(--ink); font-weight:600; border-left:6px solid var(--orange); background:var(--card); padding:14px 18px; margin:16px 0; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; }
+.tw { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; font-size:14px; font-variant-numeric:tabular-nums; margin:8px 0; }
+th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+th { color:var(--ink); }
+.done { color:var(--green); font-weight:700; } .part { color:var(--orange); font-weight:700; } .need { color:var(--bad); font-weight:700; }
+code { font-size:13px; }
+svg { width:100%; height:auto; display:block; } svg text { font-family:inherit; fill:var(--body); }
+</style></head><body><main>
+<h1>論文のストーリーと、そのために要る計測</h1>
+<p class="small">2026-11-20。いま一番筋のよい構成（ru_auto_v2）を主役にして、道具 4 つ・モデル・実トレースを一本の話にまとめる。各主張に対し、何で示すか・もうあるか・まだ要るかを並べる。</p>
+
+<div class="thesis">FDP SSD では Region を RU に合わせれば SSD 内部の GC（DLWA）は消える。ただし Region が大きいと、まとめて消すときの巻き添えと書き直し（アプリ層の GC）が増える。書く時点で物を分類し、分類ごとに容量を配り、書き直しを損得で決めれば、RU 単位の削除のまま CacheLib 以上のヒット率を保ち、NAND への書き込みを約 3 割減らせる。</div>
+
+<h2>1. 話の流れ</h2>
+<svg viewBox="0 0 940 430" role="img" aria-label="論文の話の流れ">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mute)"/></marker></defs>
+<rect x="10" y="20" width="210" height="110" rx="10" fill="var(--bad-soft)" stroke="var(--bad)"/>
+<text x="115" y="46" text-anchor="middle" font-size="15" font-weight="700">問題</text>
+<text x="115" y="70" text-anchor="middle" font-size="12">Region = RU（626.5 MiB）で</text><text x="115" y="88" text-anchor="middle" font-size="12">DLWA = 1。だが Region が大きい</text>
+<text x="115" y="106" text-anchor="middle" font-size="12">→ 人気物の巻き添え・書き直し増</text>
+<rect x="250" y="20" width="210" height="110" rx="10" fill="var(--purple-soft)" stroke="var(--purple)"/>
+<text x="355" y="46" text-anchor="middle" font-size="15" font-weight="700">着眼</text>
+<text x="355" y="70" text-anchor="middle" font-size="12">Region の中身は運命を共にする</text><text x="355" y="88" text-anchor="middle" font-size="12">→ 価値の違う物を混ぜると損</text>
+<text x="355" y="106" text-anchor="middle" font-size="12">→ 書く時点で分ける（大きさ）</text>
+<rect x="490" y="20" width="210" height="110" rx="10" fill="var(--blue-soft)" stroke="var(--blue)"/>
+<text x="595" y="46" text-anchor="middle" font-size="15" font-weight="700">モデル</text>
+<text x="595" y="70" text-anchor="middle" font-size="12">Region LRU の Che 近似</text><text x="595" y="88" text-anchor="middle" font-size="12">分けた得・最適配分（限界の</text>
+<text x="595" y="106" text-anchor="middle" font-size="12">価値がそろう）・得の消える条件</text>
+<rect x="730" y="20" width="200" height="110" rx="10" fill="var(--green-soft)" stroke="var(--green)"/>
+<text x="830" y="46" text-anchor="middle" font-size="15" font-weight="700">設計</text>
+<text x="830" y="70" text-anchor="middle" font-size="12">道具 4 つを一つの物差し</text><text x="830" y="88" text-anchor="middle" font-size="12">（1 バイト・1 滞在あたりの</text>
+<text x="830" y="106" text-anchor="middle" font-size="12">ヒット）で実行中に決める</text>
+<line x1="220" y1="75" x2="248" y2="75" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<line x1="460" y1="75" x2="488" y2="75" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<line x1="700" y1="75" x2="728" y2="75" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<!-- four tools -->
+<text x="470" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="var(--ink)">道具 4 つ（どれも「その 1 バイトの場所に、端の価値＋書き込みの値段より多くのヒットが見込めるか」）</text>
+<rect x="10" y="185" width="220" height="100" rx="8" fill="var(--card)" stroke="var(--line)"/>
+<text x="120" y="208" text-anchor="middle" font-size="14" font-weight="700">① 篩（受け入れ）</text><text x="120" y="230" text-anchor="middle" font-size="12">見込みの低い物を書かない</text><text x="120" y="250" text-anchor="middle" font-size="12">S3-FIFO 型（先行研究）</text><text x="120" y="270" text-anchor="middle" font-size="12" fill="var(--mute)">任意・直交（2×2 で示す）</text>
+<rect x="245" y="185" width="220" height="100" rx="8" fill="var(--card)" stroke="var(--purple)"/>
+<text x="355" y="208" text-anchor="middle" font-size="14" font-weight="700">② サイズ分類</text><text x="355" y="230" text-anchor="middle" font-size="12">平均の密度が違う組を分ける</text><text x="355" y="250" text-anchor="middle" font-size="12">大津の式 × 再利用の強さ</text><text x="355" y="270" text-anchor="middle" font-size="12" fill="var(--mute)">いちばん遅い輪</text>
+<rect x="480" y="185" width="220" height="100" rx="8" fill="var(--card)" stroke="var(--green)"/>
+<text x="590" y="208" text-anchor="middle" font-size="14" font-weight="700">③ 分類ごとの容量配分</text><text x="590" y="230" text-anchor="middle" font-size="12">端の密度をそろえる</text><text x="590" y="250" text-anchor="middle" font-size="12">名簿で測る（BMR なら w=0）</text><text x="590" y="270" text-anchor="middle" font-size="12" fill="var(--mute)">OHR を守るなら w を入れる</text>
+<rect x="715" y="185" width="215" height="100" rx="8" fill="var(--card)" stroke="var(--orange)"/>
+<text x="822" y="208" text-anchor="middle" font-size="14" font-weight="700">④ 再挿入閾値（n=cb）</text><text x="822" y="230" text-anchor="middle" font-size="12">次の滞在の密度 ≥ 端 ＋ λ</text><text x="822" y="250" text-anchor="middle" font-size="12">巻き添えの人気物を救う</text><text x="822" y="270" text-anchor="middle" font-size="12" fill="var(--mute)">λ=0 で n=1 を導く</text>
+<line x1="830" y1="130" x2="830" y2="160" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+<!-- evaluation -->
+<rect x="10" y="310" width="920" height="105" rx="10" fill="var(--card)" stroke="var(--ink)"/>
+<text x="470" y="334" text-anchor="middle" font-size="15" font-weight="700">評価（§3 の問い Q1〜Q7）</text>
+<text x="30" y="360" font-size="12">モデルの確かめ：少数サイズの合成負荷で モデル ≒ 実測（Q0） ／ 実トレース：CacheLib（R=256 MiB、n=1、DLWA 1.4）との ΔBMR・ΔOHR・NAND 書き込み（Q1〜Q2）</text>
+<text x="30" y="382" font-size="12">部品ごとの寄与（Q3） ／ 書き込みとの交換関係（Q4） ／ 篩との直交（Q5） ／ 容量・DRAM・RU を変えても傾向が同じか（Q6） ／ 費用と限界（Q7）</text>
+<text x="30" y="404" font-size="12" fill="var(--mute)">設計に使っていないトレースでの確かめ（設計を先に固めてから回す）を必ず入れる</text>
+<line x1="470" y1="285" x2="470" y2="308" stroke="var(--mute)" stroke-width="2" marker-end="url(#a)"/>
+</svg>
+
+<h3>ご提案の骨子との対応と、言い方の調整</h3>
+<div class="tw"><table>
+<tr><th>ご提案</th><th>そのまま使える所</th><th>調整を勧める所</th></tr>
+<tr><td>サイズ分類でキャッシュ性能を上げ、アプリ層の GC を減らす</td><td>主張の中心。数字は nha −0.13 pt・NAND 0.70、w01 −3.8 pt・0.67、Tencent −0.73 pt・0.70</td><td>アプリ層の GC は「書き直しのバイト」と「巻き添えで消えた人気物」で数える（§4 の計測）。分類だけでは得が出ず、<b>分類 ＋ 配分</b>で初めて得が出る（自然な配分では nha +0.65 pt の負け）ので、「分類と配分は一組」と書く</td></tr>
+<tr><td>Region 単位削除の枠組みで Flash-like な管理</td><td>FDP の RU = Region で DLWA = 1 が動機</td><td>「Flash-like」は定義があいまいなので、「消去単位（RU）と削除単位（Region）をそろえる」と具体的に言う</td></tr>
+<tr><td>① 篩：重要な物しか書かない。篩がなくとも有効</td><td>2×2（篩あり・なし × 分類あり・なし）で直交を示す</td><td>篩は先行研究（S3-FIFO）なので<b>貢献には数えず、組み合わせられることを示す道具</b>に。篩はトレースを選ぶ（Tencent・ブロックで悪化）ことも正直に書く</td></tr>
+<tr><td>② サイズ分類：価値の違う物を分ける</td><td>大津の式 × 再利用の強さ（対数）</td><td>「大きさが価値の代わりになる理由」をモデルで先に言う（1 バイトの価値＝要求の頻度、大きさと頻度の相関）。Zipf の傾きが大きいと得が消える（α≈1.6 で反転）ことも限界として書く</td></tr>
+<tr><td>③ 分類ごとの容量配分：目的（OHR / BMR）で最適を決める</td><td>名簿で限界の価値をそろえる（KKT）。w が OHR の重み</td><td>主の結果は BMR（w=0）に絞り、OHR は「w を変えれば動かせる」という感度の図 1 枚にする</td></tr>
+<tr><td>④ 再挿入閾値の自動化：巻き添えを減らす</td><td>n=cb（損得の式）</td><td>「自動化で書き込みが減る」とは言わない。λ=0 では答えは CacheLib の n=1 とほぼ同じ。言えるのは <b>(a) n=1 が損得から出ること、(b) λ 一つで書き込みと BMR の交換関係を連続に動かせること、(c) n=auto のような決め打ちの目標値は削りすぎる</b>こと</td></tr>
+<tr><td>モデル ＋ 単純なモデル ＋ 実トレース</td><td>Che 型モデル（老化つき ≤1 pt）・合成負荷・実トレース</td><td>モデルの役割は「設計の根拠（何をそろえるべきか）」と「得が出る・消える条件」。精度の主張は合成負荷に限る</td></tr>
+</table></div>
+
+<h2>2. 主役の構成と、比べる相手</h2>
+<div class="grid">
+<div class="box green"><b>主役：ru_auto_v2</b><br>R = RU、閾値＝大津の式（logreq、累積）、配分＝名簿（auto=2・w=0・ff=0・move=2）、書き直し＝n=cb（base=marg、λ=0）。手で合わせる目標値なし。</div>
+<div class="box blue"><b>基準：CacheLib</b><br>R = 256 MiB、分類なし、n=1。NAND 書き込みに DLWA 1.4（実機で測った値）を掛ける。n=0〜3 の線で「書き直しを減らしただけ」との区別をつける。</div>
+<div class="box orange"><b>組み合わせ</b><br>＋篩（ru_adm_v2：篩 ＋ V2 ＋ n=cb）。カタログにはまだ無い（今あるのは n=1 版の ru_adm_v2_n1）。足すなら 1 行。</div>
+<div class="box purple"><b>付録に回すもの</b><br>以前の ru_auto（山登り・n=auto）、P&amp;O、st の閾値、変化の検出（cd）。経緯としてだけ載せ、本文の主張には使わない。</div>
+</div>
+
+<h2>3. 問いと、示す手段</h2>
+<div class="tw"><table>
+<tr><th>問い</th><th>主張</th><th>計測</th><th>状態</th></tr>
+<tr><td>Q0 モデル</td><td>Region LRU の Che 近似は、分けた得と最適配分を予測できる</td><td>少数サイズの合成負荷でモデル対実測（老化モデル ≤1 pt）。自然な配分 46.4% 対 最適 40.3%</td><td class="done">あり</td></tr>
+<tr><td>Q1 RU にした損</td><td>Region を RU にしても BMR はほとんど悪化しない。NAND 書き込みは DLWA の分だけ減る</td><td>ru_base 対 r256_base（−0.036 pt・0.72）</td><td class="done">あり</td></tr>
+<tr><td>Q2 主の結果</td><td>ru_auto_v2 は CacheLib より BMR が低く、書き込みも少ない</td><td>3 本＋検証用トレースで ΔBMR・ΔOHR・NAND。最良の固定閾値（神の目）との差（3 本とも 0.2 pt 以内）</td><td class="part">3 本あり。検証用トレースが要る</td></tr>
+<tr><td>Q3 部品の寄与</td><td>分類だけでは損、配分で得になる。書き直しは n=1 と同じ</td><td>なし → ＋閾値（自然な配分）→ ＋配分 → ＋n=cb の段階表。閾値は固定（最良）と大津の式、配分は下限なし・山登り・名簿</td><td class="part">部品はある。1 枚の段階表にまとめ直す</td></tr>
+<tr><td>Q4 書き込みとの交換</td><td>λ を動かすと、CacheLib の n の線より左下を通る</td><td>λ = 0, 0.1, 0.3, 1（書き込み予算 dwpd でも可）× 3 本の BMR 対 NAND の図</td><td class="need">λ の掃引は nha の一部だけ</td></tr>
+<tr><td>Q5 篩との直交</td><td>篩の後でも分類の得が残る</td><td>2×2（篩あり・なし × V2 あり・なし）、<code>table_orth</code></td><td class="part">以前の ru_auto ではあり。V2 版が要る</td></tr>
+<tr><td>Q6 感度</td><td>容量・DRAM・RU を変えても傾向は同じ</td><td>§4 の掃引</td><td class="need">無い（キットにも無い）</td></tr>
+<tr><td>Q7 費用と限界</td><td>名簿の記憶量・計算量は小さい。効かない負荷を正直に示す</td><td>名簿の最大件数（w01 最大 278 万件）× 1 件のバイト。msr・ブロック・大きさが変わる負荷・Zipf の傾き</td><td class="part">件数はある。バイトへの換算と表が要る</td></tr>
+</table></div>
+
+<h2>4. 感度の掃引（Q6）：何を変え、何を測るか</h2>
+<p>全部の組み合わせは回さず、<b>一度に一つだけ変え、ほかは既定</b>にする（既定：SSD 30%、DRAM = SSD / 30、RU 626.5 MiB）。方式は 5 つに絞る：r256_base、ru_base、ru_auto_v2、ru_v2_n1（書き直しを除いた得）、ru_none_v2（分類なしで配分と n=cb だけ、カタログに足す）。</p>
+<div class="tw"><table>
+<tr><th>変えるもの</th><th>値</th><th>見たいこと</th><th>注意</th></tr>
+<tr><td>SSD 容量（フットプリント比）</td><td>10% / 30% / 60%</td><td>容量が大きいほど端の価値が下がり、分けた得は小さくなるはず（モデルの予測と並べる）</td><td>R = RU は固定なので、Region の数が変わる（10% では数十個）。Region が少ないと配分の刻みが粗くなる</td></tr>
+<tr><td>DRAM の比</td><td>SSD / 100、/ 30、/ 10</td><td>DRAM が大きいと SSD に来る要求が冷え、分類の得が変わるか</td><td>篩の構成は DRAM の大きさに直接依存するので、篩ありも 1 本入れる</td></tr>
+<tr><td>RU の大きさ</td><td>256 MiB / 626.5 MiB / 1.25 GiB / 2.5 GiB</td><td>Region が大きいほど巻き添えが増え、書き直し・分類の効き目が増すはず（ストーリーの核）</td><td><b>基準側の DLWA</b>：CacheLib（R=256 MiB）の DLWA は RU ごとに違う。実機で測れない RU は「R/RU から見積もる」か「DLWA を掛けない値も併記」する</td></tr>
+<tr><td>乱数の種</td><td>3 つ</td><td>揺れの幅（今は ±0.016 pt）</td><td>主の表に誤差として載せる</td></tr>
+</table></div>
+<p>測る量：ΔBMR、ΔOHR、NAND 書き込み比、書き直しのバイト（アプリ層の GC）、巻き添え（1 回以上当たっていたのに Region ごと消えた物のバイト、<code>ssd_evict_bytes − dead_evict_bytes</code> から）、閾値と下限の最終値。3 本 × 掃引 12 点 × 5 方式 ＝ 約 180 run。nha の全量は重いので、Region の大きさを比率で縮めた Tencent 版と同じ縮小をキットで選べるようにする。</p>
+
+<h2>5. 設計に使っていないトレースでの確かめ</h2>
+<div class="box bad"><b>いちばん大きな弱点</b>：設計の選択（閾値の量、move=2 など）は nha・w01・Tencent を見て決めた。査読では「同じ 3 本で合わせた」と見られる。対策：今の構成を<b>固定してから</b>、キットの traces.tsv にある別のトレース（Wikimedia・Twitter・別の Meta など、種類ごとに 1 本以上）を、構成を変えずに 1 回だけ回し、結果を良し悪しにかかわらず載せる。msr（−0.30、以前の ru_auto に負ける）とブロックのトレース（差が出ない）は、この時点で「効かない負荷」として正直に載せる。</div>
+
+<h2>6. 図と表の候補（本文 8 枚前後）</h2>
+<ol>
+<li>動機：Region の大きさ対 DLWA・巻き添え（R を 64 MiB〜RU で振る、CacheLib n=1）</li>
+<li>モデル：自然な配分と最適配分（限界の価値がそろう点）の模式図と合成負荷の数字</li>
+<li>設計：道具 4 つと物差し（<code>v2_unified.html</code> §2 の図）</li>
+<li>主の表：トレース × 方式の ΔBMR / ΔOHR / NAND（種 3 つの幅つき）</li>
+<li>部品の段階表（Q3）</li>
+<li>交換関係：BMR 対 NAND、CacheLib の n の線と λ の線（Q4）</li>
+<li>篩との 2×2（Q5）</li>
+<li>感度：SSD 容量・DRAM・RU の 3 枚組（Q6）</li>
+<li>限界：Zipf の傾き・msr・大きさが変わる負荷（付録でもよい）</li>
+</ol>
+
+<h2>7. 変化の検出（cd）の扱い</h2>
+<p>大きさの分布が途中で変わる合成負荷では、閾値を累積で数える v2 は B の間ずっと 53.6% のまま。cd=10 は B に入って約 200 万要求で検出し、38.8% まで下げた（固定閾値の最良 39.0%、CacheLib 39.6% より良い）。ただし A に戻った後は 0.5 pt 悪く、書き直しの統計が分類の意味の変化を引きずっている疑いがある。</p>
+<div class="tw"><table>
+<tr><th>実トレース（CacheLib との ΔBMR [pt]）</th><th>累積（v2）</th><th>cd=10</th><th>cd=20</th><th>数え直しの回数（10 / 20）</th></tr>
+<tr><td>nha</td><td>−0.132</td><td>−0.134</td><td>−0.136</td><td>27 / 15</td></tr>
+<tr><td>w01</td><td>−3.813</td><td class="need">−1.964</td><td class="need">−2.506</td><td>75 / 40（閾値が 96 回・48 回動いた）</td></tr>
+<tr><td>Tencent（縮小）</td><td>−0.734</td><td class="need">−0.086</td><td class="need">−0.086</td><td>7 / 3</td></tr>
+<tr><td>msr</td><td>−0.300</td><td>−0.227</td><td>−0.285</td><td>9 / 5</td></tr>
+</table></div>
+<p><b>結論：今の形の cd は採らない。</b>実トレースは、どの時間の長さで見ても要求の大きさの分布が少しずつ動いている。窓の前半と後半の差（隣どうし）は、窓と遠い過去の差より系統的に小さいので、「窓自身の揺れ」の何倍という基準ではほぼ毎回変化と判定してしまう。合成負荷の得（B で −12 pt）は、2 種類の大きさだけで揺れがほぼ 0 という作り物の条件に頼っていた。本文は累積のまま。時間変化は「限界：閾値は分布が大きく変わる負荷には遅れて追従する」と書き、合成負荷の結果は付録に置く。直すとしたら、変化の大きさではなく「窓で計算した閾値が今の閾値から何ビン離れ、それが何窓続いたか」で判定する形だが、これは減衰（w01 で 57 回往復）と同じ失敗をしやすい。<span class="small">結果：tools/synth/results/cd_drift.json・cd_drift2.json・cd_real.json、スクリプト cd_drift.sh・cd_real.sh、バイナリ 13a180f00b（cd=0 では以前と 24/24 同一）。</span></p>
+
+<h2>8. 今すぐやること（順番）</h2>
+<ol>
+<li>構成を固定：ru_auto_v2（＋篩版 ru_adm_v2 と分類なし版 ru_none_v2 をカタログに足す）。</li>
+<li>キットに感度の掃引（<code>paper-sens</code>：SSD・DRAM・RU を一つずつ変える）を足す。</li>
+<li>λ の掃引（Q4）と V2 版の 2×2（Q5）を paper-final2 に入れる。</li>
+<li>検証用トレースを traces.tsv に足し、一度だけ回す。</li>
+<li>主の表と段階表を作り直す（種 3 つ）。</li>
+</ol>
+<p class="small">関連：<code>v2_unified.html</code>（物差しと三つの輪）、<code>ru_auto_v2_theory.html</code>（各部品の理論）、<code>summary_1120.html</code>（数字の一覧）、<code>experiment_kit/README.md</code> §6.5。</p>
+</main></body></html>

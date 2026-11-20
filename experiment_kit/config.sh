@@ -147,6 +147,8 @@ PAPER_CATALOG=(
   "r256_v2_n1|region-size=$PAPER_R256,$V2,reinsert=hits:n=1"   # 同、R=256 MiB
   "ru_adm_v2_n1|$V2,reinsert=hits:n=1,$ADM"              # ＋篩（w01 では大きく効き、Tencent・ブロックのトレースでは逆効果）
   "ru_v2_cb|$V2,$CB"                                     # 書き直しを初めて書いた物の基準で（書き込みを減らす側）
+  "ru_none_v2|hint=none,region-evict=lru,$CBM"          # 分類なしで書き直しだけ n=cb（11-20。ru_auto_v2 との差 = 分類＋配分の効果。paper-sens）
+  "ru_adm_v2|$V2,$CBM,$ADM"                             # 現在の提案 ＋ 篩（11-20。既定ではどの組にも入れていない）
   # 3. 以前の提案（st の閾値 ＋ 下限の山登り）
   "ru_auto|$AUTO,$RA"                                     # 以前の ru_auto（+0.083・0.609。n=auto が書き直しを削りすぎ）
   "r256_auto|region-size=$PAPER_R256,$AUTO,$RA"
@@ -219,3 +221,11 @@ PAPER_ROBUST_METHODS=${PAPER_ROBUST_METHODS:-"
 # 以前の指定の互換: PAPER_GATE=1 で ru_gate を足す / ROBUST_W0=0 で ru_auto_w0_* を外す
 [ "${PAPER_GATE:-0}" = 1 ] && PAPER_METHODS="$PAPER_METHODS ru_gate"
 [ "${ROBUST_W0:-1}" = 0 ] && PAPER_ROBUST_METHODS=$(printf '%s\n' $PAPER_ROBUST_METHODS | grep -v '^ru_auto_w0_' | tr '\n' ' ')
+
+# -- 感度（paper-sens、11-20）：SSD 容量・DRAM・RU（Region の大きさ）を一つずつ変え、ほかは既定のまま（README §6.5.6）--
+# 既定の点は work/paper の結果を共有する（同じ方式は回し直さない）。変えた点は work/paper/sens/<点>/。
+# RU の点では、region-size を自分で持つ構成（r256_base など）は既定の点と同じ run なので回さず、図では既定の点の値を使う。
+PAPER_SENS_METHODS=${PAPER_SENS_METHODS:-"r256_base ru_base ru_auto_v2 ru_v2_n1 ru_none_v2"}
+SENS_SSD=${SENS_SSD-"0.33 2"}                                      # SSD 容量をトレースごとの既定（traces.tsv の ssd か SSD_DEFAULT）の何倍に
+SENS_DRAM=${SENS_DRAM-"100 10"}                                    # DRAM = SSD ÷ この値（既定 DRAM_DIV = 30）
+SENS_RU=${SENS_RU-"268435456 1342177280 2684354560"}               # Region = RU の大きさ [B]（256 MiB・1.25 GiB・2.5 GiB。既定 REGION_BYTES = 626.5 MiB）
