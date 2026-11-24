@@ -3,7 +3,7 @@
 
   python3 paper_check.py <WORK> [trace..] [--ext] [--robust]   --ext / --robust で paper-ext・paper-robust の結果も並べる
 
-トレースごとに、構成ごとに次を出す（基準 = r256_base）:
+トレースごとに、構成ごとに次を出す（基準 = r256-none-nat-n1）:
   1. 設定   region_size・chunk・分類の閾値 taus・分類数 k が意図どおりか
   2. 全量   total.reqs がトレースの要求数（info.json の n、埋め値を除いた変種）と一致するか
   3. 恒等式 書き込み = 受け入れ + 再挿入 + 詰め物 が成り立つか（残差）
@@ -14,7 +14,9 @@
 import json, os, sys
 
 WORK = sys.argv[1]; want = [a for a in sys.argv[2:] if not a.startswith("--")]
-D = f"{WORK}/paper"; BASE = "r256_base"
+D = f"{WORK}/paper"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ids import BASE, PREVIOUS, PROPOSAL, VAR
 DIRS = [D] + [f"{D}/{x}" for x in ("ext", "robust") if f"--{x}" in sys.argv]   # --ext / --robust: paper-ext / paper-robust の結果も並べる
 TB = 1e12
 
@@ -85,11 +87,11 @@ for n in traces:
         rp = d.get("region_policy")
         ff = f"{rp['ff_end']:.2f}/{rp['ff_mean']:.2f}" if isinstance(rp, dict) and "ff_end" in rp else ""
         print(line + f"{n_auto(d):7s} {ff}")
-    if "--robust" in sys.argv:   # 条件ごとに 提案（ru_auto）と 基準（r256_base）・CacheLib n=3 の差
+    if "--robust" in sys.argv:   # 条件ごとに 提案（ru-st-climb-nauto）と 基準（r256-none-nat-n1）・CacheLib n=3 の差
         print(f"  頑健性: {'条件':22s} {'ΔBMR(提案−基準)':>15s} {'書込比(提案/基準)':>17s} {'ΔBMR(提案−n3)':>14s} {'書込比(提案/n3)':>15s}")
-        for prop in ("ru_auto", "ru_auto_w0"):   # 提案 2 通り（w0 = 目的 BHR だけ）
-          for suf, lab in (("", "既定"), ("_c0", "chunk=0（R 違いは不公平）"), ("_c0m", "chunk=0・受入上限 256MiB"), ("_f1", "再挿入の上限なし"), ("_s2", "乱数の種 2"), ("_s3", "乱数の種 3")):
-            P_, B_, N_ = load(n, prop + suf), load(n, "r256_base" + suf), load(n, "r256_n3" + suf)
+        for prop in (PROPOSAL, PREVIOUS, "ru-st-climb.w0-nauto"):   # 現在の提案・以前の提案・その目的 BHR だけ
+          for suf, lab in (("", "既定"), (VAR + "c0", "chunk=0（R 違いは不公平）"), (VAR + "c0m", "chunk=0・受入上限 256MiB"), (VAR + "f1", "再挿入の上限なし"), (VAR + "s2", "乱数の種 2"), (VAR + "s3", "乱数の種 3")):
+            P_, B_, N_ = load(n, prop + suf), load(n, BASE + suf), load(n, "r256-none-nat-n3" + suf)
             if not (P_ and B_): continue
             pt, bt = P_["total"], B_["total"]
             row = f"  {prop[3:]:6s} {lab:22s} {100 * (pt['bmr'] - bt['bmr']):+15.3f} {pt['flash_region_write_bytes'] / bt['flash_region_write_bytes']:17.3f}"
@@ -98,8 +100,8 @@ for n in traces:
             print(row)
 print("\n読み方: 恒等式残差 は |残差| < 1% なら書き込みの集計に矛盾なし。Δ受入 ≒ ΔBMR×要求B なら、受け入れの差は BMR の差で説明できる。"
       "BMR がほぼ同じで書き込みが大きく減っているなら、その差の大半は Δ再挿入 に出るはず。"
-      "r256_base と ru_base の差は Region の大きさだけ、*_none_auto との差が分類（＋下限）の効果。")
-print("再挿入/追出R = 書き直したバイト ÷（追い出した Region 数 × R）。既定の上限は 0.5 なので、これが 0.5 に近い構成は上限に当たっている（_f1 で上限を外して確かめる）。"
-      "片の損失・孤立片 = chunk>0 で、片を 1 つ失って消えた物の数と、他の Region に残った無駄な片の量（CacheLib の piece-wise caching は片を独立の項目として扱うので、この損は無い。_c0 は片に分けない別の置き方での感度分析）。"
+      "r256-none-nat-n1 と ru-none-nat-n1 の差は Region の大きさだけ、*-none-nat-nauto との差が分類（＋下限）の効果。")
+print("再挿入/追出R = 書き直したバイト ÷（追い出した Region 数 × R）。既定の上限は 0.5 なので、これが 0.5 に近い構成は上限に当たっている（~f1 で上限を外して確かめる）。"
+      "片の損失・孤立片 = chunk>0 で、片を 1 つ失って消えた物の数と、他の Region に残った無駄な片の量（CacheLib の piece-wise caching は片を独立の項目として扱うので、この損は無い。~c0 は片に分けない別の置き方での感度分析）。"
       "頑健性の表で、どの条件でも ΔBMR と書込比の向きが既定と同じなら、結論は RegionFlash の作りや乱数に頼っていない。")
 print("確認で引っかかった数:", bad)

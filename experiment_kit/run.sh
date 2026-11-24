@@ -13,8 +13,8 @@
 #   tune [name..]          自動推定の実験（TUNE_JOBS のうち TUNE_METHODS）          → work/tune/
 #   tune-synth             同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷）    → work/tune/
 #   che [name..]           Zipf の傾きと分類の利得（付録 §N.5）                     → work/che/
-#   paper-final2 [name..]  論文の本番：CacheLib と現在の提案 ru_auto_v2 ほか（PAPER_FINAL2_METHODS）→ work/paper/final2/
-#   paper-final [name..]   同じ組で提案を以前の ru_auto にしたもの（PAPER_FINAL_METHODS）     → work/paper/final/
+#   paper-final2 [name..]  論文の本番：CacheLib と現在の提案 ru-otsu-ghost-cb ほか（PAPER_FINAL2_METHODS）→ work/paper/final2/
+#   paper-final [name..]   同じ組で提案を以前の ru-st-climb-nauto にしたもの（PAPER_FINAL_METHODS）     → work/paper/final/
 #   paper-robust [name..]  頑健性の確認（PAPER_ROBUST_METHODS）                    → work/paper/robust/
 #   paper [name..]         検討用の全部（PAPER_METHODS）                           → work/paper/
 #   paper-ext [name..]     CacheLib の書き直しの閾値違い（PAPER_EXT_METHODS）        → work/paper/ext/
@@ -167,7 +167,7 @@ done_test() {  # 済みの印：P.json の片の扱いが同じ。admit=dram の
 sig_same() {  # sig_same <印> <印>: 2 つの印が同じかを調べる式（SIG_PATCH=0 ならパッチの版の行を除いて）
   [ "$SIG_PATCH" = 1 ] && echo "cmp -s $1 $2" || echo "cmp -s <(tail -n +2 $1) <(tail -n +2 $2)"; }
 sig_twin() {  # sig_twin <dir>: <dir>/cmd.want と全く同じ印の済んだ run が work/ の別の場所にあれば、そのフォルダのファイルを写して印を付ける（11-20）。
-  # 例：paper-sens の RU 256 MiB の点の ru_base は、paper の r256_base と同じコマンド。写すのはファイルの複製（リンクにしない：回し直しで
+  # 例：paper-sens の RU 256 MiB の点の ru-none-nat-n1 は、paper の r256-none-nat-n1 と同じコマンド。写すのはファイルの複製（リンクにしない：回し直しで
   # 上書きすると相手も壊れるため）。どの組の結果かは問わない（印に入っているのはパッチの版とコマンドだけ）
   local d=$1 f s; f=$(sed -n 2p "$d/cmd.want")
   while IFS= read -r s; do
@@ -440,12 +440,19 @@ paper_refresh() {  # 11-20: 図の系列 = いまの config.sh の選択。結�
     ( paper_pick "${!v}" "$dir" "$b" ) 2>&1 | grep -v '方式（' >&2 || true
   done
 }
-figs_set() {  # figs_set [--ext | --final | --final2 | --cond c]: その組の全体の図と表、続けてトレースの群（traces.tsv の category × source）ごとの一式
+figs_one() {  # figs_one [paper_figs の引数..]: 全体の一式と、図の組（PAPER_FIGSETS）ごとの一式
   python3 "$KIT/py/paper_figs.py" "$WORK" "$@" || return
+  local fs; for fs in "${PAPER_FIGSETS[@]}"; do
+    python3 "$KIT/py/paper_figs.py" "$WORK" "$@" --figset "$fs" | sed "s|^|  図の組 ${fs%%:*}: |" >&2 || log "図の組 ${fs%%:*} に失敗"
+  done
+  return 0
+}
+figs_set() {  # figs_set [--ext | --final | --final2 | --cond c]: その組の全体の図と表、続けてトレースの群（traces.tsv の category × source）ごとの一式
+  figs_one "$@" || return
   [ "$GROUP_FIGS" = 1 ] || return 0
   local g n=0; while IFS= read -r g; do
     [ -n "$g" ] || continue; n=$((n + 1))
-    python3 "$KIT/py/paper_figs.py" "$WORK" "$@" --group "$g" | sed "s|^|  群 $g: |" >&2 || log "群 $g の図に失敗"
+    figs_one "$@" --group "$g" 2>&1 | sed "s|^|  群 $g: |" >&2 || log "群 $g の図に失敗"
   done < <(python3 "$KIT/py/paper_figs.py" "$WORK" "$@" --list-groups)
   return 0
 }
@@ -462,20 +469,63 @@ paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。
   fi
   if [ $robust_all = 1 ] || [[ " $* " == *" --robust "* ]]; then   # 条件をまたいだ比較（robust/ 直下）と、条件ごとの一式（robust/<条件>/）
     python3 "$KIT/py/paper_robust_figs.py" "$WORK"
-    local c; for c in $(ids_of "$PAPER_ROBUST_METHODS" | grep -oE '_(c0m|c0|f1|s[0-9]+)$' | tr -d _ | sort -u); do   # 選んだ方式の条件ごと
+    local c; for c in $(ids_of "$PAPER_ROBUST_METHODS" | grep -oE '~[a-z0-9]+$' | tr -d '~' | sort -u); do   # 選んだ方式の条件ごと
       figs_set --cond "$c" || log "paper-figs --cond $c: その条件の結果が無いので飛ばした"; done
   elif [[ " $* " == *" --sens "* ]]; then python3 "$KIT/py/paper_sens_figs.py" "$WORK"
   elif [ $# -gt 0 ]; then figs_set "$@"; fi
 }
 
 # ---------------------------------------------------------------- paper の方式（config.sh の PAPER_CATALOG と *_METHODS）
-BASE_ID=r256_base   # 差の基準（paper では必ず回す）
-cat_get() {  # cat_get <id> → "指定<TAB>図の名前"（カタログに無ければ失敗）
-  local s rest
+BASE_ID=r256-none-nat-n1   # 差の基準 = いまの CacheLib（paper では必ず回す）
+# 11-20 方式の名前 = 部品の並び（config.sh の「方式の名前の付け方」）。指定は名前から組み立てるので、名前と中身はずれない
+part_opts() { [[ $1 == *.* ]] && tr . ' ' <<< "${1#*.}"; }   # part_opts <部品>: "cb.l01.first" → "l01 first"
+part_num() { awk -v s="$1" 'BEGIN{ if (length(s) > 1 && substr(s, 1, 1) == "0") s = "0." substr(s, 2); printf "%g", s + 0 }'; }   # l01 → 0.1、w0 → 0、l1 → 1
+id_spec() {  # id_spec <名前>: R-閾値-配分-再挿入[-adm][~変種..] → RegionFlash の指定（知らない部品・設定なら失敗）
+  local id=$1 base var r tau al re adm extra o s v w g l b m rm=""
+  base=${id%%~*}; var=""; [[ $id == *~* ]] && var=" ${id#*~} " && var=${var//\~/ }
+  IFS=- read -r r tau al re adm extra <<< "$base"
+  [ -n "$re" ] && [ -z "$extra" ] || return 1
+  case $r in r256) s="region-size=$PAPER_R256,";; ru) s="";; *) return 1;; esac
+  case ${tau%%.*} in   # 閾値（分類）
+    none)  s+="hint=none";;
+    st)    s+="hint=split_threshold";;
+    otsu)  s+="hint=st_otsu:val=logreq/bins=1/hold=4/band=2/ema_den=0"
+           for o in $(part_opts "$tau"); do case $o in cd[0-9]*) s+="/cd=${o#cd}";; *) return 1;; esac; done;;
+    fix)   v=$(part_opts "$tau"); [ -n "$v" ] && [[ $v != *" "* ]] || return 1; s+="hint=fixed:tau=$(numfmt --from=iec "${v^^}")" || return 1;;
+    dram)  v=$(part_opts "$tau"); case $v in k[0-9]*) s+="hint=key:key=dram/k=${v#k}";; t[0-9]*) s+="hint=key:key=dram/thr=${v#t}";; *) return 1;; esac;;
+    *) return 1;;
+  esac
+  s+=",region-evict=lru"
+  case ${al%%.*} in    # 容量の配分
+    nat)   [ "$al" = nat ] || return 1;;
+    ghost) m=4; for o in $(part_opts "$al"); do case $o in m[0-9]) m=${o#m};; *) return 1;; esac; done   # 既定 move=4（11-20 夜）
+           v="auto=2/w=0/ff=0"; [ "$m" = 0 ] || v+="/move=$m"; s+=",region-params=$v";;
+    climb) w=0.1 g=""; for o in $(part_opts "$al"); do case $o in w[0-9]*) w=$(part_num "${o#w}");; gate) g=/gate=1;; *) return 1;; esac; done
+           s+=",region-params=auto=1/w=$w$g";;
+    ff)    v=$(part_opts "$al"); [[ $v =~ ^[0-9]+$ ]] || return 1; s+=",region-params=fc=1/ff=$(awk -v x="$v" 'BEGIN{printf "%g", x / 100}')";;
+    *) return 1;;
+  esac
+  [[ $var == *" f1 "* ]] && rm="/max_frac=1"
+  case ${re%%.*} in    # 再挿入（書き直し）
+    n0)    [ "$re" = n0 ] && [ -z "$rm" ] || return 1;;
+    n[1-9]) [[ $re =~ ^n[1-9]$ ]] || return 1; s+=",reinsert=hits:n=${re#n}$rm";;
+    nauto) v=""; for o in $(part_opts "$re"); do case $o in ii) v=/mode=ii;; *) return 1;; esac; done; s+=",reinsert=hits:n=auto/target=0.5$v$rm";;
+    cb)    l=0 b=marg; for o in $(part_opts "$re"); do case $o in l[0-9]*) l=$(part_num "${o#l}");; first|all) b=$o;; *) return 1;; esac; done
+           s+=",reinsert=hits:n=cb/lambda=$l/base=$b$rm";;
+    *) return 1;;
+  esac
+  case $adm in "") ;; adm) s+=",admit=dram:min=1/ghost=0.9";; *) return 1;; esac   # 受け入れ（篩）
+  for o in $var; do case $o in   # 変種（頑健性）
+    c0) s+=",chunk=0";; c0m) s+=",chunk=0,admit=sizemax:max=$PAPER_R256";; f1) ;; s[0-9]*) s+=",seed=${o#s}";; *) return 1;;
+  esac; done
+  echo "$s"
+}
+cat_get() {  # cat_get <id> → "指定<TAB>図の名前"（カタログに無い、または名前を組み立てられなければ失敗）
+  local s sp
   for s in "${PAPER_CATALOG[@]}"; do
     [ "${s%%|*}" = "$1" ] || continue
-    rest=${s#*|}
-    if [[ "$rest" == *"|"* ]]; then printf '%s\t%s\n' "${rest%%|*}" "${rest#*|}"; else printf '%s\t\n' "$rest"; fi
+    sp=$(id_spec "$1") || { log "名前を指定にできない: $1（config.sh の「方式の名前の付け方」）"; return 1; }
+    if [[ "$s" == *"|"* ]]; then printf '%s\t%s\n' "$sp" "${s#*|}"; else printf '%s\t\n' "$sp"; fi
     return 0
   done
   return 1
@@ -484,7 +534,7 @@ ids_of() {  # ids_of <選択>: all を展開し、重複を除いた id を並�
   local id s
   for id in $1; do
     if [ "$id" = all ]; then
-      for s in "${PAPER_CATALOG[@]}"; do s=${s%%|*}; [[ "$s" =~ _(c0|c0m|f1|s[0-9]+)$ ]] || echo "$s"; done
+      for s in "${PAPER_CATALOG[@]}"; do s=${s%%|*}; [[ "$s" == *~* ]] || echo "$s"; done
     else echo "$id"; fi
   done | awk '!seen[$0]++'
 }
@@ -572,6 +622,7 @@ need_build() {  # キットのパッチが当てたものと違う（キット�
 }
 
 # ---------------------------------------------------------------- main
+[ "${RUNSH_LIB:-0}" = 1 ] && return 0 2>/dev/null   # RUNSH_LIB=1 . run.sh = 関数だけ読む（確かめ用）
 need_traces() { check >/dev/null || { check; die "traces.tsv を直す"; }; }
 usage() { awk 'NR > 1 && /^set -u/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; }
 cmd=${1:-help}; [ $# -gt 0 ] && shift

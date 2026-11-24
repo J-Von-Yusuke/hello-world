@@ -116,16 +116,18 @@ class Fig:
             elif kind in ("dot", "hollow"): L.append(f'<circle cx="{x+15}" cy="{y-7}" r="10" fill="{col if kind == "dot" else "#fff"}" stroke="{col}" stroke-width="3"/>')
             else: L.append(f'<line x1="{x}" x2="{x+34}" y1="{y-7}" y2="{y-7}" stroke="{col}" stroke-width="5"{dash_attr("9 6") if kind == "dash" else ""}/>')
             L.append(f'<text x="{x+44}" y="{y}" font-size="{fs}" fill="{INK}">{esc(name)}</text>'); x += w
-        return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {s.W} {s.H}" width="{s.W}" height="{s.H}" font-family="{FONT}">'
-                f'<rect width="{s.W}" height="{s.H}" fill="#ffffff"/>' + "".join(L) + "".join(s.e) + "</svg>")
+        ex = s.legend_h(cap=False) - s.legend_h(); H = s.H + ex   # 凡例が LEG_ROWS 行を超えた分だけ図を縦に伸ばし、軸を下へずらす（11-24）
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {s.W} {H}" width="{s.W}" height="{H}" font-family="{FONT}">'
+                f'<rect width="{s.W}" height="{H}" fill="#ffffff"/>' + "".join(L) + f'<g transform="translate(0 {ex})">' + "".join(s.e) + "</g></svg>")
 
-    def legend_h(s):  # 凡例の行数から、軸の上端を決める
+    LEG_ROWS = 3   # 軸の置き方が見込む凡例の行数の上限（系列が多い図で軸の高さが負になったため。11-24）
+    def legend_h(s, cap=True):  # 凡例の行数から、軸の上端を決める（cap：LEG_ROWS 行までとして。超えた分は svg() が図を伸ばす）
         x, rows = 40, 1
         for name, _, _ in s.legend:
             w = 46 + tw(name, 24) + 34
             if x + w > s.W - 30: x, rows = 40, rows + 1
             x += w
-        return 40 + 38 * rows if s.legend else 40
+        return 40 + 38 * (min(rows, s.LEG_ROWS) if cap else rows) if s.legend else 40
 
 
 class Ax:

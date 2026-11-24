@@ -2997,10 +2997,10 @@ index 0000000..18fa17b
 +#endif
 diff --git a/libCacheSim/cache/eviction/flash/evict/region_basic.c b/libCacheSim/cache/eviction/flash/evict/region_basic.c
 new file mode 100644
-index 0000000..3628573
+index 0000000..234210f
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/evict/region_basic.c
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,419 @@
 +//
 +//  region_basic.c — the Region eviction policies ported from cachesim
 +//  (rpolicy/reg_basic.c):
@@ -3098,7 +3098,7 @@ index 0000000..3628573
 +  uint64_t win, np, picks, r0, rb0, h0, hb0, ab0[256];
 +  bool on, ffstart, pend;  // ffstart: no ff given, start from the admitted byte share; pend: not started yet
 +  int alg;                 // auto=1 perturb and observe, 2 ghost gradient, 3 shrinking step
-+  double wl, gs, gb0[64], gn0[64], move;  // move: auto=2 steps from fc's share (1) or from the floor (0)
++  double wl, gs, gb0[64], gn0[64], move;  // move: auto=2 steps from fc's share (1) or from the floor (0); 2 = + fast way up, 3 = + fast way up and down, 4 = + fast way down
 +  uint64_t nw0, nwin;
 +  /* 11-20 計測用: 窓ごとの (その窓の ff, J)。report の "trace"（最大 TR_MAX 窓）。step=0 なら ff を固定したまま J の揺れを測れる */
 +  float tr_ff[4096], tr_j[4096], tr_ml[4096], tr_mo[4096], tr_cl[4096];  // auto=2: also the two marginal values, fc's regions
@@ -3291,7 +3291,13 @@ index 0000000..3628573
 +     * closes half the gap to the share each window (the idle climb takes ~log2 steps instead of share / 0.04; move=1 lost w01
 +     * because a floor just under the share still binds during evictions and shrinks fc only 0.03 a window). */
 +    double share = cl / (double)v->N, from = x->move == 1 ? share : x->ff;  // the floor's own unit: fc's sealed regions / N
-+    if (x->move == 2 && x->gs > 0.5 && x->ff < share) from += 0.5 * (share - x->ff);
++    if ((x->move == 2 || x->move == 3) && x->gs > 0.5 && x->ff < share) from += 0.5 * (share - x->ff);
++    /* 11-20, move=3: move=2 plus the way down. A floor the gradient strongly rejects (smoothed < -0.5) is halved each window
++     * (with move=2 it fell 0.04 a window: after nha the 256K split kept the large class at 0.98 -> 0.83 through 215M w01 requests,
++     * cross_trace.sh). Halving past the natural share only frees it (the floor stops binding); a positive gradient climbs back */
++    if ((x->move == 3 || x->move == 4) && x->gs < -0.5) from = 0.5 * x->ff;
++    /* move=4 (11-20 night): move=0 plus only the way down. move=2's way up (a jump to half the gap to the share on a strongly
++     * positive gradient) set w01's floor to 0.26-0.30 in its first windows and kept it there (w01 -3.81 -> -2.39 pt) */
 +    x->ff = fmin(x->ffmax, fmax(0, from + 2 * x->step * x->gs));
 +    return;
 +  }
@@ -6688,10 +6694,10 @@ index 0000000..baf18a3
 +    NULL,                  epoch,  bounds, NULL,    max_classes, report};
 diff --git a/libCacheSim/cache/eviction/flash/hint/st_otsu.c b/libCacheSim/cache/eviction/flash/hint/st_otsu.c
 new file mode 100644
-index 0000000..7e75b5e
+index 0000000..c3f22cf
 --- /dev/null
 +++ b/libCacheSim/cache/eviction/flash/hint/st_otsu.c
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,264 @@
 +/* st_otsu.c — 物を大きさの閾値 τ で 2 分類するヒント（hint=st_otsu、2026-11-20）。
 + * τ は大津の二値化と同じ規則で選ぶ: 大きさのビン b ごとに、書いたバイト A_b と、書いてから一度も当たらずに
 + * 追い出されたバイト K_b を数え、ビンの価値 v_b = 1 − K_b / A_b（書いたバイトのうち再利用された割合）とする。
@@ -6731,6 +6737,12 @@ index 0000000..7e75b5e
 +  uint32_t cd, cdk, rn, nres, force;
 +  double PA[OT_NB], PQ[OT_NB], *RA, *RQ, cdlast, cdnoise;
 +  uint64_t rest[16];
++  /* cdhold=1 (11-20): after a detection the counts restart but tau stays. The restarted counts' cut is adopted only when it has
++   * been the same for cdstable recalcs in a row and at least cdturn SSD capacities have been written since the restart (it is
++   * then the same as before on a stationary load, so a false alarm costs nothing). No detection while converging. */
++  uint32_t cdhold, cdstable, conv, conv_n, nadopt, nmove, cdfill;
++  double cdturn, wsince, ssd_cap, wtotal;  // cdfill=1: no test until wtotal (all bytes written) reaches the SSD capacity once
++  int64_t cand;
 +};
 +
 +static const param_spec_t P_OT[] = {
@@ -6743,6 +6755,10 @@ index 0000000..7e75b5e
 +    {"val", P_ENUM, "reuse", "reuse|ghost|logreq", "ビンの価値: reuse（再利用された割合）| ghost（名簿で測る限界の価値）"},
 +    {"cd", P_UINT, "0", NULL, "変化の検出の窓（再計算の回数、偶数。0 = しない。val=logreq のみ）"},
 +    {"cdk", P_UINT, "3", NULL, "窓とそれ以前の JS が、窓の前半と後半の JS の何倍を超えたら数え直すか"},
++    {"cdhold", P_UINT, "0", NULL, "1 = 検出後は閾値を保ち、数え直した累積の切れ目が落ち着いたら採用（0 = 窓の切れ目に即座に）"},
++    {"cdstable", P_UINT, "8", NULL, "cdhold: 数え直した累積の切れ目がこの回数（再計算）続けて同じなら採用"},
++    {"cdturn", P_DOUBLE, "1", NULL, "cdhold: 数え直してから SSD 容量のこの倍だけ書くまでは採用しない"},
++    {"cdfill", P_UINT, "1", NULL, "1 = SSD 容量分を書くまでは変化を判定しない（立ち上がりの分布の動きで数え直さない）"},
 +    {NULL}};
 +
 +static int create(rf_hint_t **out, const param_vals_t *v, const hint_env_t *env) {
@@ -6759,6 +6775,10 @@ index 0000000..7e75b5e
 +  h->cd = (uint32_t)pv_int(v, "cd"), h->cdk = (uint32_t)pv_int(v, "cdk");
 +  if (h->cd && (!h->logreq || h->cd % 2 || h->ema_den > 1)) die("st_otsu: cd needs val=logreq, ema_den=0 and an even window");
 +  if (h->cd) h->RA = xcalloc((size_t)h->cd * OT_NB, sizeof(double)), h->RQ = xcalloc((size_t)h->cd * OT_NB, sizeof(double));
++  h->cdhold = (uint32_t)pv_int(v, "cdhold"), h->cdstable = (uint32_t)pv_int(v, "cdstable"), h->cdturn = pv_dbl(v, "cdturn");
++  h->cdfill = (uint32_t)pv_int(v, "cdfill");
++  h->ssd_cap = (double)env->ssd_cap;
++  if (h->cdhold && (!h->cd || !h->cdstable)) die("st_otsu: cdhold needs cd > 0 and cdstable > 0");
 +  h->tau = -1;
 +  *out = h;
 +  return 0;
@@ -6784,6 +6804,7 @@ index 0000000..7e75b5e
 +  memcpy(h->RQ + (size_t)(h->rn % h->cd) * OT_NB, h->PQ, sizeof(h->PQ));
 +  memset(h->PA, 0, sizeof(h->PA)), memset(h->PQ, 0, sizeof(h->PQ));
 +  if (++h->rn < h->cd) return;
++  if (h->cdfill && h->wtotal < h->ssd_cap) return;  // the ring keeps moving; the test waits for the first fill (11-20: w01 froze its warm-up tau)
 +  double WA[OT_NB] = {0}, WQ[OT_NB] = {0}, Q1[OT_NB] = {0}, Q2[OT_NB] = {0}, BQ[OT_NB];
 +  for (uint32_t i = 0; i < h->cd; i++) {  // i = 0 is the oldest slot
 +    const double *a = h->RA + (size_t)((h->rn + i) % h->cd) * OT_NB, *q = h->RQ + (size_t)((h->rn + i) % h->cd) * OT_NB;
@@ -6797,7 +6818,9 @@ index 0000000..7e75b5e
 +  if (h->cdlast <= h->cdk * h->cdnoise || h->cdlast <= 0) return;
 +  memcpy(h->A, WA, sizeof(WA)), memcpy(h->Q, WQ, sizeof(WQ)), memset(h->K, 0, sizeof(h->K));  // restart from the window
 +  if (h->nres < 16) h->rest[h->nres] = h->nobs;
-+  h->nres++, h->rn = 0, h->force = 1;  // a full new window before the next test; tau moves without the hold
++  h->nres++, h->rn = 0;  // a full new window before the next test
++  if (h->cdhold) h->conv = 1, h->conv_n = 0, h->cand = -2, h->wsince = 0;  // keep tau until the restarted counts settle
++  else h->force = 1;                                                       // tau moves at once, without the hold
 +}
 +
 +static int ot_bin(const rf_hint_t *h, uint64_t s) {
@@ -6837,6 +6860,14 @@ index 0000000..7e75b5e
 +
 +/* adopt candidate t through the hysteresis (hold, band) */
 +static void ot_set(rf_hint_t *h, int64_t t) {
++  if (h->conv) {  // cdhold: follow the restarted counts' cut; adopt it once it has settled
++    h->conv_n = t == h->cand ? h->conv_n + 1 : 1, h->cand = t;
++    if (h->conv_n >= h->cdstable && h->wsince >= h->cdturn * h->ssd_cap) {
++      h->conv = 0, h->nadopt++, h->pend = 0;
++      if (t != h->tau) h->tau = t, h->ep++, h->nchg++, h->nmove++;
++    }
++    return;
++  }
 +  if (h->force) {  // cd: the counts were restarted
 +    h->force = 0, h->pend = 0;
 +    if (t != h->tau) h->tau = t, h->ep++, h->nchg++;
@@ -6876,8 +6907,10 @@ index 0000000..7e75b5e
 +  int b = ot_bin(h, e->size);
 +  h->A[b] += (double)e->size;
 +  if (h->cd) h->PA[b] += (double)e->size;
++  if (h->conv) h->wsince += (double)e->size;
++  h->wtotal += (double)e->size;
 +  if (++h->nobs % h->recalc == 0) {
-+    if (h->cd) ot_detect(h);
++    if (h->cd && !h->conv) ot_detect(h);
 +    ot_recompute(h);
 +    if (h->ema_den > 1 && !h->ghost)
 +      for (int i = 0; i < OT_NB; i++)
@@ -6911,7 +6944,8 @@ index 0000000..7e75b5e
 +  fprintf(f, "{\"tau\": %lld, \"changes\": %u, \"tau_log2_mean\": %g, \"bins\": %u, \"ema_den\": %u", (long long)h->tau,
 +          h->nchg, h->lcnt > 0 ? h->lsum / h->lcnt : 0.0, h->bins, h->ema_den);
 +  if (h->cd) {  // resets: how many, at which write counts (first 16); the last test's divergence and noise
-+    fprintf(f, ", \"cd\": %u, \"resets\": %u, \"cd_last\": %g, \"cd_noise\": %g, \"reset_at\": [", h->cd, h->nres, h->cdlast, h->cdnoise);
++    fprintf(f, ", \"cd\": %u, \"resets\": %u, \"cd_last\": %g, \"cd_noise\": %g, \"cdhold\": %u, \"adopted\": %u, \"adopt_moved\": %u, \"converging\": %u, \"reset_at\": [",
++            h->cd, h->nres, h->cdlast, h->cdnoise, h->cdhold, h->nadopt, h->nmove, h->conv);
 +    for (uint32_t i = 0; i < h->nres && i < 16; i++) fprintf(f, "%s%llu", i ? ", " : "", (unsigned long long)h->rest[i]);
 +    fputs("]", f);
 +  }

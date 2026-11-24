@@ -3,7 +3,7 @@
 
   python3 paper_sens_figs.py <WORK>          PAPER_LANG=en で英語の文字
 
-SSD 容量・DRAM・RU（Region の大きさ）を一つずつ変えたとき、各方式と CacheLib（r256_base、R=256 MiB・分類なし・n=1）の差が
+SSD 容量・DRAM・RU（Region の大きさ）を一つずつ変えたとき、各方式と CacheLib（r256-none-nat-n1、R=256 MiB・分類なし・n=1）の差が
 同じ向きに残るかを見る。既定の点は work/paper の結果、変えた点は work/paper/sens/<点>/ の結果（<点> = ssd_x<倍>・dram_<SSD÷DRAM>・
 ru_<MiB>M）。RU の点では CacheLib は回さない（Region の大きさを自分で持つので既定の点と同じ run）ので、既定の点の値と比べる。
 方式は sens/methods.tsv（run.sh が config.sh の PAPER_SENS_METHODS から作る）の順と名前。
@@ -17,7 +17,8 @@ from figures import Fig, Ax, PAL, span, to_png, method_label
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 T = lambda ja, en: en if EN else ja
-P = f"{WORK}/paper"; S = f"{P}/sens"; BASE = "r256_base"
+P = f"{WORK}/paper"; S = f"{P}/sens"
+from ids import BASE
 if not os.path.exists(f"{S}/methods.tsv"): sys.exit(f"{S}/methods.tsv が無い（./run.sh paper-sens がまだ）")
 SEL, NAME = [], {}
 for r in (l.rstrip("\n").split("\t") for l in open(f"{S}/methods.tsv", encoding="utf-8") if l.strip()):

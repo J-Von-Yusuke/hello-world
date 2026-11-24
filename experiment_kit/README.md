@@ -21,8 +21,8 @@ RegionFlash の指定（`hint=`・`region-params=` など）の意味は [`param
 
 | コマンド | 何をするか | 入力 | 出力 |
 |---|---|---|---|
-| `paper-final2` | **論文の本番**：CacheLib と現在の提案 `ru_auto_v2`（閾値・容量の配分・書き直しを全部自動）と、比較に向いた方式（§6.5.2） | `traces.tsv` | `work/paper/final2/` |
-| `paper-final` | 同じ組で、提案を以前の `ru_auto` にしたもの（前の版との比較、§6.5.2） | `traces.tsv` | `work/paper/final/` |
+| `paper-final2` | **論文の本番**：CacheLib と現在の提案 `ru-otsu-ghost-cb`（閾値・容量の配分・書き直しを全部自動）と、比較に向いた方式（§6.5.2） | `traces.tsv` | `work/paper/final2/` |
+| `paper-final` | 同じ組で、提案を以前の `ru-st-climb-nauto` にしたもの（前の版との比較、§6.5.2） | `traces.tsv` | `work/paper/final/` |
 | `paper-sens` | **感度**：SSD 容量・DRAM・RU（Region の大きさ）を一つずつ変えても、CacheLib との差の向きが同じか（§6.5.6） | `traces.tsv` | `work/paper/sens/` |
 | `paper-robust` / `paper` / `paper-ext` | 頑健性・検討用の全部・CacheLib の書き直しの閾値違い（§6.5） | `traces.tsv` | `work/paper/…` |
 | `validity` | トレース 1 本ごとに、分類なし / ありなどを全量 1 回回し、**先頭 N 要求で測った値**を全 N について出す（部分トレースで傾向が再現できるか）（§6.1） | `traces.tsv` | `work/out/`・`work/results/` |
@@ -60,8 +60,8 @@ $EDITOR config.sh                # SSD 容量や回す方式を必要なら直�
 ./run.sh check                   # パスが読めるか、名前が重複していないか
 NREQ=2000000 ./run.sh paper-final2  # 試運転：各トレースの先頭 200 万要求だけ。結果の形を確かめる
 rm -rf work/paper                # 試運転の結果を消す
-./run.sh paper-final2            # 論文の本番（現在の提案 ru_auto_v2）→ work/paper/final2/index.html
-./run.sh paper-final             # 同じ組で以前の ru_auto（結果は共有するので、増える run は ru_auto と V2 の変種だけ）→ work/paper/final/
+./run.sh paper-final2            # 論文の本番（現在の提案 ru-otsu-ghost-cb）→ work/paper/final2/index.html
+./run.sh paper-final             # 同じ組で以前の ru-st-climb-nauto（結果は共有するので、増える run は ru-st-climb-nauto と V2 の変種だけ）→ work/paper/final/
 ./run.sh paper-robust            # 頑健性 → work/paper/robust/
 ./run.sh paper-sens              # 感度（SSD 容量・DRAM・RU を一つずつ変える）→ work/paper/sens/
 ./run.sh validity                # 部分トレースの妥当性（時間がかかる）
@@ -90,7 +90,7 @@ rm -rf work/paper                # 試運転の結果を消す
 
 **済みの判定（11-20）**：各 run のフォルダの `cmd.txt` に、成功した run の**パッチの版と cachesim に渡した引数**（トレース・SSD・`NREQ`・`-t`・`-e` の指定全部。DRAM・Region・片の扱い・乱数の種もここに入る。出力先だけ除く）が残る。`P.json` があり、`cmd.txt` が今回しようとしているものと**完全に一致するときだけ**飛ばす。カタログの指定を書き換えた・`config.sh` の SSD や Region を変えた・試運転（`NREQ`）の結果が残っていた・キットを更新した、のどれでも、その run だけ回し直す（id が同じでも古い結果は使わない）。途中で失敗した run は `cmd.txt` を消してから回すので、次も回し直しになる。
 
-- **同じコマンドの run は使い回す**：まだ済んでいない run でも、全く同じ印（パッチの版＋コマンド）の済んだ run が `work/` の別の場所（別の組・別の感度の点）にあれば、そのフォルダのファイルを写して回さない（ログに「… と同じ run なので結果を写した」）。例：paper-sens の RU 256 MiB の点の `ru_base`・`ru_v2_n1` は、paper の `r256_base`・`r256_v2_n1` と同じコマンドなので写すだけ。写すのは複製で、リンクにはしない（回し直しで上書きしたとき相手を壊さないため）。
+- **同じコマンドの run は使い回す**：まだ済んでいない run でも、全く同じ印（パッチの版＋コマンド）の済んだ run が `work/` の別の場所（別の組・別の感度の点）にあれば、そのフォルダのファイルを写して回さない（ログに「… と同じ run なので結果を写した」）。例：paper-sens の RU 256 MiB の点の `ru-none-nat-n1`・`ru-otsu-ghost-n1` は、paper の `r256-none-nat-n1`・`r256-otsu-ghost-n1` と同じコマンドなので写すだけ。写すのは複製で、リンクにはしない（回し直しで上書きしたとき相手を壊さないため）。
 - 11-20 より前の結果には `cmd.txt` が無いので、**既定では全部回し直しになる**。その前の結果を使い続けるなら `ADOPT_OLD=1 ./run.sh …`：`cmd.txt` の無い結果は、前の判定（片の扱いと篩の fill 規則）が通れば今の指定で回したものと見なして `cmd.txt` を付ける（指定を変えていないことは自分で確かめる）。
 - `SIG_PATCH=0 ./run.sh …`：パッチの版は照合しない（キットを更新しても結果が変わらないと分かっているとき。11-20 の `P.knobs.csv` のように出力が増えただけの更新など）。
 
@@ -146,6 +146,7 @@ bash のファイル。どの項目も環境変数で上書きできる（例 `P
 | `WRITE_MARKS_TB` | `1.5` | 「先頭から SSD に W TB 書いた時点」で効果を測る W（TB = 10^12 B） |
 | `INTERVAL` | `1000000` | 先頭 N 曲線・時間変化・自分で決める値の動き（`P.knobs.csv`）の刻み（要求数）。11-20 に 10000 → 100 万（Wiki・Tencent CDN で区間ごとの CSV が大きくなりすぎたため）。1000 万要求未満のトレースや細かく見たいときは小さく（`INTERVAL=10000 ./run.sh …`）。書き込み予算つき（`dwpd`）の構成は区間の終わりごとに λ を動かすので、刻みが粗いと追従も粗くなる |
 | `NREQ` | 空 | 数字を入れると各 run を先頭 NREQ 要求で打ち切る（試運転）。`cmd.txt` に入るので、本番では試運転の結果を使わず回し直す |
+| `PAPER_FIGSETS` | main・parts・lambda・adm・prior | 図の組：方式が多くて図が潰れるので、目的ごとに選んだ方式（＋基準）だけの同じ一式を `<組>/figs_<名前>/` にも出す。1 つ = `"名前:方式 方式 .."`。色はどの図の組でも同じ（§6.5.5） |
 | `GROUP_FIGS` | `1` | paper 系の図と表を、全体に加えてトレースの群（`category` × `source`）ごとにも `<組>/groups/<category>__<source>/` に出す（§6.5.5） |
 | `GUARD_SEC` | `5` | 止め方の見張りの間隔 [秒]（§3.2） |
 | `ADOPT_OLD` / `SIG_PATCH` | `0` / `1` | 済みの判定（§3.2）：`cmd.txt` の無い古い結果を使うか / パッチの版も照合するか |
@@ -157,35 +158,48 @@ bash のファイル。どの項目も環境変数で上書きできる（例 `P
 
 ### 5.2 回す方式を選ぶ
 
-**paper 系**：方式はすべて `PAPER_CATALOG` に 1 行ずつ（`"id|RegionFlash の指定|図の名前"`、名前は省略可）置いてあり、組ごとに id を並べて選ぶ。並べた順が図と表の順になる。
+**paper 系**：方式はすべて `PAPER_CATALOG` に名前を 1 つずつ置き、組ごとに名前を並べて選ぶ。並べた順が図と表の順になる。
+
+**方式の名前（11-20）**：`R-閾値-配分-再挿入[-adm][~変種]` の部品の並び。指定は名前から組み立てる（`run.sh` の `id_spec`）ので、名前と中身はずれない。部品の中身を変えたら必ず別の名前になる（`v2` のような版の名前は使わない）。細かい設定は部品の後ろに `.設定` で付ける（既定と違うものだけ）。数は先頭が 0 なら小数（`l01` = 0.1、`w0` = 0）。部品と設定の一覧は `config.sh` の「方式の名前の付け方」。
+
+| 部品 | 名前（既定） | 細かい設定の例 |
+|---|---|---|
+| R | `r256`（256 MiB）・`ru`（RU） | |
+| 閾値 | `none`・`st`・`otsu`（大津・再利用の強さ・累積）・`fix`・`dram` | `otsu.cd10`、`fix.256k`、`dram.t1` |
+| 配分 | `nat`（下限なし）・`ghost`（名簿、move=4）・`climb`（山登り w=0.1）・`ff` | `ghost.m0`・`ghost.m2`・`ghost.m3`、`climb.w0`、`ff.90` |
+| 再挿入 | `n0`〜`n9`・`nauto`・`cb`（損得、λ=0） | `cb.l01`、`cb.first`、`nauto.ii` |
+| 受け入れ | `adm`（S3-FIFO 型の篩） | |
+| 変種 | `~c0`・`~c0m`・`~f1`・`~s<n>` | |
+
+例：CacheLib = `r256-none-nat-n1`、現在の提案 = `ru-otsu-ghost-cb`、その篩つき = `ru-otsu-ghost-cb-adm`、種 2 = `ru-otsu-ghost-cb~s2`。11-20 より前の id（`r256_base`・`ru_auto_v2` など）の結果は、同じコマンドなら新しい名前の run に写される（§3.2）。古い名前のフォルダは消してよい。11-20 より前の `ru_auto_v2` は `move=2`（今の `ru-otsu-ghost.m2-cb`）で、今の `ru-otsu-ghost-cb`（move=4）とは別の run になる。
 
 | 組 | 変数 | コマンド | 既定 |
 |---|---|---|---|
-| 本番 | `PAPER_FINAL2_METHODS` | `paper-final2` | 24 方式（現在の提案 `ru_auto_v2` と論文の問い Q1〜Q5 の変種、§6.5.2） |
-| 以前の本番 | `PAPER_FINAL_METHODS` | `paper-final` | 20 方式（以前の `ru_auto` と V2 の変種、§6.5.2） |
+| 本番 | `PAPER_FINAL2_METHODS` | `paper-final2` | 24 方式（現在の提案 `ru-otsu-ghost-cb` と論文の問い Q1〜Q5 の変種、§6.5.2） |
+| 以前の本番 | `PAPER_FINAL_METHODS` | `paper-final` | 20 方式（以前の `ru-st-climb-nauto` と V2 の変種、§6.5.2） |
 | 検討用の全部 | `PAPER_METHODS` | `paper` | 31 方式（§6.5.1） |
-| CacheLib の閾値違い | `PAPER_EXT_METHODS` | `paper-ext` | `r256_n0 r256_n2 r256_n3` |
+| CacheLib の閾値違い | `PAPER_EXT_METHODS` | `paper-ext` | `r256-none-nat-n0 r256-none-nat-n2 r256-none-nat-n3` |
 | 頑健性 | `PAPER_ROBUST_METHODS` | `paper-robust` | 21 方式（§6.5.4） |
 | 感度 | `PAPER_SENS_METHODS` | `paper-sens` | 5 方式 × 変えた点（`SENS_SSD`・`SENS_DRAM`・`SENS_RU`、§6.5.6） |
 
 ```bash
 ./run.sh methods                                               # カタログの全部と、組ごとにどれが選ばれているか
-PAPER_FINAL2_METHODS="r256_base ru_auto_v2 ru_adm_v2_n1" ./run.sh paper-final2   # その場で選ぶ（config.sh を書き換えてもよい）
+PAPER_FINAL2_METHODS="r256-none-nat-n1 ru-otsu-ghost-cb ru-otsu-ghost-n1-adm" ./run.sh paper-final2   # その場で選ぶ（config.sh を書き換えてもよい）
 ```
 
 自分の方式を足すには、`config.sh` の末尾などに 1 行足して、その id を組に並べる：
 
 ```bash
-PAPER_CATALOG+=("ru_fifo|hint=none,region-evict=fifo,reinsert=hits:n=1|R=RU＋Region FIFO")
-PAPER_METHODS="$PAPER_METHODS ru_fifo"
+PAPER_CATALOG+=("ru-otsu-ghost.m3-cb.l03|現在の提案・下限を速く下げる・λ=0.3")   # 名前だけ書けば指定は作られる（| の後は図の名前、省略可）
+PAPER_METHODS="$PAPER_METHODS ru-otsu-ghost.m3-cb.l03"
 ```
 
 - 指定の書き方は validity・tune と同じ（`params.html`）。SSD・DRAM・chunk はトレースごとに validity と同じ値が入り、`region-size` を書かなければ R = RU（`REGION_BYTES`）。
-- 基準 `r256_base` は差の基準なので、どの組でも選んでいなくても必ず回す。`all` と書くとカタログの全部（頑健性用の `_c0` などで終わる id は除く）。
+- 基準 `r256-none-nat-n1` は差の基準なので、どの組でも選んでいなくても必ず回す。`all` と書くとカタログの全部（頑健性用の `~c0` などで終わる id は除く）。
 - **図と表の系列は、いまの `config.sh` の選択で決まる**：組で選んだ方式のうち、どれか 1 本のトレースで結果がある物は全部、表・棒グラフ・時間変化・交換関係の図の系列になる（`paper_figs.py` は方式の一覧を持たない。ext は paper の選択も並べる）。`./run.sh paper-figs` は描く前に、結果のある組の `methods.tsv` を今の選択から作り直す（回さない）。だから選択を変えて `paper-figs` だけ回せば、その方式だけの図になる。選択から外した方式は、結果が残っていても出ない。
 - 図の名前は、カタログの 3 番目の欄（`"id|指定|名前"`）→ `paper_figs.py` の名前の表 → 指定から自動で作った名前（例「R=RU＋閾値＝再利用の強さ＋配分＝名簿＋n=cb（名簿）」）の順。色は名前の表に無ければ並び順で決まり、どの図でも同じ方式は同じ色。
 - カタログに無い id を選ぶと、何も回さずに止まる。
-- 以前の指定も使える：`PAPER_GATE=1` で `ru_gate` を足す、`ROBUST_W0=0` で `ru_auto_w0_*` を外す。
+- 以前の指定も使える：`PAPER_GATE=1` で `ru-st-climb.gate-nauto` を足す、`ROBUST_W0=0` で `ru-st-climb.w0-nauto~*` を外す。
 
 **tune**：構成は `TUNE_JOBS`（`id|指定` の並び）。回すものを `TUNE_METHODS` で選ぶ（既定 `all`。基準 `none_h1` は必ず入る。例 `TUNE_METHODS="none_auto st_hc0.1_auto" ./run.sh tune meta_nha`）。
 
@@ -394,8 +408,8 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 **流れ**
 
 ```bash
-./run.sh paper-final2         # 1. 本番：CacheLib と現在の提案 ru_auto_v2 ほか（§6.5.2）→ work/paper/final2/
-./run.sh paper-final          # 2. 同じ組で提案を以前の ru_auto に（前の版との比較）→ work/paper/final/
+./run.sh paper-final2         # 1. 本番：CacheLib と現在の提案 ru-otsu-ghost-cb ほか（§6.5.2）→ work/paper/final2/
+./run.sh paper-final          # 2. 同じ組で提案を以前の ru-st-climb-nauto に（前の版との比較）→ work/paper/final/
 ./run.sh paper-robust         # 3. 頑健性（§6.5.4）→ work/paper/robust/
 ./run.sh paper                # 検討用の全部（§6.5.1）→ work/paper/
 ./run.sh paper-ext            # CacheLib の n=0・2・3 だけ（§6.5.3）→ work/paper/ext/
@@ -404,7 +418,7 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.5.5）
 ```
 
-結果は組の間で共有する（同じ方式は回し直さない）。final2・final は paper と paper-ext の場所に回し、図と表だけを `final2/`・`final/` に出す。だから 1 → 2 と回しても、2 で増える run は以前の `ru_auto` と V2 の変種だけ。
+結果は組の間で共有する（同じ方式は回し直さない）。final2・final は paper と paper-ext の場所に回し、図と表だけを `final2/`・`final/` に出す。だから 1 → 2 と回しても、2 で増える run は以前の `ru-st-climb-nauto` と V2 の変種だけ。
 
 #### 6.5.1 方式の一覧（`PAPER_CATALOG`）
 
@@ -412,84 +426,86 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 
 | 群 | id | Region | 方式 |
 |---|---|---|---|
-| 1 基準 | `r256_base`（**基準**） | 256 MiB（`PAPER_R256`） | 分類なし、再挿入 n=1（CacheLib 相当。BMR 4.705%） |
-| | `ru_base` | RU | Region を RU にしただけ（−0.036・0.720） |
-| 2 **現在の提案（V2）** | `ru_auto_v2` | RU | **閾値・容量の配分・書き直しを全部自動**。閾値 ＝ 大きさのビン（2 のべき乗）ごとの「書いた 1 バイトが何回要求されたか」の対数を、大津の式で 2 組に分ける所（累積で数える、`hint=st_otsu:val=logreq/bins=1/hold=4/band=2/ema_den=0`）。容量 ＝ SSD を出た物の名簿で各分類の「容量を少し足したら増える BHR」を測り、そろう向きへ大の分類の下限を動かす（`region-params=auto=2/w=0/ff=0/move=2`）。書き直し ＝ 次の滞在で 1 バイトあたり何回当たったかが、名簿の限界の価値以上なら書き直す（`reinsert=hits:n=cb/lambda=0/base=marg`）。nha −0.132・0.695、w01 −3.81、Tencent −0.73。理論は `../docs/Che-sim/ru_auto_v2_theory.html` |
-| | `ru_v2_n1` / `r256_v2_n1` | RU / 256 MiB | 同じ分類と配分で、書き直しは CacheLib と同じ n=1 |
-| | `ru_adm_v2_n1` | RU | ＋ S3-FIFO 型の篩。w01 では書き込み 0.2 倍で BMR −3.2、Tencent・ブロックのトレースでは BMR が悪化 |
-| | `ru_v2_cb` | RU | 書き直しの基準を「初めて書いた物の値」に（より厳しく、書き込みを減らす側） |
-| | `ru_none_v2` / `ru_v2_nofloor` | RU | 部品の段階（Q3）：分類なしで n=cb だけ / 閾値だけで配分は自然なまま（下限なし）。`ru_base` → `ru_v2_nofloor` → `ru_v2_n1` → `ru_auto_v2` の順に部品が増える |
-| | `ru_adm_v2` / `ru_adm_none_v2` | RU | 篩との 2×2（Q5）：篩 ＋ 現在の提案 / 篩 ＋ 分類なし ＋ n=cb（相方 `ru_auto_v2`・`ru_none_v2`） |
-| | `ru_auto_v2_l01` / `_l03` / `_l1` | RU | 書き込みの値段 λ = 0.1・0.3・1（Q4）。交換関係の図で `ru_auto_v2`（λ=0）とつないだ破線になる |
-| 3 以前の提案 | `ru_auto` / `r256_auto` | RU / 256 MiB | st の閾値 ＋ 下限の山登り（前の窓と J = BHR + 0.1·OHR を比べる）＋ n=auto（+0.083・0.609。山登りは 1 歩の効果が窓ごとの揺れに埋もれて酔歩し、n=auto は書き直しを 9 → 0.8 TB に削りすぎた） |
-| | `ru_auto_n1` / `r256_auto_n1` | RU / 256 MiB | 同じで書き直しを n=1 に（−0.062・0.708 / −0.093・0.971） |
-| | `ru_auto_w0` / `r256_auto_w0` | RU / 256 MiB | 山登りの目的を BHR だけに（appendix §O） |
-| | `ru_ff90_h3` / `r256_ff90_h3` | RU / 256 MiB | 手で調整（大の下限 0.9・n=3） |
-| | `ru_gate`（既定では回さない） | RU | 下限が要るかを試してから山登り（`../docs/Che-sim/ru_auto_guide.html` §6） |
-| 4 部品の切り分け | `ru_none_auto` / `r256_none_auto` | RU / 256 MiB | 分類なしで n=auto だけ（+0.137） |
-| | `ru_st_nauto` / `ru_st_n0` | RU | サイズ分類だけで容量の配分は決めない（OHR 寄り）。n=auto あり / なし |
-| | `ru_auto_ii` | RU | 書き直した物を専用の書き込み口へ（`mode=ii`。CacheLib の priority と同じ形） |
-| | `r256_base_cb` / `r256_auto_cb` / `ru_auto_cb` | 256 MiB / RU | 書き直しだけ n=cb（初めて書いた物の基準）に。CacheLib に足すと +0.011・0.989（1 回当たった物は初めて書いた物とほぼ同じ価値で、答えはほぼ n=1） |
-| 5 先行研究の手がかり | `ru_dram_auto` / `ru_dram1_auto` | RU | 置き場所の鍵を **DRAM でのヒット数**に（RIPQ / Flashield。`dram` は動的、`dram1` は 0 回 / 1 回以上） |
-| | `r256_adm` | 256 MiB | CacheLib ＋ S3-FIFO 型の篩（`admit=dram:min=1/ghost=0.9`：DRAM で当たった物と、断った後 SSD 容量 × 0.9 分の名簿にいる間にまた来た物だけ書く。−0.003・0.608） |
-| | `ru_adm_none_auto` / `ru_adm_auto` | RU | **受け入れ × 置き場所の 2×2**（相方は `ru_none_auto`・`ru_auto`）。置き場所の得が篩の後も残るか（直交性）を `table_orth.md / .csv` に出す |
-| | `ru_adm_auto_n1` / `r256_adm_auto_n1` / `ru_adm_auto_cb` | RU / 256 MiB | 篩 ＋ 以前の分類と下限（n=1 で −0.064・0.429 / −0.074・0.588） |
-| | `ru_adm_dram2_auto`（既定では回さない） | RU | 篩と同じ手がかりで置き場所も分ける |
-| 6 CacheLib のつまみ | `r256_n0` / `r256_n2` / `r256_n3` | 256 MiB | CacheLib の書き直しの閾値違い（§6.5.3） |
-| 7 頑健性 | `*_c0` `*_c0m` `*_f1` `*_s2` `*_s3` | — | §6.5.4 |
+| 1 基準 | `r256-none-nat-n1`（**基準**） | 256 MiB（`PAPER_R256`） | 分類なし、再挿入 n=1（CacheLib 相当。BMR 4.705%） |
+| | `ru-none-nat-n1` | RU | Region を RU にしただけ（−0.036・0.720） |
+| 2 **現在の提案（V2）** | `ru-otsu-ghost-cb` | RU | **閾値・容量の配分・書き直しを全部自動**。閾値 ＝ 大きさのビン（2 のべき乗）ごとの「書いた 1 バイトが何回要求されたか」の対数を、大津の式で 2 組に分ける所（累積で数える、`hint=st_otsu:val=logreq/bins=1/hold=4/band=2/ema_den=0`）。容量 ＝ SSD を出た物の名簿で各分類の「容量を少し足したら増える BHR」を測り、そろう向きへ大の分類の下限を動かす（`region-params=auto=2/w=0/ff=0`。名前の `ghost`）。書き直し ＝ 次の滞在で 1 バイトあたり何回当たったかが、名簿の限界の価値以上なら書き直す（`reinsert=hits:n=cb/lambda=0/base=marg`）。nha −0.112、w01 −3.81、Tencent −0.755。理論は `../docs/Che-sim/ru_auto_v2_theory.html` |
+| | `ru-otsu-ghost-n1` / `r256-otsu-ghost-n1` | RU / 256 MiB | 同じ分類と配分で、書き直しは CacheLib と同じ n=1 |
+| | `ru-otsu-ghost-n1-adm` | RU | ＋ S3-FIFO 型の篩。w01 では書き込み 0.2 倍で BMR −3.2、Tencent・ブロックのトレースでは BMR が悪化 |
+| | `ru-otsu-ghost-cb.first` | RU | 書き直しの基準を「初めて書いた物の値」に（より厳しく、書き込みを減らす側） |
+| | `ru-none-nat-cb` / `ru-otsu-nat-cb` | RU | 部品の段階（Q3）：分類なしで n=cb だけ / 閾値だけで配分は自然なまま（下限なし）。`ru-none-nat-n1` → `ru-otsu-nat-cb` → `ru-otsu-ghost-n1` → `ru-otsu-ghost-cb` の順に部品が増える |
+| | `ru-otsu-ghost-cb-adm` / `ru-none-nat-cb-adm` | RU | 篩との 2×2（Q5）：篩 ＋ 現在の提案 / 篩 ＋ 分類なし ＋ n=cb（相方 `ru-otsu-ghost-cb`・`ru-none-nat-cb`） |
+| | `ru-otsu-ghost-cb.l01` / `_l03` / `_l1` | RU | 書き込みの値段 λ = 0.1・0.3・1（Q4）。交換関係の図で `ru-otsu-ghost-cb`（λ=0）とつないだ破線になる |
+| 3 以前の提案 | `ru-st-climb-nauto` / `r256-st-climb-nauto` | RU / 256 MiB | st の閾値 ＋ 下限の山登り（前の窓と J = BHR + 0.1·OHR を比べる）＋ n=auto（+0.083・0.609。山登りは 1 歩の効果が窓ごとの揺れに埋もれて酔歩し、n=auto は書き直しを 9 → 0.8 TB に削りすぎた） |
+| | `ru-st-climb-n1` / `r256-st-climb-n1` | RU / 256 MiB | 同じで書き直しを n=1 に（−0.062・0.708 / −0.093・0.971） |
+| | `ru-st-climb.w0-nauto` / `r256-st-climb.w0-nauto` | RU / 256 MiB | 山登りの目的を BHR だけに（appendix §O） |
+| | `ru-st-ff.90-n3` / `r256-st-ff.90-n3` | RU / 256 MiB | 手で調整（大の下限 0.9・n=3） |
+| | `ru-st-climb.gate-nauto`（既定では回さない） | RU | 下限が要るかを試してから山登り（`../docs/Che-sim/ru_auto_guide.html` §6） |
+| 4 部品の切り分け | `ru-none-nat-nauto` / `r256-none-nat-nauto` | RU / 256 MiB | 分類なしで n=auto だけ（+0.137） |
+| | `ru-st-nat-nauto` / `ru-st-nat-n0` | RU | サイズ分類だけで容量の配分は決めない（OHR 寄り）。n=auto あり / なし |
+| | `ru-st-climb-nauto.ii` | RU | 書き直した物を専用の書き込み口へ（`mode=ii`。CacheLib の priority と同じ形） |
+| | `r256-none-nat-cb.first` / `r256-st-climb-cb.first` / `ru-st-climb-cb.first` | 256 MiB / RU | 書き直しだけ n=cb（初めて書いた物の基準）に。CacheLib に足すと +0.011・0.989（1 回当たった物は初めて書いた物とほぼ同じ価値で、答えはほぼ n=1） |
+| 5 先行研究の手がかり | `ru-dram.k2-climb-nauto` / `ru-dram.t1-climb-nauto` | RU | 置き場所の鍵を **DRAM でのヒット数**に（RIPQ / Flashield。`dram` は動的、`dram1` は 0 回 / 1 回以上） |
+| | `r256-none-nat-n1-adm` | 256 MiB | CacheLib ＋ S3-FIFO 型の篩（`admit=dram:min=1/ghost=0.9`：DRAM で当たった物と、断った後 SSD 容量 × 0.9 分の名簿にいる間にまた来た物だけ書く。−0.003・0.608） |
+| | `ru-none-nat-nauto-adm` / `ru-st-climb-nauto-adm` | RU | **受け入れ × 置き場所の 2×2**（相方は `ru-none-nat-nauto`・`ru-st-climb-nauto`）。置き場所の得が篩の後も残るか（直交性）を `table_orth.md / .csv` に出す |
+| | `ru-st-climb-n1-adm` / `r256-st-climb-n1-adm` / `ru-st-climb-cb.first-adm` | RU / 256 MiB | 篩 ＋ 以前の分類と下限（n=1 で −0.064・0.429 / −0.074・0.588） |
+| | `ru-dram.t2-climb-nauto-adm`（既定では回さない） | RU | 篩と同じ手がかりで置き場所も分ける |
+| 6 CacheLib のつまみ | `r256-none-nat-n0` / `r256-none-nat-n2` / `r256-none-nat-n3` | 256 MiB | CacheLib の書き直しの閾値違い（§6.5.3） |
+| 7 頑健性 | `*~c0` `*~c0m` `*~f1` `*~s2` `*~s3` | — | §6.5.4 |
 
-`paper` の既定（`PAPER_METHODS`）は群 1〜5 から `ru_gate`・`ru_adm_dram2_auto` を除いた 31 方式。
+`paper` の既定（`PAPER_METHODS`）は群 1〜5 から `ru-st-climb.gate-nauto`・`ru-dram.t2-climb-nauto-adm` を除いた 31 方式。
 
 #### 6.5.2 本番（`paper-final2`）と以前の本番（`paper-final`）
 
-論文の図と表に載せる組。交換関係の図（`fig_tradeoff*.svg`）も出す。`paper-final2` が本番で、`paper-final` は提案だけを以前の `ru_auto` に戻した同じ組（前の版との比較用。11-20 に足した V2 の変種 3 つと `ru_auto_v2` も並ぶ）。
+論文の図と表に載せる組。交換関係の図（`fig_tradeoff*.svg`）も出す。`paper-final2` が本番で、`paper-final` は提案だけを以前の `ru-st-climb-nauto` に戻した同じ組（前の版との比較用。11-20 に足した V2 の変種 3 つと `ru-otsu-ghost-cb` も並ぶ）。
 
 | 役割 | id | 何を示すか（nha、CacheLib n=1 との ΔBMR [pt] / NAND 書き込み比） |
 |---|---|---|
-| 基準 | `r256_base` | いまの CacheLib（R=256 MiB、分類なし、n=1） |
-| CacheLib のつまみ | `r256_n0` / `r256_n2` / `r256_n3` | 書き直しの閾値を変えるだけで届く範囲。提案がこの線より左下にあれば「書き直しを減らしただけ」ではない |
-| **現在の提案** | `ru_auto_v2`（final2）／ `ru_auto`（final） | 全部自動。`ru_auto_v2`：nha −0.132・0.695、w01 −3.81・0.67、Tencent −0.73・0.70（以前の `ru_auto` は +0.083 / −0.38 / +1.46）。乱数の種による揺れは 0.016pt 以内 |
-| 以前の提案の中心 | `r256_auto_n1` / `ru_auto_n1` | 以前の分類＋下限に n=1。−0.093・0.971 / −0.062・0.708 |
-| Region を RU に | `ru_base` | −0.036・0.720。BMR の得はほぼ無い（RU の利点は DLWA の側） |
-| 切り分け | `ru_none_auto` | 分類なしで n=auto だけ（+0.137） |
-| 別の鍵（先行研究の手がかり） | `ru_dram1_auto` | 置き場所を DRAM でのヒット数で分ける（RIPQ / Flashield） |
-| 受け入れの先行研究 | `r256_adm` | CacheLib ＋ S3-FIFO 型の篩（−0.003・0.608） |
-| 直交性 | `ru_adm_auto` | 以前の分類＋下限＋n=auto ＋ 同じ篩（+0.112・0.354） |
-| 篩＋分類＋下限（n=1） | `r256_adm_auto_n1` / `ru_adm_auto_n1` | −0.074・0.588 / −0.064・0.429。BMR が CacheLib より良い構成の中で書き込み最少 |
-| 書き直しを損得で | `r256_base_cb` / `ru_auto_cb` | +0.011・0.989 / −0.064・0.674。損得で決めると答えはほぼ n=1 |
-| **論文の問い（11-20、`../docs/Che-sim/paper_story.html` §3）** | `ru_v2_nofloor` `ru_v2_n1` `ru_none_v2` | Q3 部品の段階：`ru_base` → 閾値だけ → ＋配分（n=1）→ ＋n=cb（`ru_auto_v2`） |
-| | `ru_auto_v2_l01` `_l03` `_l1` | Q4 書き込みとの交換：λ を上げると左（書き込み減）へ。`fig_tradeoff*.svg` で CacheLib の n=0〜3 の線と並ぶ破線 |
-| | `ru_adm_none_v2` `ru_adm_v2` | Q5 篩との 2×2（`ru_none_v2`・`ru_auto_v2` と組む） |
+| 基準 | `r256-none-nat-n1` | いまの CacheLib（R=256 MiB、分類なし、n=1） |
+| CacheLib のつまみ | `r256-none-nat-n0` / `r256-none-nat-n2` / `r256-none-nat-n3` | 書き直しの閾値を変えるだけで届く範囲。提案がこの線より左下にあれば「書き直しを減らしただけ」ではない |
+| **現在の提案** | `ru-otsu-ghost-cb`（final2）／ `ru-st-climb-nauto`（final） | 全部自動。`ru-otsu-ghost-cb`：nha −0.112、w01 −3.81、Tencent −0.755、msr −0.32（move=4。NAND 比は回し直しの後に更新）（以前の `ru-st-climb-nauto` は +0.083 / −0.38 / +1.46）。乱数の種による揺れは 0.016pt 以内 |
+| 以前の提案の中心 | `r256-st-climb-n1` / `ru-st-climb-n1` | 以前の分類＋下限に n=1。−0.093・0.971 / −0.062・0.708 |
+| Region を RU に | `ru-none-nat-n1` | −0.036・0.720。BMR の得はほぼ無い（RU の利点は DLWA の側） |
+| 切り分け | `ru-none-nat-nauto` | 分類なしで n=auto だけ（+0.137） |
+| 別の鍵（先行研究の手がかり） | `ru-dram.t1-climb-nauto` | 置き場所を DRAM でのヒット数で分ける（RIPQ / Flashield） |
+| 受け入れの先行研究 | `r256-none-nat-n1-adm` | CacheLib ＋ S3-FIFO 型の篩（−0.003・0.608） |
+| 直交性 | `ru-st-climb-nauto-adm` | 以前の分類＋下限＋n=auto ＋ 同じ篩（+0.112・0.354） |
+| 篩＋分類＋下限（n=1） | `r256-st-climb-n1-adm` / `ru-st-climb-n1-adm` | −0.074・0.588 / −0.064・0.429。BMR が CacheLib より良い構成の中で書き込み最少 |
+| 書き直しを損得で | `r256-none-nat-cb.first` / `ru-st-climb-cb.first` | +0.011・0.989 / −0.064・0.674。損得で決めると答えはほぼ n=1 |
+| **論文の問い（11-20、`../docs/Che-sim/paper_story.html` §3）** | `ru-otsu-nat-cb` `ru-otsu-ghost-n1` `ru-none-nat-cb` | Q3 部品の段階：`ru-none-nat-n1` → 閾値だけ → ＋配分（n=1）→ ＋n=cb（`ru-otsu-ghost-cb`） |
+| | `ru-otsu-ghost-cb.l01` `_l03` `_l1` | Q4 書き込みとの交換：λ を上げると左（書き込み減）へ。`fig_tradeoff*.svg` で CacheLib の n=0〜3 の線と並ぶ破線 |
+| | `ru-none-nat-cb-adm` `ru-otsu-ghost-cb-adm` | Q5 篩との 2×2（`ru-none-nat-cb`・`ru-otsu-ghost-cb` と組む） |
 
-**確かめた範囲と弱点**（`../docs/Che-sim/summary_1120.html`）：`ru_auto_v2` の数字は手元のスクリプトで回した nha・w01・Tencent（Region を nha と同じ比率に縮めた版）。設計の選択（閾値の量、`move=2` など）はこの 3 本を見て決めたので、検証用に回した msr（−0.30、以前の `ru_auto` の −1.05 に負け、名簿の向きが逆という未解決の問題）、block_traces_3（差が出ない）、大きさの分布が途中で変わる合成負荷（分けない CacheLib に負ける）では得が小さいか負けている。篩はトレースを選ぶ。`chunk-mode=object` で測った以前の数字は `CHANGELOG.md` にある。
+**確かめた範囲と弱点**（`../docs/Che-sim/summary_1120.html`）：`ru-otsu-ghost-cb` の数字は手元のスクリプトで回した nha・w01・Tencent（Region を nha と同じ比率に縮めた版）。設計の選択（閾値の量など）はこの 3 本を見て決めたので、検証用に回した msr（−0.32、以前の `ru-st-climb-nauto` の −1.05 に負け、名簿の向きが逆という未解決の問題）、block_traces_3（差が出ない）、大きさの分布が途中で変わる合成負荷（分けない CacheLib に負ける）では得が小さいか負けている。篩はトレースを選ぶ。`chunk-mode=object` で測った以前の数字は `CHANGELOG.md` にある。
 
 #### 6.5.3 CacheLib の書き直しの閾値違い（`paper-ext`）
 
-`r256_n0`・`r256_n2`・`r256_n3`（n=1 は基準）。「書き直しの閾値だけ上げた CacheLib」と比べても分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。`work/paper/ext/` の図と表には `work/paper/` の結果も読み込んで、基準・n=0〜3・分類なしの n=auto・提案・篩の方式を並べる（`work/paper/` の図と表は変えない）。`python3 py/paper_check.py work --ext` で ext の構成も並べて確かめる。
+`r256-none-nat-n0`・`r256-none-nat-n2`・`r256-none-nat-n3`（n=1 は基準）。「書き直しの閾値だけ上げた CacheLib」と比べても分類の効果が残るかを見る。n=0 は書き込みの下限と、そのときの BMR の悪化を示す。`work/paper/ext/` の図と表には `work/paper/` の結果も読み込んで、基準・n=0〜3・分類なしの n=auto・提案・篩の方式を並べる（`work/paper/` の図と表は変えない）。`python3 py/paper_check.py work --ext` で ext の構成も並べて確かめる。
 
 **交換関係の図**（ext と final）：`fig_tradeoff.svg`（全トレース）と `fig_tradeoff_<trace>.svg`。横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（下が良い）。CacheLib の n=0〜3 を線でつなぎ（書き直しを増やすほど書き込みが増えて BMR が下がる）、各方式を点で重ねる。点が線の左下なら、同じ BMR を少ない書き込みで出している。篩の点は書き込みが少なく左に来るので、縦の位置を n=0 の点と比べる（n=0 より上なら、篩は書き込みを減らす代わりに元のサーバからの転送を増やしている。S3-FIFO 論文の flash の実験はミス率と書き込みバイトしか示していないので、この図が帯域の側の答えになる）。
 
 #### 6.5.4 頑健性（`paper-robust`）
 
-結論が RegionFlash の作りや乱数に頼っていないかを見る（既定は 1 トレース 21 本。11-20 に現在の提案の種 2・3 `ru_auto_v2_s2`・`_s3` を足し、`fig_robust_v2.svg` に出す）。背景は `../docs/regionflash_callgraph.html`。
+結論が RegionFlash の作りや乱数に頼っていないかを見る（既定は 1 トレース 21 本。11-20 に現在の提案の種 2・3 `ru-otsu-ghost-cb~s2`・`_s3` を足し、`fig_robust_v2.svg` に出す）。背景は `../docs/regionflash_callgraph.html`。
 
 | 条件 | 指定 | 確かめること |
 |---|---|---|
-| `_c0` | `chunk=0`（片に分けず、物を 1 Region の中に連続で置く。Region より大きい物は入らない） | 片を 1 つ失うと物全体のミスになる RegionFlash の扱いを外したとき、同じ R どうしの比較の向きが変わらないか。**実機の置き方ではない**（下の注意）。R の違う構成では、R=RU の方だけ 256〜626.5 MiB の物を置けるので、差に置ける物の違いが混ざる |
-| `_c0m` | `chunk=0` ＋ 受け入れの上限を全構成で 256 MiB（`admit=sizemax`） | 全構成を同じ物の集まりにして、追い出し方・置き場所だけを比べる。**256 MiB を超える物は全構成でミスになる**（nha ではリクエストバイトの 44.3%、リクエスト数の 0.69%）ので、言えるのは 256 MiB 以下の物の中での傾向だけ。BMR の主結果の代わりにはならない |
+| `~c0` | `chunk=0`（片に分けず、物を 1 Region の中に連続で置く。Region より大きい物は入らない） | 片を 1 つ失うと物全体のミスになる RegionFlash の扱いを外したとき、同じ R どうしの比較の向きが変わらないか。**実機の置き方ではない**（下の注意）。R の違う構成では、R=RU の方だけ 256〜626.5 MiB の物を置けるので、差に置ける物の違いが混ざる |
+| `~c0m` | `chunk=0` ＋ 受け入れの上限を全構成で 256 MiB（`admit=sizemax`） | 全構成を同じ物の集まりにして、追い出し方・置き場所だけを比べる。**256 MiB を超える物は全構成でミスになる**（nha ではリクエストバイトの 44.3%、リクエスト数の 0.69%）ので、言えるのは 256 MiB 以下の物の中での傾向だけ。BMR の主結果の代わりにはならない |
 
-**注意：片（chunk）の扱いと実機の違い**。CacheLib を CDN で使うときの piece-wise caching は、大きい物を一定の大きさの片に分け、片をそれぞれ独立の項目として保存する（Region の大きさは物の大きさの上限にならない）。RegionFlash の既定（`chunk=64K`）も片に分けて置くが、**片を 1 つ失うと物全体を捨て、ヒット・ミスも物単位で数える**（`ssd/rf_piece.c`）。実機では欠けた片のバイトだけを取り直すので、RegionFlash は大きい物の損を実機より大きく数えている。この損は、物がまたがる Region の数が多いほど（R が小さいほど）大きい。`_c0` / `_c0m` はこの扱いを外すが、実機とも違う置き方になる。11-19 から、実機と同じ数え方 `chunk-mode=piece`（`CHUNK_MODE`、既定）を足した。失った片だけが消え、リクエストは残っている片のバイトをヒット、欠けた片のバイトをミスに数え、DRAM から出るとき欠けた片だけを書く。片を本当に別のキーに展開したトレース（`tools/synth/og_piece.c`）と、nha の先頭で BMR が 0.01〜0.06pt 以内で一致することを確かめた（`chunk-mode=object` は +0.54pt ずれていた）。
-| `_f1` | 再挿入の上限なし（`max_frac=1`。既定は追い出す Region あたり R×0.5） | 候補の多い n=1 の基準が上限で損をしていないか |
-| `_s2`・`_s3` | 乱数の種 2・3 | 差がゆれより大きいか |
+**注意：片（chunk）の扱いと実機の違い**。CacheLib を CDN で使うときの piece-wise caching は、大きい物を一定の大きさの片に分け、片をそれぞれ独立の項目として保存する（Region の大きさは物の大きさの上限にならない）。RegionFlash の既定（`chunk=64K`）も片に分けて置くが、**片を 1 つ失うと物全体を捨て、ヒット・ミスも物単位で数える**（`ssd/rf_piece.c`）。実機では欠けた片のバイトだけを取り直すので、RegionFlash は大きい物の損を実機より大きく数えている。この損は、物がまたがる Region の数が多いほど（R が小さいほど）大きい。`~c0` / `~c0m` はこの扱いを外すが、実機とも違う置き方になる。11-19 から、実機と同じ数え方 `chunk-mode=piece`（`CHUNK_MODE`、既定）を足した。失った片だけが消え、リクエストは残っている片のバイトをヒット、欠けた片のバイトをミスに数え、DRAM から出るとき欠けた片だけを書く。片を本当に別のキーに展開したトレース（`tools/synth/og_piece.c`）と、nha の先頭で BMR が 0.01〜0.06pt 以内で一致することを確かめた（`chunk-mode=object` は +0.54pt ずれていた）。
+| `~f1` | 再挿入の上限なし（`max_frac=1`。既定は追い出す Region あたり R×0.5） | 候補の多い n=1 の基準が上限で損をしていないか |
+| `~s2`・`~s3` | 乱数の種 2・3 | 差がゆれより大きいか |
 
-- 条件ごとの一式（`work/paper/robust/<条件>/`）：paper と同じ図と表を、その条件で回した構成だけで作る（`r256_base_c0` → `r256_base` と読み替え）。カタログに `<構成名>_<条件>` の名前で足して `PAPER_ROBUST_METHODS` に並べれば、その構成も加わる。
-- 条件をまたいだ図（`work/paper/robust/` 直下）：`fig_robust.svg` = 提案 − CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3（`_w0` = 目的を BHR だけにした提案）。`fig_robust_rubase.svg`（と `_n3_rubase`）= R=RU にしただけ（`ru_base`）− CacheLib、`fig_robust_vs_rubase.svg` = 提案 − `ru_base`（Region を RU にした効果を除いた、分類＋下限＋n=auto の効果）。左 = ΔBMR、右 = 書き込みの比、色 = 条件。数値は `table_robust.csv` / `.md`。
-- **`ru_base_c0m`（11-19 追加）**：nha 系で `ru_base`（R=RU のみ）が CacheLib より BMR −0.11pt と提案より良く出た。既定の `chunk=64K` では片を 1 つ失うと物全体を失うので、物がまたがる Region の少ない大きい R ほど大きい物を失いにくく、この得の一部は RegionFlash の数え方によるものかもしれない（上の注意）。`_c0m` で得が残るかは見られるが、`_c0m` は 256 MiB を超える物（nha のバイトの 44%）を外した中での比較なので、**得が消えても「片の扱いのせい」とは言い切れない**（外した大きい物に得があった可能性が残る）。決着には、片を独立の項目として数える作り（実機の piece-wise caching と同じ）が要る。
+- 条件ごとの一式（`work/paper/robust/<条件>/`）：paper と同じ図と表を、その条件で回した構成だけで作る（`r256-none-nat-n1~c0` → `r256-none-nat-n1` と読み替え）。カタログに `<構成名>~<条件>` の名前で足して `PAPER_ROBUST_METHODS` に並べれば、その構成も加わる。
+- 条件をまたいだ図（`work/paper/robust/` 直下）：`fig_robust.svg` = 提案 − CacheLib n=1、`fig_robust_n3.svg` = 提案 − CacheLib n=3（`_w0` = 目的を BHR だけにした提案）。`fig_robust_rubase.svg`（と `_n3_rubase`）= R=RU にしただけ（`ru-none-nat-n1`）− CacheLib、`fig_robust_vs_rubase.svg` = 提案 − `ru-none-nat-n1`（Region を RU にした効果を除いた、分類＋下限＋n=auto の効果）。左 = ΔBMR、右 = 書き込みの比、色 = 条件。数値は `table_robust.csv` / `.md`。
+- **`ru-none-nat-n1~c0m`（11-19 追加）**：nha 系で `ru-none-nat-n1`（R=RU のみ）が CacheLib より BMR −0.11pt と提案より良く出た。既定の `chunk=64K` では片を 1 つ失うと物全体を失うので、物がまたがる Region の少ない大きい R ほど大きい物を失いにくく、この得の一部は RegionFlash の数え方によるものかもしれない（上の注意）。`~c0m` で得が残るかは見られるが、`~c0m` は 256 MiB を超える物（nha のバイトの 44%）を外した中での比較なので、**得が消えても「片の扱いのせい」とは言い切れない**（外した大きい物に得があった可能性が残る）。決着には、片を独立の項目として数える作り（実機の piece-wise caching と同じ）が要る。
 - どの条件でも「提案の ΔBMR ≤ 0（または n=3 より小さい）」と「書き込みの比 < 1」の向きが既定と同じなら、結論は作りや乱数に頼っていない。
 
 #### 6.5.5 出力と確かめ方
 
 出力（各組のフォルダ。`index.html` に図と表と要点）：
+
+**図の組（11-24）**：final2 は 24 方式あり、1 枚に全部並べると凡例が図の半分を占め棒が潰れる。そこで `config.sh` の `PAPER_FIGSETS` に並べた図の組ごとに、その方式と基準だけの同じ一式（図・表・`index.html`）を `<組のフォルダ>/figs_<名前>/` に出す（例：`work/paper/final2/figs_main/`）。群ごとの一式の中にも同じく `figs_<名前>/` ができる。全方式の図と表（`table_main.csv` など）は今までどおり組のフォルダにある。組の選択に無い方式は飛ばし、1 つも無い図の組は出さない。色は組全体の並びで決めるので、どの図の組でも 1 方式 1 色。全方式の図も、凡例が 3 行を超えた分だけ図を縦に伸ばすので軸は潰れない。回し直しは要らない（`./run.sh paper-figs` で作り直せる）。
 
 **トレースの群ごと（11-20）**：組のフォルダ（`work/paper/`・`final/`・`final2/`・`ext/`・`robust/<条件>/`）には、traces.tsv の全トレースをまとめた図と表が出る。それに加えて、traces.tsv の `category` × `source` の群ごとに、同じ一式（下の表のファイル全部と `index.html`）を `<組のフォルダ>/groups/<category>__<source>/` に出す（例：`work/paper/final2/groups/CDN__Meta/`、`.../KV__Twitter/`）。書き込み量や効き方は群でかなり違うので、群の中で比べるとき用。run は群をまたいで共有するので回す量は変わらず、`./run.sh paper-figs` だけでも作り直せる。出さないなら `GROUP_FIGS=0`。category・source が空のトレースは `-` の群になる。感度（paper-sens）と頑健性の条件をまたいだ図（`fig_robust*.svg`）は群に分けない（感度はトレースごとの図がある）。
 
@@ -511,13 +527,13 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 - **棒のラベル**：棒の上に値を書く。横書きが棒の幅に入らなければ縦書き、軸の外にはみ出すなら棒の中に白で。書き込みの棒は**取得（濃い）＋再書き込み（薄い）**に分けて積み、合計を棒の上、取得と再書き込みを各段の中に、小数第 2 位で書く（段に入らない数字だけ省く）。詰め物はごく小さいので表と CSV だけ。
 - 面の題は軸の幅に収まるまで字を小さくし、それでも入らなければ 2 行に折る。
 - 時間変化の図は各構成の `P.interval.csv`（刻み = `INTERVAL`）から作る。
-- **書き込み量の印**：CacheLib（`r256_base`）の累積 SSD 書き込みが W に達した時点（= 先頭の部分トレース）の結果を取り出し、全量と比べる。W は `traces.tsv` の `marks` 列、空なら `WRITE_MARKS_TB`。図の線が W の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。表では全量と差の向きが違うものに ✗。
+- **書き込み量の印**：CacheLib（`r256-none-nat-n1`）の累積 SSD 書き込みが W に達した時点（= 先頭の部分トレース）の結果を取り出し、全量と比べる。W は `traces.tsv` の `marks` 列、空なら `WRITE_MARKS_TB`。図の線が W の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。表では全量と差の向きが違うものに ✗。
 - **増幅**：`traces.tsv` の `amp_key`（要求ごとに K 個の別キー。物・要求・フットプリントが K 倍）と `amp_size`（サイズを F 倍）を RegionFlash の `amp-key` / `amp-size` として tune・paper に渡す（`P.json` の `config` に残る）。要求数・区間・温め期間は増幅した後の要求で数える。validity には効かない。
 - **確かめ方**：`python3 py/paper_check.py work [トレース名..]`。構成ごとに、Region・chunk・分類の閾値が意図どおりか、全要求を回したか、書き込み = 受け入れ＋再挿入＋詰め物 が成り立つか、基準からの書き込みの差の内訳、受け入れの差が BMR の差 × 要求バイトと合うか、n=auto が選んだ閾値と下限 ff を一覧にする。
 
 #### 6.5.6 感度（`paper-sens`）
 
-キャッシュの容量・DRAM の大きさ・RU の大きさを変えても、CacheLib（`r256_base`）との差の向きが変わらないかを見る。全部の組み合わせは回さず、**一度に一つだけ変え、ほかは既定のまま**にする。
+キャッシュの容量・DRAM の大きさ・RU の大きさを変えても、CacheLib（`r256-none-nat-n1`）との差の向きが変わらないかを見る。全部の組み合わせは回さず、**一度に一つだけ変え、ほかは既定のまま**にする。
 
 | 変えるもの | 変数（既定） | 意味 | 点の場所 |
 |---|---|---|---|
@@ -525,9 +541,9 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 | DRAM | `SENS_DRAM`（`100 10`） | DRAM = SSD ÷ この値（既定は 30） | `sens/dram_<値>/` |
 | RU | `SENS_RU`（`268435456 1342177280 2684354560`） | Region = RU の大きさ [B]（256 MiB・1.25 GiB・2.5 GiB。既定は 626.5 MiB） | `sens/ru_<MiB>M/` |
 
-- 方式は `PAPER_SENS_METHODS`（既定 `r256_base ru_base ru_auto_v2 ru_v2_n1 ru_none_v2`）。`ru_none_v2` は分類なしで書き直しだけ n=cb（`ru_auto_v2` との差が分類＋配分の効果）。
+- 方式は `PAPER_SENS_METHODS`（既定 `r256-none-nat-n1 ru-none-nat-n1 ru-otsu-ghost-cb ru-otsu-ghost-n1 ru-none-nat-cb`）。`ru-none-nat-cb` は分類なしで書き直しだけ n=cb（`ru-otsu-ghost-cb` との差が分類＋配分の効果）。
 - **既定の点は `work/paper` の結果を共有**する（paper で回した方式は回し直さない）。変えた点だけが `work/paper/sens/<点>/` に増える。
-- **RU の点では CacheLib を回さない**：`r256_base` は Region を 256 MiB に固定して持つので、RU を変えても既定の点と同じ run になる。図と表では既定の点の値と比べる。
+- **RU の点では CacheLib を回さない**：`r256-none-nat-n1` は Region を 256 MiB に固定して持つので、RU を変えても既定の点と同じ run になる。図と表では既定の点の値と比べる。
 - 出力（`work/paper/sens/`）：`fig_sens_<トレース>.svg`（上 = ΔBMR [pt]、下 = SSD 書き込みの比。左から SSD 容量・DRAM・RU。縦の灰線 = 既定の点）、`table_sens.csv` / `.md`（ΔBMR・ΔOHR・書き込みの比）。
 - **書き込みは DLWA を掛けていない**（アプリ層の書き込み）。CacheLib 側の DLWA は RU によって違う（実機で測ったのは R=256 MiB・RU 626.5 MiB の 1.4 だけ）。NAND 書き込みで比べるときは、RU ごとに実機の値か見積りを掛ける。
 - 規模：トレース × 点 × 方式。既定ではトレースあたり 7 点 × 5 方式から、既定の点の共有分と RU の点の CacheLib を除いた約 30 run。重いトレースだけ外すなら `./run.sh paper-sens meta_nha wiki_cdn` のように名前を並べる。点を減らすなら `SENS_RU="1342177280" ./run.sh paper-sens`、空にすればその軸を回さない（`SENS_DRAM= ./run.sh paper-sens`）。

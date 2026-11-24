@@ -3,30 +3,31 @@
 
   python3 paper_robust_figs.py <WORK>          PAPER_LANG=en で英語の文字
 
-条件ごとに、提案（RU＋分類の自動、ru_auto）と CacheLib（R=256MiB、分類なし）の差を並べる:
-  既定        work/paper の ru_auto と r256_base（n3 は work/paper/ext の r256_n3）
-  chunk=0     _c0：片に分けず、物を 1 Region の中に連続で置く（片を 1 つ失って物ごと消える RegionFlash の扱いが起きない）。
+条件ごとに、提案（RU＋分類の自動、ru-st-climb-nauto）と CacheLib（R=256MiB、分類なし）の差を並べる:
+  既定        work/paper の ru-st-climb-nauto と r256-none-nat-n1（n3 は work/paper/ext の r256-none-nat-n3）
+  chunk=0     ~c0：片に分けず、物を 1 Region の中に連続で置く（片を 1 つ失って物ごと消える RegionFlash の扱いが起きない）。
               実機の置き方ではない（CacheLib の piece-wise caching は片を独立の項目にする）。R より大きい物は入らない
-  chunk=0m    _c0m：_c0 に、受け入れの上限を全構成で 256 MiB にそろえたもの。256 MiB を超える物（nha ではバイトの 44%）は
+  chunk=0m    ~c0m：~c0 に、受け入れの上限を全構成で 256 MiB にそろえたもの。256 MiB を超える物（nha ではバイトの 44%）は
               全構成でミスなので、256 MiB 以下の物の中での傾向だけを見る診断
-  上限なし    _f1：再挿入の上限なし（max_frac=1）
-  種 2 / 種 3 _s2 / _s3：乱数の種
+  上限なし    ~f1：再挿入の上限なし（max_frac=1）
+  種 2 / 種 3 ~s2 / ~s3：乱数の種
 出力: fig_robust.svg（提案 − CacheLib n=1）、fig_robust_n3.svg（提案 − CacheLib n=3。n=3 のある条件だけ）、
-      _w0 = 目的を BHR だけにした提案、_rubase = R=RU にしただけ（ru_base）、fig_robust_vs_rubase.svg = 提案 − ru_base
-      （Region を RU にした効果を除いた、分類＋下限＋n=auto の効果。R の違いによる片の扱いの差が _c0m で消えるかを見る）。
+      _w0 = 目的を BHR だけにした提案、_rubase = R=RU にしただけ（ru-none-nat-n1）、fig_robust_vs_rubase.svg = 提案 − ru-none-nat-n1
+      （Region を RU にした効果を除いた、分類＋下限＋n=auto の効果。R の違いによる片の扱いの差が ~c0m で消えるかを見る）。
       それぞれ左 = ΔBMR [pt]（0 = 比べる相手、下が良い）、右 = 書き込みの比（比べる相手 = 1、1 未満が良い）。table_robust.csv / .md。
 どの条件でも棒が同じ側にあれば、結論は RegionFlash の作りや乱数に頼っていない。標準ライブラリだけ。"""
 import csv, glob, json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from figures import Fig, Ax, span, to_png
+from ids import BASE, PROPOSAL, PREVIOUS, RU_ONLY, ROBUST_PROPS, VAR
 
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 T = lambda ja, en: en if EN else ja
 P = f"{WORK}/paper"; D = f"{P}/robust"; os.makedirs(D, exist_ok=True)
-COND = [("", T("既定", "default"), "#1f4e8c"), ("_c0", T("chunk=0", "chunk=0"), "#9fd3b0"),
-        ("_c0m", T("chunk=0・受入上限 256MiB", "chunk=0, admit ≤ 256MiB"), "#3f9a64"), ("_f1", T("再挿入の上限なし", "no rewrite cap"), "#c9683a"),
-        ("_s2", T("乱数の種 2", "seed 2"), "#8a5fb5"), ("_s3", T("乱数の種 3", "seed 3"), "#b8a02a")]
+COND = [("", T("既定", "default"), "#1f4e8c"), (VAR + "c0", T("chunk=0", "chunk=0"), "#9fd3b0"),
+        (VAR + "c0m", T("chunk=0・受入上限 256MiB", "chunk=0, admit ≤ 256MiB"), "#3f9a64"), (VAR + "f1", T("再挿入の上限なし", "no rewrite cap"), "#c9683a"),
+        (VAR + "s2", T("乱数の種 2", "seed 2"), "#8a5fb5"), (VAR + "s3", T("乱数の種 3", "seed 3"), "#b8a02a")]
 
 runs = {}   # runs[trace][config] = tune_one の要約（work/paper → ext → robust の順に重ねる）
 for src in (P, f"{P}/ext", D):
@@ -34,11 +35,10 @@ for src in (P, f"{P}/ext", D):
         d = json.load(open(f))
         if isinstance(d, dict) and "runs" in d: runs.setdefault(d["name"], {}).update(d["runs"])
 # 比べる組：(構成, 比べる相手, 図の名前, 題の構成名)。構成と相手の両方の結果がある条件だけを描く
-PROPS = [("ru_auto_v2", "_v2", T("現在の提案（V2）", "proposal (V2)")), ("ru_auto", "", T("以前の提案", "previous proposal")), ("ru_auto_w0", "_w0", T("提案・BHR のみ", "proposal, BHR only")),
-         ("ru_base", "_rubase", T("R=RU のみ", "R=RU only"))]
+PROPS = [(p, slug, T(ja, en)) for p, slug, ja, en in ROBUST_PROPS]   # ids.py
 PAIRS = [(p, b, f"{slug}{ps}", lab, ref) for p, ps, lab in PROPS
-         for b, slug, ref in (("r256_base", "fig_robust", T("CacheLib n=1", "CacheLib n=1")), ("r256_n3", "fig_robust_n3", T("CacheLib n=3", "CacheLib n=3")))]
-PAIRS.append(("ru_auto", "ru_base", "fig_robust_vs_rubase", T("提案", "proposal"), T("R=RU のみ", "R=RU only")))
+         for b, slug, ref in ((BASE, "fig_robust", T("CacheLib n=1", "CacheLib n=1")), ("r256-none-nat-n3", "fig_robust_n3", T("CacheLib n=3", "CacheLib n=3")))]
+PAIRS.append((PROPOSAL, RU_ONLY, "fig_robust_vs_rubase", T("現在の提案", "proposal"), T("R=RU のみ", "R=RU only")))
 names = sorted(n for n, R in runs.items() if any(f"{p}{s}" in R and f"{b}{s}" in R for s, _, _ in COND[1:] for p, b, *_ in PAIRS))
 if not names: sys.exit(f"{D} に頑健性の結果が無い（./run.sh paper-robust がまだ）")
 
