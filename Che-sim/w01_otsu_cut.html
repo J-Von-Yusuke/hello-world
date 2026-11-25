@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>w01 大津の切れ目</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1f2328;--mut:#5b6470;--line:#d9d6cf;--card:#fff;--sm:#2b6cb0;--lg:#b7791f;--grp:#c53030;--good:#2f855a;--bad:#c53030;--hl:#fff4d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#e6e6e6;--mut:#a0a8b3;--line:#3a3f47;--card:#1f2228;--sm:#63a4f0;--lg:#e0a84a;--grp:#f07a7a;--good:#68c99a;--bad:#f07a7a;--hl:#3a3420}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#e6e6e6;--mut:#a0a8b3;--line:#3a3f47;--card:#1f2228;--sm:#63a4f0;--lg:#e0a84a;--grp:#f07a7a;--good:#68c99a;--bad:#f07a7a;--hl:#3a3420}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 "Noto Sans JP","Yu Gothic UI",Meiryo,sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.5rem;margin:.2em 0 .1em}h2{font-size:1.15rem;margin:2em 0 .5em;border-bottom:1px solid var(--line);padding-bottom:.2em}
+.sub{color:var(--mut);font-size:.9rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.key{background:var(--hl)}
+table{border-collapse:collapse;width:100%;font-size:.92rem}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left}th{color:var(--mut);font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+svg{width:100%;height:auto;display:block}svg text{fill:var(--fg);font-size:13px}svg .m{fill:var(--mut)}
+code{font-size:.88em}
+ol li,ul li{margin:.25em 0}
+</style></head><body><main>
+<h1>w01：大津の閾値が 1 段ずれて BMR が上がる理由</h1>
+<p class="sub">2026-11-25。提案（RU・大津（再利用の強さ）・名簿の配分 move=4・再挿入 n=cb）、w01 の全トレース、2 億 1,580 万リクエスト。</p>
+
+<div class="card key"><b>結論</b>
+<ol>
+<li>大津は w01 で閾値を <b>512K</b> に置く。いちばん良い固定の閾値は <b>256K</b>。違いは「256K〜512K の物（書いたバイトの 2.5%）を小の組に入れるか、大の組に入れるか」だけ。</li>
+<li>この物を小の組に入れると、その物自身は得をする（BMR −0.13 ポイント）。ただ、小の組で場所を取られた 4K 以下の物の損（+0.31 ポイント）の方が大きい。差し引き <b>+0.19 ポイント</b>。</li>
+<li>大津がこれに気づかない理由は 2 つ。
+<ul>
+<li>大津の得点は「組の平均の価値がどれだけ離れるか」で決まる。2.5% しかない段をどちらに入れても、得点はほとんど変わらない（2 つの切れ目の得点の比は 0.95〜1.03）。</li>
+<li>その段の価値（書いた 1 バイトが何回要求されるか）が小の組の物とほぼ同じに見える。ところが、SSD の場所 1 バイトあたりのヒットで比べると、小の組の物の 4 割に満たない。</li>
+</ul></li>
+<li>ヒステリシス（<code>band=2</code>）が邪魔をしている、という最初の仮説は外れた。<code>band=1</code> にしても閾値は 512K のまま。</li>
+</ol></div>
+
+<h2>1. まず数字：差はどこから来るか</h2>
+<p>同じ設定で、閾値だけを変えて全トレースを回した。</p>
+<table>
+<tr><th>閾値の決め方</th><th>最後の閾値</th><th class="n">BMR [%]</th><th class="n">固定 256K との差</th></tr>
+<tr><td>固定 256K</td><td>256K</td><td class="n">65.577</td><td class="n">0</td></tr>
+<tr><td>固定 512K</td><td>512K</td><td class="n">65.767</td><td class="n">+0.19</td></tr>
+<tr><td><b>大津（今の提案）</b></td><td>512K</td><td class="n"><b>65.688</b></td><td class="n">+0.11</td></tr>
+<tr><td>大津、ヒステリシスを 1 段に（band=1）</td><td>512K</td><td class="n">66.014</td><td class="n">+0.44</td></tr>
+<tr><td>大津、DRAM で当たった要求を数えない（qdram=0）</td><td>512K</td><td class="n">65.896</td><td class="n">+0.32</td></tr>
+</table>
+<ul>
+<li><b>切れ目の差</b>（固定 512K − 固定 256K）が +0.19。</li>
+<li><b>大津の途中の動き</b>（大津 − 固定 512K）は −0.08 で、少し得をしている。</li>
+<li>最後の閾値が同じ 512K でも、立ち上がりの動き方の違いで ±0.3 ポイントぶれる（下の 2 行）。</li>
+</ul>
+
+<h2>2. 大きさの段と 2 つの切れ目</h2>
+<p>棒の高さ = SSD に書いたバイトの割合。棒の上の数字 = 大津の価値（書いた 1 バイトが何回要求されるか。DRAM で当たった分も含む）。w01 の物の大きさはぴったり 2 のべき乗（4K・256K・512K・1M）に集まっている。</p>
+<svg viewBox="0 0 820 300" role="img" aria-label="大きさの段ごとの書き込みの割合と価値">
+<g transform="translate(40,20)">
+<line x1="0" y1="220" x2="760" y2="220" stroke="var(--line)"/>
+<!-- bins 2^10..2^20, width 62, gap 7; scale: 41.3% -> 200px -->
+<g>
+<rect x="0" y="168" width="58" height="52" fill="var(--sm)"/><text x="29" y="160" text-anchor="middle">1.29</text><text x="29" y="238" text-anchor="middle" class="m">1K</text>
+<rect x="69" y="164" width="58" height="56" fill="var(--sm)"/><text x="98" y="156" text-anchor="middle">1.28</text><text x="98" y="238" text-anchor="middle" class="m">2K</text>
+<rect x="138" y="97" width="58" height="123" fill="var(--sm)"/><text x="167" y="89" text-anchor="middle">2.03</text><text x="167" y="238" text-anchor="middle" class="m">4K</text>
+<rect x="207" y="215" width="58" height="5" fill="var(--sm)"/><text x="236" y="207" text-anchor="middle">1.63</text><text x="236" y="238" text-anchor="middle" class="m">8K</text>
+<rect x="276" y="218" width="58" height="2" fill="var(--sm)"/><text x="305" y="207" text-anchor="middle" class="m">…</text><text x="305" y="238" text-anchor="middle" class="m">16K〜128K</text>
+<rect x="345" y="214" width="58" height="6" fill="var(--sm)"/><text x="374" y="207" text-anchor="middle">3.06</text><text x="374" y="238" text-anchor="middle" class="m">128K</text>
+<rect x="414" y="208" width="58" height="12" fill="var(--grp)"/><text x="443" y="200" text-anchor="middle" font-weight="700">6.06</text><text x="443" y="238" text-anchor="middle" class="m">256K</text>
+<rect x="483" y="197" width="58" height="23" fill="var(--lg)"/><text x="512" y="189" text-anchor="middle">1.09</text><text x="512" y="238" text-anchor="middle" class="m">512K</text>
+<rect x="552" y="20" width="58" height="200" fill="var(--lg)"/><text x="581" y="12" text-anchor="middle">1.02</text><text x="581" y="238" text-anchor="middle" class="m">1M</text>
+</g>
+<line x1="409" y1="0" x2="409" y2="250" stroke="var(--good)" stroke-width="2.5" stroke-dasharray="6 4"/>
+<text x="404" y="262" text-anchor="end" fill="var(--good)">固定 256K の切れ目（良い）</text>
+<line x1="478" y1="0" x2="478" y2="250" stroke="var(--bad)" stroke-width="2.5"/>
+<text x="483" y="262" fill="var(--bad)">大津の切れ目 512K</text>
+<text x="622" y="60">赤の段 = 256K〜512K</text><text x="622" y="78">書いたバイトの 2.5%</text>
+<text x="622" y="96">2 つの切れ目の違いは</text><text x="622" y="114">この段の行き先だけ</text>
+</g></svg>
+<p>大津の目には、赤の段（256K〜512K）は価値 6.06 でいちばん「良い物」に見える。だから小の組（青）に入れる。ただし、この価値の大部分は DRAM で当たった要求だ（§4）。</p>
+
+<h2>3. 赤の段を小の組に入れたときの損得</h2>
+<p>固定 512K と固定 256K の大きさの段ごとの差。ミスしたバイトの増減を、全要求バイトに対するポイントで示す。</p>
+<svg viewBox="0 0 820 250" role="img" aria-label="損得の内訳">
+<g transform="translate(260,20)">
+<line x1="200" y1="0" x2="200" y2="200" stroke="var(--line)"/>
+<!-- scale 1pt = 600px -->
+<text x="-10" y="28" text-anchor="end">赤の段の物自身（256K〜512K）</text><rect x="120" y="14" width="80" height="22" fill="var(--good)"/><text x="114" y="30" text-anchor="end">−0.13</text>
+<text x="-10" y="68" text-anchor="end">2K〜4K の物</text><rect x="200" y="54" width="109" height="22" fill="var(--bad)"/><text x="315" y="70">+0.18</text>
+<text x="-10" y="108" text-anchor="end">1K〜2K の物</text><rect x="200" y="94" width="55" height="22" fill="var(--bad)"/><text x="261" y="110">+0.09</text>
+<text x="-10" y="148" text-anchor="end">そのほかの小さい物</text><rect x="200" y="134" width="27" height="22" fill="var(--bad)"/><text x="233" y="150">+0.05</text>
+<text x="-10" y="190" text-anchor="end" font-weight="700">合計</text><rect x="200" y="176" width="115" height="22" fill="var(--bad)" opacity=".6"/><text x="321" y="192" font-weight="700">+0.19（BMR が上がる）</text>
+</g></svg>
+<p>赤の段の 1 つの物は 256K〜512K あり、小の組の典型的な物（2K〜4K）の 100 倍前後の場所を取る。同じ組の 1 本の LRU に入れれば、どの物も同じくらいの時間 SSD に居る。だから比べるべきは「SSD の場所 1 バイトが稼ぐヒット」だ。固定 512K で測ると次のとおり。</p>
+<table>
+<tr><th>大きさの段（小の組）</th><th class="n">書いた 1 バイトあたりの SSD ヒット</th></tr>
+<tr><td>1K 以下・1K〜2K・2K〜4K</td><td class="n">0.29</td></tr>
+<tr><td>赤の段（256K〜512K）</td><td class="n"><b>0.11</b></td></tr>
+</table>
+<p>赤の段は、同じ場所で小さい物の 4 割弱しか稼がない。追い出せば、空いた場所で小さい物がもっと稼ぐ。これが +0.19 の正体だ。</p>
+
+<h2>4. なぜ大津はそれを見分けないのか</h2>
+<div class="card">
+<b>(a) 価値に DRAM の当たりが入っている。</b>赤の段の要求の多くは、ちょうど 256K の物が DRAM で当たったものだ（その物の要求バイトの 83% を DRAM が返す）。DRAM で当たった要求は SSD の得にならない。それでも大津の価値には「よく要求される」として数えられ、6.06 になる。DRAM の分を抜くと 1.19 で、小の組の物（1.28）とほとんど同じになる。
+</div>
+<div class="card">
+<b>(b) 要求の回数とヒットは違う。</b>DRAM の分を抜いても、1.19 と 1.28 はほぼ同じに見える。一方、SSD の場所あたりのヒットは 0.11 と 0.29 で 3 倍違う。書いた 1 バイトが何回要求されるかは「ミスも含めた回数」で、そのうちどれだけが今の SSD の居場所の間にヒットになるかは測っていない。対数を取るので、差はさらに縮む。
+</div>
+<div class="card">
+<b>(c) 小さな段は得点をほとんど動かさない。</b>大津の得点は「2 つの組の書き込みの割合の積 × 平均の価値の差の 2 乗」。赤の段は書き込みの 2.5% しかない。どちらに入れても平均はわずかしか動かず、得点の比は 0.95〜1.03 の間を行き来する。それでも BMR には 0.19 ポイント効く。この段の 1 つの物が、小さい物 100 個ぶんの場所を取るからだ。<br>
+<span class="sub">走らせた大津の記録（1,385 回の計算）：候補は 2^19 = 512K が 1,330 回。後半の得点の比（256K ÷ 512K）の中央値は、DRAM を数えると 0.54、数えないと 0.95。</span>
+</div>
+
+<h2>5. 違った仮説（確かめて外れたもの）</h2>
+<ul>
+<li><b>ヒステリシスが 1 段の動きを止めている</b>：手元の大きさの段の表から大津をやり直すと、候補は 256K に見えた。ところが、この表とヒストグラムでは段の境目が違う。
+<ul>
+<li>表：(2^(b−1), 2^b]（ちょうど 2^b は下の段）。</li>
+<li>大津：[2^b, 2^(b+1))（ちょうど 2^b は上の段）。</li>
+<li>w01 は物がちょうど 512K・1M に集まっているので、表で数え直すと大きな塊が別の段に移る。</li>
+</ul>
+走らせた大津の記録を取ると、候補は始めから 512K だった。<code>band=1</code> にしても 512K のまま。前に <code>otsu_offline.py</code> が出した「w01 は 2^18 にぴったり」も、この境目のずれから来ていた。</li>
+<li><b>DRAM の当たりを数えなければ直る</b>（qdram=0）：価値は (a) のとおり下がるが、(b)・(c) が残り、閾値は 512K のまま。BMR は立ち上がりの動きの差で 65.90 になった。</li>
+</ul>
+
+<h2>6. 次の手（未着手）</h2>
+<ul>
+<li><b>価値を「SSD の場所あたりのヒット」にする。</b>書いた 1 バイトあたりの SSD ヒット（今回の 0.11 と 0.29）を価値にすれば、赤の段は大の組に寄る。</li>
+<li><b>大津は大まかな位置だけに使う。</b>最後の 1 段（隣の切れ目）は、名簿の配分が測っている限界の BHR で決める。</li>
+<li>どちらも、nha・Tencent・msr で悪くならないかを確かめてから。</li>
+</ul>
+<p class="sub">再現：tools/synth/w01_tau_bins.py・w01_tau_traj.py・w01_otsulog_read.py・w01_dram_share.py・w01_band.sh・w01_otsulog.sh・w01_qdram.sh。st_otsu.c に、環境変数 <code>RF_OTSU_LOG</code> で計算ごとの候補と得点を書く記録と、<code>qdram</code>（既定 1 = 今までどおり）を足した。記録ありの run は記録なしと BMR が完全に一致した（0.65688）。バイナリは ~/am/cachesim.f52a7e9fe2。キットのパッチには入れていない。</p>
+</main></body></html>

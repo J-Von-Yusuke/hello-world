@@ -1,0 +1,35 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>論文用の比較</title>
+<style>:root{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}
+body{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+img{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}pre{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}.m{color:var(--mut);font-size:13px}</style></head><body><main>
+<h1>説明用の比較（paper/users：config.sh の PAPER_USER_METHODS）</h1><p class="m">トレース 1 本：nha。</p>
+<h2>まとめ：fig_summary.svg</h2><img src='fig_summary.svg' alt='CacheLib との BMR の差と書き込みの比'><p class='m'>トレースごとに方式を横棒で並べた。左 = BMR の CacheLib（R=256MiB、n=1）との差（ポイント、負が良い）、右 = SSD 書き込み（CacheLib = 1、1 未満が良い）。値の面（BMR・OHR・書き込み）は目盛りがトレースごと、差と比の面は全トレース共通。</p><h2>まとめの 3 面：fig_summary_main.svg（値）・fig_summary_rel.svg（CacheLib 比）</h2><img src='fig_summary_main.svg' alt='BMR・書き込み・OHR'><img src='fig_summary_rel.svg' alt='ΔBMR・書き込みの比・ΔOHR'><h2>値と CacheLib 比の対：fig_summary_bmr_pair / _ohr_pair / _write_pair.svg</h2><img src='fig_summary_bmr_pair.svg' alt='BMR と ΔBMR'><img src='fig_summary_ohr_pair.svg' alt='OHR と ΔOHR'><img src='fig_summary_write_pair.svg' alt='書き込みと書き込みの比'><p class='m'>1 面ずつの図：fig_summary_bmr / _ohr / _write（値）、fig_summary_dbmr / _dohr / _nwrite（CacheLib 比）。</p><h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'><p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。点が灰の線より左下にあれば、同じ BMR を少ない書き込みで出している。紫系 = DRAM（ghost を含む）で 2 回以上リクエストされた物だけ書く篩（S3-FIFO 型の受け入れ）：CacheLib＋篩・RU＋篩＋分類（塗り）、RU＋篩のみ（白抜き）。篩の点は書き込みが桁違いに少なく左端に来る。縦の位置を n=0（書き直しなし）の点と比べると、篩が帯域（BMR）と引き換えにどれだけ書き込みを減らしたかが分かる（n=0 より上なら、書き込みを減らす代わりに元のサーバからの転送が増えている）。</p><h2>図：fig_main.svg（3 面まとめ）</h2><img src="fig_main.svg" alt="BMR・SSD 書き込み量・OHR の比較"><h2>図：fig_rel.svg（CacheLib 比の 3 面まとめ）</h2><img src="fig_rel.svg" alt="CacheLib 比の BMR・書き込み・OHR"><p class="m">左 = ΔBMR（構成 − CacheLib、0 = CacheLib、負が良い）。中 = SSD 書き込み（CacheLib = 1 に正規化、1 未満が良い）。右 = ΔOHR（参考）。1 面ずつの図：fig_bmr / fig_write / fig_ohr（値そのもの）、fig_dbmr / fig_nwrite / fig_dohr（CacheLib 比）。</p>
+<p><b>要点</b>（BMR・OHR はトレースの平均、書き込みは合計）：CacheLib：R=256M｜分類なし｜再挿入 n=1: BMR 6.88%、書込 0.1 TB、OHR 30.1%；CacheLib：R=256M｜分類なし｜再挿入 n=3: BMR 6.88%、書込 0.1 TB、OHR 30.1%；CacheLib：R=256M｜分類なし｜再挿入 n=1＋篩: BMR 6.88%、書込 0.1 TB、OHR 30.1%；R=RU｜分類なし｜再挿入 n=1: BMR 6.88%、書込 0.1 TB、OHR 30.1%；R=RU｜閾値 st｜配分 山登り（BHR+0.1·OHR）｜再挿入 n=auto: BMR 6.88%、書込 0.1 TB、OHR 30.1%；R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb: BMR 6.88%、書込 0.1 TB、OHR 30.1%；R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb＋篩: BMR 6.88%、書込 0.1 TB、OHR 30.1%。</p>
+<p class="m">左 = BMR（低いほど良い）。中 = SSD に書いたバイト（受け入れ＋再挿入＋詰め物、低いほど良い。トレースごとに規模が違うので平均は出さない）。右 = OHR（参考）。
+濃い灰 = 基準（CacheLib 相当、Region 256 MiB、分類なし、再挿入 n=1）。薄い灰 = Region を RU（626.5 MiB）に合わせただけ（DLWA = 1 だが、Region が大きいぶん道連れと書き直しが増える）。
+青 = RU＋書き込み時のサイズ分類（手動 / 自動）。橙 = 256 MiB＋分類（分類の効果が Region の大きさによらないかの確認）。</p>
+<h2>補足：時間変化</h2><p class='m'>fig_ops_* = 横軸が処理した要求数（BMR・OHR は区間ごと、SSD 書き込みは累積）。fig_wr_* = 横軸がその構成の累積 SSD 書き込み量（BMR・OHR はそこまでの累積。同じ量を書いた時点での比較）。破線 = 基準。</p><h3>fig_ops_nha</h3><img src="fig_ops_nha.svg" alt="fig_ops_nha"><h3>fig_wr_nha</h3><img src="fig_wr_nha.svg" alt="fig_wr_nha"><h2>自分で決める値の動き：fig_knobs_&lt;trace&gt;.svg</h2><p class='m'>左から 閾値 τ、容量配分（大の分類の下限 ff を太い線、その分類が実際に SSD に持つ割合を同じ色の細い線。下限なしで分類する方式は大の分類の自然な割合だけ）、書き直しの基準（名簿の限界の価値）、実質の n（その時点で書き直す最少のヒット数。CacheLib の n に当たる）。色 = 方式。右の 2 面は分類ごとに線を分け、破線 = 分類 0（小）、実線 = 分類 1（大）。下限 ff は大の分類が最低限持つ割合で、細い線（実際の割合）が太い線の上にあれば下限は効いておらず（自然な配分のほうが多い）、重なっていれば下限で配分を決めている。どこに落ち着いたかは table_knobs.md（最後の 4 分の 1 の平均と、下限が落ち着いた区間）。</p><h3>fig_knobs_nha</h3><img src="fig_knobs_nha.svg" alt="fig_knobs_nha"><pre>| トレース | 方式 | intervals | tau_last | tau_changes | floor_last_q | floor_settle_interval | share_0_last_q | bar_0_last_q | n_0_last_q | share_1_last_q | bar_1_last_q | n_1_last_q |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| nha | R=RU｜閾値 st｜配分 山登り（BHR+0.1·OHR）｜再挿入 n=auto | 1 | 1048576 | 0 | 0.5 | 0 | 0.406 | – | – | 0.112 | – | – |
+| nha | R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb | 1 | 16777215 | 0 | 0 | 0 | 0.436 | – | 1 | 0.0816 | – | 1 |
+| nha | R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb＋篩 | 1 | 16777215 | 0 | 0 | 0 | 0.436 | – | 1 | 0.0816 | – | 1 |
+
+*_last_q = 最後の 4 分の 1 の区間の平均（大体どこに落ち着いたか）。floor_settle_interval = 下限がその値の ±0.05 に初めて入った区間。bar = 名簿の限界の価値（ヒット/バイト/滞在）、n = 書き直す最少のヒット数（9 = 書き直さない）。分類 0 = 小、1 = 大。
+</pre>
+<h2>書き込み量の印での結果（部分トレースで足りるか）</h2><p class='m'>fig_marks_&lt;trace&gt;：横 = CacheLib が SSD に書いた量（先頭の部分トレースの長さ）、縦 = ΔBMR と書き込みの比。線が右端（全量）の値に早く落ち着き、赤い縦線（指定した書き込み量）の時点で全量と同じ側にあれば、その長さの部分トレースで結論が言える。数値は table_marks.md / .csv（✗ = 全量と向きが違う）。</p><img src="fig_marks_nha.svg" alt="fig_marks_nha"><pre>| トレース | 印 | 先頭の割合 | CacheLib：R=256M｜分類なし｜再挿入 n=3 | CacheLib：R=256M｜分類なし｜再挿入 n=1＋篩 | R=RU｜分類なし｜再挿入 n=1 | R=RU｜閾値 st｜配分 山登り（BHR+0.1·OHR）｜再挿入 n=auto | R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb | R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb＋篩 |
+|---|---|---|---|---|---|---|---|---|
+| nha | 全量 | 100.0% | +0.000 / 1.000 | +0.000 / 1.000 | +0.000 / 1.000 | +0.000 / 0.996 | +0.000 / 0.996 | +0.000 / 0.996 |
+
+各セル = ΔBMR [pt]（構成 − CacheLib）/ 書き込みの比（構成 ÷ CacheLib）。印 = CacheLib の累積 SSD 書き込みがその量に達した時点（先頭の割合 = そこまでの要求の割合）。✗ = 全量と差の向きが違う。
+</pre>
+<h2>表：table_main.md / .tex / .csv</h2><pre>| トレース | 基準 BMR [%] | 基準 書込 [TB]（取得＋再書込） | 基準 OHR [%] | 基準 書込増幅 | CacheLib：R=256M｜分類なし｜再挿入 n=3 | CacheLib：R=256M｜分類なし｜再挿入 n=1＋篩 | R=RU｜分類なし｜再挿入 n=1 | R=RU｜閾値 st｜配分 山登り（BHR+0.1·OHR）｜再挿入 n=auto | R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb | R=RU｜閾値 大津（再利用の強さ）｜配分 名簿｜再挿入 n=cb＋篩 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| nha | 6.88 | 0.1（0.1＋0.0） | 30.1 | 1.00 | +0.00 / 1.000 / +0.0 | +0.00 / 1.000 / +0.0 | +0.00 / 1.000 / +0.0 | +0.00 / 0.996 / +0.0 | +0.00 / 0.996 / +0.0 | +0.00 / 0.996 / +0.0 |
+
+各セル = ΔBMR [pt]（構成 − 基準、負 = 良い）/ SSD 書き込み（基準 = 1 に正規化、1 未満 = 良い）/ ΔOHR [pt]（構成 − 基準、正 = 良い）。基準 = CacheLib 相当（Region 256 MiB、分類なし、再挿入 n=1）。書込増幅 = SSD に書いたバイト ÷ 受け入れたバイト。
+</pre><h2>受け入れ × 置き場所（直交性）：table_orth.md / .csv</h2><pre>| 組 | トレース | 置き場所の ΔBMR（篩なし） | 置き場所の ΔBMR（篩あり） | 篩の ΔBMR | 相互作用 | 置き場所の書込比（篩なし / あり） | 篩の書込比 |
+|---|---|---|---|---|---|---|---|
+| 現在の提案 | nha | +0.00 | +0.00 | +0.00 | +0.00 | 0.995 / 0.995 | 1.000 |
+
+ΔBMR [pt]（負 = 良い）。置き場所 = サイズ分類＋容量の配分（現在の提案 = 大津＋名簿、以前の提案 = st＋山登り）、篩 = S3-FIFO 型：DRAM（ghost を含む）で 2 回以上リクエストされた物だけ書く（admit=dram:min=1/ghost=0.9）。相互作用 = 篩ありの置き場所の得 − 篩なしの得（0 なら足し算で効く。正なら篩で得が減る）。書込比 = 構成 ÷ 相方（1 未満 = 減る）。
+</pre></main></body></html>

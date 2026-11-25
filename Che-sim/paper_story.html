@@ -102,11 +102,11 @@ svg { width:100%; height:auto; display:block; } svg text { font-family:inherit; 
 <tr><th>問い</th><th>主張</th><th>計測</th><th>状態</th></tr>
 <tr><td>Q0 モデル</td><td>Region LRU の Che 近似は、分けた得と最適配分を予測できる</td><td>少数サイズの合成負荷でモデル対実測（老化モデル ≤1 pt）。自然な配分 46.4% 対 最適 40.3%</td><td class="done">あり</td></tr>
 <tr><td>Q1 RU にした損</td><td>Region を RU にしても BMR はほとんど悪化しない。NAND 書き込みは DLWA の分だけ減る</td><td>ru_base 対 r256_base（−0.036 pt・0.72）</td><td class="done">あり</td></tr>
-<tr><td>Q2 主の結果</td><td>ru_auto_v2 は CacheLib より BMR が低く、書き込みも少ない</td><td>3 本＋検証用トレースで ΔBMR・ΔOHR・NAND。最良の固定閾値（神の目）との差（3 本とも 0.2 pt 以内）</td><td class="part">3 本あり。検証用トレースが要る</td></tr>
-<tr><td>Q3 部品の寄与</td><td>分類だけでは損、配分で得になる。書き直しは n=1 と同じ</td><td>なし → ＋閾値（自然な配分）→ ＋配分 → ＋n=cb の段階表。閾値は固定（最良）と大津の式、配分は下限なし・山登り・名簿</td><td class="part">部品はある。1 枚の段階表にまとめ直す</td></tr>
-<tr><td>Q4 書き込みとの交換</td><td>λ を動かすと、CacheLib の n の線より左下を通る</td><td>λ = 0, 0.1, 0.3, 1（書き込み予算 dwpd でも可）× 3 本の BMR 対 NAND の図</td><td class="need">λ の掃引は nha の一部だけ</td></tr>
-<tr><td>Q5 篩との直交</td><td>篩の後でも分類の得が残る</td><td>2×2（篩あり・なし × V2 あり・なし）、<code>table_orth</code></td><td class="part">以前の ru_auto ではあり。V2 版が要る</td></tr>
-<tr><td>Q6 感度</td><td>容量・DRAM・RU を変えても傾向は同じ</td><td>§4 の掃引</td><td class="need">無い（キットにも無い）</td></tr>
+<tr><td>Q2 主の結果</td><td>ru_auto_v2 は CacheLib より BMR が低く、書き込みも少ない</td><td>3 本＋検証用トレースで ΔBMR・ΔOHR・NAND。最良の固定閾値（神の目）との差（3 本とも 0.2 pt 以内）</td><td class="part">3 本あり。キットの paper-final2 に入れた（種 2・3 は paper-robust の ru_auto_v2_s2・_s3）。検証用トレースが要る</td></tr>
+<tr><td>Q3 部品の寄与</td><td>分類だけでは損、配分で得になる。書き直しは n=1 と同じ</td><td>なし → ＋閾値（自然な配分）→ ＋配分 → ＋n=cb の段階表。閾値は固定（最良）と大津の式、配分は下限なし・山登り・名簿</td><td class="part">キットに入れた：ru_base → ru_v2_nofloor → ru_v2_n1 → ru_auto_v2（＋ ru_none_v2）。回すのはこれから</td></tr>
+<tr><td>Q4 書き込みとの交換</td><td>λ を動かすと、CacheLib の n の線より左下を通る</td><td>λ = 0, 0.1, 0.3, 1（書き込み予算 dwpd でも可）× 3 本の BMR 対 NAND の図</td><td class="part">キットに入れた：ru_auto_v2_l01・_l03・_l1。交換関係の図に λ の破線が出る。回すのはこれから</td></tr>
+<tr><td>Q5 篩との直交</td><td>篩の後でも分類の得が残る</td><td>2×2（篩あり・なし × V2 あり・なし）、<code>table_orth</code></td><td class="part">キットに入れた：ru_none_v2・ru_auto_v2 × ru_adm_none_v2・ru_adm_v2。回すのはこれから</td></tr>
+<tr><td>Q6 感度</td><td>容量・DRAM・RU を変えても傾向は同じ</td><td>§4 の掃引</td><td class="part">キットに入れた（./run.sh paper-sens）。回すのはこれから</td></tr>
 <tr><td>Q7 費用と限界</td><td>名簿の記憶量・計算量は小さい。効かない負荷を正直に示す</td><td>名簿の最大件数（w01 最大 278 万件）× 1 件のバイト。msr・ブロック・大きさが変わる負荷・Zipf の傾き</td><td class="part">件数はある。バイトへの換算と表が要る</td></tr>
 </table></div>
 

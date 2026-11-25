@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>提案方式の採用の筋道</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1f2328;--mut:#5b6470;--line:#d9d6cf;--card:#fff;--sm:#2b6cb0;--lg:#b7791f;--hot:#c53030;--cold:#a0aec0;--good:#2f855a;--bad:#c53030;--acc:#6b46c1;--hl:#fff4d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#e6e6e6;--mut:#a0a8b3;--line:#3a3f47;--card:#1f2228;--sm:#63a4f0;--lg:#e0a84a;--hot:#f07a7a;--cold:#5f6b7a;--good:#68c99a;--bad:#f07a7a;--acc:#b49cf0;--hl:#3a3420}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#e6e6e6;--mut:#a0a8b3;--line:#3a3f47;--card:#1f2228;--sm:#63a4f0;--lg:#e0a84a;--hot:#f07a7a;--cold:#5f6b7a;--good:#68c99a;--bad:#f07a7a;--acc:#b49cf0;--hl:#3a3420}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.8 "Noto Sans JP","Yu Gothic UI",Meiryo,sans-serif}
+main{max-width:900px;margin:0 auto;padding:24px 16px 72px}
+h1{font-size:1.55rem;margin:.2em 0}h2{font-size:1.2rem;margin:2.2em 0 .5em;border-bottom:2px solid var(--line);padding-bottom:.2em}h3{font-size:1.02rem;margin:1.5em 0 .3em}
+.sub{color:var(--mut);font-size:.9rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.key{background:var(--hl)}
+.eq{background:var(--card);border-left:4px solid var(--acc);padding:8px 14px;margin:10px 0}
+table{border-collapse:collapse;width:100%;font-size:.92rem;margin:8px 0}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left}th{color:var(--mut);font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+svg{width:100%;height:auto;display:block;margin:6px 0}svg text{fill:var(--fg);font-size:13px}svg .m{fill:var(--mut)}svg .b{font-weight:700}
+nav{font-size:.92rem;color:var(--mut)}nav a{color:inherit}
+code{font-size:.88em}
+.wrap{overflow-x:auto}
+.th{background:var(--card);border:1px solid var(--acc);border-radius:10px;padding:12px 16px;margin:14px 0}
+.th h4{margin:0 0 .4em;font-size:1rem;color:var(--acc)}
+.f{font-family:"Cambria Math","STIX Two Math","Times New Roman",serif;font-size:1.08em;text-align:center;margin:.6em 0;white-space:nowrap;overflow-x:auto}
+.f i,.v{font-family:"Cambria Math","Times New Roman",serif;font-style:italic}
+.th table{font-size:.88rem}
+.ok{color:var(--good)}
+</style></head><body><main>
+<h1>提案方式を採用するまでの筋道</h1>
+<p class="sub">2026-11-25（同日、理論と論文の書き方を追加）。採用した方式：閾値＝大津（再利用の強さ）｜配分＝名簿｜再挿入＝n=cb（＋篩）。キット名は <code>ru-otsu-ghost-cb</code>（篩つきは <code>-adm</code>）。数字はこの PC の全トレースの run（~/ttab）から。</p>
+<nav>1 出発点 ／ <b>2 Region 単位削除の Che 近似</b> ／ 3 物差し ／ <b>4 st がうまく行っていた理由</b> ／ 5 閾値：大津の式（<b>5.6 st を上回る理由</b>） ／ 6 配分：名簿（<b>6.5 Region LRU での導出</b>） ／ 7 再挿入：n=cb（<b>7.4 Region LRU での導出</b>） ／ 8 三つの組み合わせ ／ 9 結果 ／ 10 限界 ／ <b>11 論文での書き方（10・15・20 ページ）</b></nav>
+
+<div class="card key"><b>この文書の主張</b>
+<ol>
+<li>SSD のガベージコレクションを避けるには、決まった大きさの単位（Region、FDP では Reclaim Unit＝RU）でまとめて書き、まとめて消すのがよい。その代わり、<b>単位の中のコンテンツは一緒に消される</b>。人気のあるコンテンツも、人気のないコンテンツと同じ Region にいれば巻き添えで消える。</li>
+<li>単位の大きさは装置が決めるので、小さくはできない。できるのは次の三つ。
+<ul>
+<li><b>書くとき</b>に、似た価値のコンテンツを同じ Region に集める（閾値）。</li>
+<li>価値の違う組に<b>場所をどう分けるか</b>を決める（配分）。</li>
+<li><b>消すとき</b>に、残す価値のあるコンテンツだけを書き直して救う（再挿入）。</li>
+</ul></li>
+<li>三つとも「SSD に 1 バイトを 1 滞在置いたら、何回リクエストされるか（ヒット密度）」という同じ物差しで決める。違うのは、<b>どこの</b>密度を見るかだけ。</li>
+<li>w01 では CacheLib より BMR が 3.8 ポイント下がり、nha・Tencent・msr でも同等か良い。篩（DRAM でヒットしたものだけ SSD に入れる）を足すと、書き込みが 3〜7 割減る。ただし、ブロックのトレース（Tencent・msr）では篩で BMR が悪くなる。</li>
+</ol></div>
+
+<h2>1. 出発点：Region 単位の一括削除と、その弱点</h2>
+<p>SSD の中のガベージコレクション（GC）は、消す単位（ブロック、FDP では RU）に、まだ要るデータと要らないデータが混ざっているときに起こる。要るデータを別の場所へ写してから消すので、余計な書き込み（装置の書き込み増幅）が生まれ、寿命も応答時間も悪くなる。</p>
+<p>CacheLib などのフラッシュキャッシュは、これを避けるために大きな Region（例 256 MiB）単位で順番に書き、Region ごとまとめて捨てる。<b>消す単位と書く単位をそろえれば、装置の中で写すものがなくなる</b>（装置の書き込み増幅 = 1）。今回予定している「一定の削除単位（RU）による一括削除」はこの考えを RU まで広げたもので、Region の大きさは RU に合わせて決まる。</p>
+
+<h3>弱点：巻き添え</h3>
+<p>Region を捨てるとき、中の全部のコンテンツが一緒に消える。Region LRU（いちばん長く使われていない Region を捨てる）でも、Region の「最後に使われた時」は中の誰か 1 つで決まる。人気のコンテンツと一度きりのコンテンツが混ざった Region では、次のどちらかが起こる。</p>
+<ul>
+<li>人気のコンテンツが、一度きりのコンテンツと一緒に早く捨てられる（巻き添え）。</li>
+<li>一度きりのコンテンツが、人気のコンテンツのおかげで長く居座る。</li>
+</ul>
+<svg viewBox="0 0 860 250" role="img" aria-label="混ざった Region と分けた Region">
+<g transform="translate(10,10)">
+<text x="0" y="16" class="b">(a) 混ぜて書く（今の CacheLib）</text>
+<g transform="translate(0,30)">
+<rect x="0" y="0" width="190" height="56" fill="none" stroke="var(--line)" stroke-width="2"/>
+<rect x="8" y="10" width="36" height="36" fill="var(--hot)"/><rect x="52" y="10" width="36" height="36" fill="var(--cold)"/><rect x="96" y="10" width="36" height="36" fill="var(--cold)"/><rect x="140" y="10" width="36" height="36" fill="var(--cold)"/>
+<text x="95" y="76" text-anchor="middle" class="m">Region A（いちばん古い）</text>
+<rect x="210" y="0" width="190" height="56" fill="none" stroke="var(--line)" stroke-width="2"/>
+<rect x="218" y="10" width="36" height="36" fill="var(--cold)"/><rect x="262" y="10" width="36" height="36" fill="var(--hot)"/><rect x="306" y="10" width="36" height="36" fill="var(--cold)"/><rect x="350" y="10" width="36" height="36" fill="var(--cold)"/>
+<text x="305" y="76" text-anchor="middle" class="m">Region B</text>
+<path d="M95 100 v24" stroke="var(--bad)" stroke-width="2.5"/><text x="95" y="142" text-anchor="middle" fill="var(--bad)">A を捨てる → 赤（人気）も消える</text>
+<text x="95" y="160" text-anchor="middle" class="m">次のリクエストでミス。</text><text x="95" y="178" text-anchor="middle" class="m">救うには書き直し（再挿入）＝</text><text x="95" y="196" text-anchor="middle" class="m">アプリの中の GC</text>
+</g>
+<text x="450" y="16" class="b">(b) 書くときに分ける（提案）</text>
+<g transform="translate(450,30)">
+<rect x="0" y="0" width="190" height="56" fill="none" stroke="var(--line)" stroke-width="2"/>
+<rect x="8" y="10" width="36" height="36" fill="var(--cold)"/><rect x="52" y="10" width="36" height="36" fill="var(--cold)"/><rect x="96" y="10" width="36" height="36" fill="var(--cold)"/><rect x="140" y="10" width="36" height="36" fill="var(--cold)"/>
+<text x="95" y="76" text-anchor="middle" class="m">一度きりの組の Region</text>
+<rect x="210" y="0" width="190" height="56" fill="none" stroke="var(--line)" stroke-width="2"/>
+<rect x="218" y="10" width="36" height="36" fill="var(--hot)"/><rect x="262" y="10" width="36" height="36" fill="var(--hot)"/><rect x="306" y="10" width="36" height="36" fill="var(--cold)"/><rect x="350" y="10" width="36" height="36" fill="var(--cold)"/>
+<text x="305" y="76" text-anchor="middle" class="m">再利用される組の Region</text>
+<path d="M95 100 v24" stroke="var(--good)" stroke-width="2.5"/><text x="95" y="142" text-anchor="middle" fill="var(--good)">一度きりの組を先に捨てる</text>
+<text x="95" y="160" text-anchor="middle" class="m">巻き添えが減り、</text><text x="95" y="178" text-anchor="middle" class="m">書き直す量も減る</text>
+<text x="305" y="142" text-anchor="middle" class="m">組ごとにどれだけ場所を</text><text x="305" y="160" text-anchor="middle" class="m">持たせるか（配分）と、</text><text x="305" y="178" text-anchor="middle" class="m">それでも混ざる分を救うか</text><text x="305" y="196" text-anchor="middle" class="m">（再挿入）が残る</text>
+</g></g></svg>
+<p>単位が大きいほど、1 つの Region に入るコンテンツが増え、混ざり方も避けにくくなる。単位は小さくできないので、<b>何を同じ単位に入れるか</b>（書くとき）と、<b>消すときに何を救うか</b>（消すとき）で取り返す。これが三つの道具の出発点だ。</p>
+
+
+<h2>2. Region 単位の一括削除を Che 近似で表す</h2>
+<p>物単位の LRU なら、Che 近似（2.1）でヒット率を計算できる。ところが Region 単位で消すキャッシュでは、コンテンツは自分の都合ではなく<b>同じ Region の全員の都合で</b>消える。そこで「コンテンツから見て、1 回書かれてから消えるまでどれだけいるか（滞在 <i>L<sub>i</sub></i>）」に、Region の事情を全部押し込む。これが拡張の要点である。詳しい証明は <a href="region_lru_derivation.html">region_lru_derivation.html</a> と付録 <a href="region_model_appendix.html">region_model_appendix.html</a> §C〜§E にある。</p>
+<h3>2.1 出発点：物単位の Che 近似と最適な配分</h3>
+<div class="th"><h4>記号</h4>
+<table>
+<tr><th>記号</th><th>意味</th><th>置く理由</th></tr>
+<tr><td class="v">λ<sub>i</sub></td><td>コンテンツ <i>i</i> へのリクエストの速さ（1 リクエストあたりの回数）</td><td>人気</td></tr>
+<tr><td class="v">s<sub>i</sub></td><td>コンテンツ <i>i</i> の大きさ（バイト）</td><td>場所の使い方と BMR の重み</td></tr>
+<tr><td class="v">T<sub>c</sub></td><td>組 <i>c</i> の特性時間：最後のリクエストから捨てられるまでの長さ（LRU では組の中で共通）</td><td>場所の量を時間に直したもの</td></tr>
+<tr><td class="v">C<sub>c</sub>, C</td><td>組 <i>c</i> の場所、SSD 全体の場所（バイト）</td><td>制約</td></tr>
+<tr><td class="v">H<sub>c</sub></td><td>組 <i>c</i> のヒットのバイトの速さ</td><td>目的（BMR ＝ 1 − 全体のヒットのバイト ÷ リクエストのバイト）</td></tr>
+</table></div>
+<div class="th"><h4>(1) Che 近似：コンテンツごとのヒットのしやすさ</h4>
+<div class="f"><i>p<sub>i</sub></i> = 1 − e<sup>−<i>λ<sub>i</sub> T<sub>c</sub></i></sup> ，　 Σ<sub><i>i</i>∈<i>c</i></sub> <i>s<sub>i</sub> p<sub>i</sub></i> = <i>C<sub>c</sub></i> ，　 <i>H<sub>c</sub></i> = Σ<sub><i>i</i>∈<i>c</i></sub> <i>λ<sub>i</sub> s<sub>i</sub> p<sub>i</sub></i></div>
+<p>最後のリクエストから <i>T<sub>c</sub></i> 以内に次のリクエストが来ればヒットする。リクエストが偶然の間隔で来るなら、その起こりやすさが <i>p<sub>i</sub></i> だ。2 つ目の式は「中にいるバイトの合計が場所に等しい」という条件で、ここから <i>T<sub>c</sub></i> が決まる。</p></div>
+<div class="th"><h4>(2) 最適な配分の条件（KKT）</h4>
+<div class="f">最大にする：Σ<sub><i>c</i></sub> <i>H<sub>c</sub></i>(<i>C<sub>c</sub></i>)　条件：Σ<sub><i>c</i></sub> <i>C<sub>c</sub></i> = <i>C</i>　 ⇒ 　 d<i>H<sub>c</sub></i>/d<i>C<sub>c</sub></i> = <i>μ</i>（どの組でも同じ）</div>
+<p>どれかの組の d<i>H</i>/d<i>C</i> が大きければ、そちらへ場所を移すと得をする。だから最適ではすべての組でそろう（<i>μ</i> はラグランジュ乗数で、場所 1 バイトの値打ち）。(1) を <i>T<sub>c</sub></i> で微分して割ると次の式になる。</p>
+<div class="f">d<i>H<sub>c</sub></i>/d<i>C<sub>c</sub></i> = Σ <i>λ<sub>i</sub></i><sup>2</sup><i>s<sub>i</sub></i> e<sup>−<i>λ<sub>i</sub>T<sub>c</sub></i></sup> ÷ Σ <i>λ<sub>i</sub> s<sub>i</sub></i> e<sup>−<i>λ<sub>i</sub>T<sub>c</sub></i></sup></div>
+<p>重み <i>λ<sub>i</sub> s<sub>i</sub></i> e<sup>−<i>λ<sub>i</sub>T<sub>c</sub></i></sup> は「今まさに捨てられていくバイトの流れ」だ。つまり <b>d<i>H</i>/d<i>C</i> は、捨てられていくバイトの平均の人気（端の価値）</b>になる。§6 の名簿は、これを直接数える道具である。</p></div>
+<div class="th"><h4>(3) 分けて損はしない</h4>
+<p>組に分けない状態は「全部の組で <i>T<sub>c</sub></i> が同じ」という特別な場合だ。分けて配分を最適にすれば、その特別な場合も選べるので、<b>最適な配分の下では、分けた方が分けないより悪くならない</b>（モデルの上で）。得が大きいのは、組の端の価値が大きく違うときだ。Region 単位で捨てるときは、ここに巻き添えの損が加わる。分ければ同じ Region に似た <i>λ</i> が集まり、巻き添えも減る。</p>
+<p>ただし、分けても配分が自然なまま（場所を取り合うだけ）だと悪くなることがある。大きいコンテンツは 1 回の書き込みで場所を大きく取るからだ（合成負荷 W1 では、分けない場合より BHR が 4.8 ポイント低かった）。<b>閾値と配分は対で使う必要がある</b>。</p></div>
+
+
+<h3>2.2 コンテンツから見ると、Region キャッシュは「滞在 L<sub>i</sub> の FIFO」</h3>
+<div class="th"><h4>補題 1（在籍率）</h4>
+<p>仮定：リクエストは独立（IRM：コンテンツ <i>i</i> へは速さ <i>λ<sub>i</sub></i> の偶然の到着）、ミスしたら必ず書く、Region が消えるまでコンテンツは動かない（書き直しなし）。</p>
+<div class="f"><i>h<sub>i</sub></i> = <i>λ<sub>i</sub> L<sub>i</sub></i> / (1 + <i>λ<sub>i</sub> L<sub>i</sub></i>)　，　 書き込み 1 回あたりのリクエスト ＝ 1 + <i>λ<sub>i</sub> L<sub>i</sub></i></div>
+<p><b>導出</b>：コンテンツ <i>i</i> は「ミスで書かれる → 平均 <i>L<sub>i</sub></i> いる → Region ごと消える → 次のリクエストまで平均 1/<i>λ<sub>i</sub></i> いない → ミスで書かれる」を繰り返す。1 周の長さの平均は <i>L<sub>i</sub></i> + 1/<i>λ<sub>i</sub></i>。いる時間の割合は (a) 再生報酬の定理（独立な周の繰り返しでは、時間平均 ＝ 1 周の報酬の平均 ÷ 1 周の長さの平均）から <i>L<sub>i</sub></i>/(<i>L<sub>i</sub></i> + 1/<i>λ<sub>i</sub></i>) になる。(b) 偶然の到着は時間平均を見る（PASTA）ので、これがヒット率に等しい。1 周の中のリクエストは、滞在中のヒット（平均 <i>λ<sub>i</sub>L<sub>i</sub></i>）と最後のミス 1 回なので、書き込み 1 回あたりのリクエストは 1 + <i>λ<sub>i</sub>L<sub>i</sub></i> になる。<b>この 2 つ目の式が、§5 の大津の価値の正体になる</b>。</p>
+<p><i>L<sub>i</sub></i> はばらついてもよく、平均だけが要る。Region の事情は全部 <i>L<sub>i</sub></i> に入る。</p></div>
+
+<h3>2.3 Region FIFO：分けても何も変わらない</h3>
+<div class="th"><h4>命題 2（FIFO の中立性）</h4>
+<p>Region を封じた順に消すなら、どの Region も封じてから同じ時間 <i>T</i> で消える。だから全員 <i>L<sub>i</sub></i> = <i>T</i> で、<i>h<sub>i</sub></i> = <i>λ<sub>i</sub>T</i>/(1+<i>λ<sub>i</sub>T</i>)。<i>T</i> は誰と同居するかによらないので、<b>どう書き分けても誰のヒット率も変わらない</b>。実測でも、分類の有無の差は ±0.3〜0.5 ポイント（詰め残しの分）だった。書き分けが効くには、消す順番が中身を見る（LRU など）必要がある。</p></div>
+
+<h3>2.4 Region LRU：Region の寿命は「触られる速さ」に指数的に効く</h3>
+<div class="th"><h4>補題 3（Region の寿命）</h4>
+<p>Region LRU は「最後に触られた（中のコンテンツがヒットした、または封じた）時刻が最も古い Region」を消す。消される Region の、最後に触られてからの時間（追い出し年齢）を一定の <i>T</i> とみなす（Region 単位の Che 近似）。すると Region は「触られる間隔が初めて <i>T</i> を超えた時点」で死ぬ。中のコンテンツの <i>λ</i> の和を <i>Λ</i>（触られる速さ）とすると：</p>
+<div class="f">寿命の平均 <i>E</i>[<i>D</i>] = (e<sup><i>ΛT</i></sup> − 1) / <i>Λ</i> = ∫<sub>0</sub><sup><i>T</i></sup> e<sup><i>Λt</i></sup> d<i>t</i></div>
+<p><b>導出</b>：触られる間隔は平均 1/<i>Λ</i> の指数分布。</p>
+<ul>
+<li>(a) 1 つの間隔が <i>T</i> を超える確率は <i>p</i> = e<sup>−<i>ΛT</i></sup>。生き延びる間隔の数は幾何分布で、平均 (1−<i>p</i>)/<i>p</i> = e<sup><i>ΛT</i></sup> − 1。</li>
+<li>(b) 生き延びた間隔の平均は 1/<i>Λ</i> − <i>Tp</i>/(1−<i>p</i>)。</li>
+<li>(c) 寿命 ＝ 生き延びた間隔の和 ＋ 最後の <i>T</i>。Wald の恒等式で (a) × (b) にでき、+<i>T</i> と −<i>T</i> が打ち消して上の式になる。</li>
+</ul>
+<p><b>数の感覚</b>：<i>ΛT</i> が 1, 5, 10 なら、寿命は 1.7<i>T</i>, 30<i>T</i>, 2200<i>T</i>。触られる速さが少し違うだけで寿命は桁で違う。<b>だから Region に誰が同居するかが決定的になる</b>。</p></div>
+
+<h3>2.5 同居のコンテンツで平均し、容量の条件で T を決める</h3>
+<div class="th"><h4>命題 4（滞在の式）</h4>
+<p>組 <i>k</i> の Region に入るコンテンツの数を <i>n<sub>k</sub></i> = <i>R</i>/<i>s<sub>k</sub></i>（<i>R</i>＝Region の大きさ）とする。同居の <i>n<sub>k</sub></i> − 1 個は、同じ組に書かれていく流れから独立に引かれるとみなす。</p>
+<div class="f"><i>L<sub>i</sub></i> = ∫<sub>0</sub><sup><i>T</i></sup> e<sup><i>λ<sub>i</sub>t</i></sup> <i>M<sub>k</sub></i>(<i>t</i>)<sup><i>n<sub>k</sub></i>−1</sup> d<i>t</i>，　 <i>M<sub>k</sub></i>(<i>t</i>) = Σ<sub><i>j</i>∈<i>k</i></sub> <i>m<sub>j</sub></i> e<sup><i>λ<sub>j</sub>t</i></sup> / Σ<sub><i>j</i>∈<i>k</i></sub> <i>m<sub>j</sub></i>，　 <i>m<sub>j</sub></i> = <i>λ<sub>j</sub></i>/(1 + <i>λ<sub>j</sub>L<sub>j</sub></i>)</div>
+<div class="f">容量の条件：Σ<sub><i>i</i></sub> <i>s<sub>i</sub> h<sub>i</sub></i> / <i>φ<sub>k</sub></i> = <i>C</i>（<i>φ<sub>k</sub></i>＝Region の充填率）</div>
+<p><b>導出</b>：</p>
+<ul>
+<li>補題 3 の e<sup><i>Λt</i></sup> は e<sup><i>λ<sub>i</sub>t</i></sup> × Π e<sup><i>λ<sub>J</sub>t</i></sup> と、自分の分と同居の分の積に分かれる。</li>
+<li>同居が独立なら、積の平均は平均の積になる。それが <i>M<sub>k</sub></i>（書かれたコンテンツの <i>λ</i> の積率母関数）の <i>n<sub>k</sub></i> − 1 乗だ。</li>
+<li>同居に選ばれやすさは、書かれる速さ（ミスの速さ）<i>m<sub>j</sub></i> に比例する。人気のコンテンツはミスが少ないので、めったに同居にならない。</li>
+<li><i>m<sub>j</sub></i> は <i>L<sub>j</sub></i> に依るので、不動点を反復で解く。そのうえで、中にいるバイトが容量 <i>C</i> に等しくなる <i>T</i> を二分法で求める。</li>
+</ul></div>
+
+<h3>2.6 この拡張から出る四つの帰結</h3>
+<div class="th"><h4>(1) Region LRU は「OHR の密度」で場所を配る</h4>
+<p>平均場で見ると、組 <i>k</i> の Region の触られる速さは <i>Λ<sub>k</sub></i> ≈ <i>n<sub>k</sub></i>·<i>E</i>[<i>λ</i>] = <i>R</i>·<i>E</i>[<i>λ</i>/<i>s</i>] になる。寿命は <i>Λ<sub>k</sub>T</i> に指数的なので、<i>λ</i>/<i>s</i>（1 バイトあたりのリクエストの数＝OHR の密度）が高い組、つまり小さいコンテンツの組が場所を取る。<b>大きさで分けて配分を放っておくと、OHR は上がるが BMR は上がらない</b>。§4 の st の振る舞いと、§6 で下限が要る理由はここから来る。</p></div>
+<div class="th"><h4>(2) 損失は「Region の中の密度のばらつき」で上から抑えられる</h4>
+<div class="f">0 ≤ <i>V</i>* − <i>V</i><sub>𝒫</sub> ≤ ½ <i>D</i>(𝒫)，　 <i>D</i>(𝒫) = Σ<sub>Region <i>r</i></sub> Σ<sub><i>i</i>∈<i>r</i></sub> <i>s<sub>i</sub></i> | <i>ρ<sub>i</sub></i> − <i>ρ̄<sub>r</sub></i> |，　 <i>ρ<sub>i</sub></i> = <i>λ<sub>i</sub></i> (1 + <i>s</i>*/<i>s<sub>i</sub></i>)</div>
+<ul>
+<li><i>V</i>* はコンテンツ単位で密度の高い順に詰めたときの節約、<i>V</i><sub>𝒫</sub> は書き分け 𝒫 を固定して Region 単位で選んだときの節約、<i>ρ̄<sub>r</sub></i> は Region の中の密度の平均。</li>
+<li>密度は目的で決まる。<b>BMR なら <i>s</i>* = 0 で <i>ρ</i> = <i>λ</i></b>（リクエストの速さそのもの）、OHR なら <i>λ</i>/<i>s</i>。</li>
+<li>巻き添え（熱いコンテンツが冷たい Region と消える）も、居座り（冷たいコンテンツが熱い Region に残る）も、<i>D</i> の項である。</li>
+<li><b>書き分けの目的は「Region の中の <i>λ</i> のばらつきを小さくすること」</b>と言い換えられる（<a href="../regionflash_classkey.html">regionflash_classkey.html</a>）。</li>
+</ul></div>
+<div class="th"><h4>(3) λ の順に詰めるとヒットが最大になる（凸性）</h4>
+<p>要求が来たとき Region が残っている確率を 1 − e<sup>−<i>ΛT</i></sup> とすると、ヒットの総数は Σ<sub><i>r</i></sub> <i>φ</i>(<i>Λ<sub>r</sub></i>)、<i>φ</i>(<i>x</i>) = <i>x</i>(1 − e<sup>−<i>xT</i></sup>) になる。<i>φ</i> は <i>xT</i> &lt; 2（追い出されうる Region）で凸だ。<i>λ</i> の順に詰めた分け方の (<i>Λ<sub>r</sub></i>) は、ほかのどの分け方も優越する。凸関数の和は優越する側で大きい（Karamata の不等式）。</p></div>
+<div class="th"><h4>(4) 削除の単位が大きいほど、書き分けが効く余地が大きい</h4>
+<p>Region に入るコンテンツの数は <i>R</i>/<i>s</i> に比例する。混ぜて書くと、Region が大きいほど 1 つの Region が全体の縮図に近づき、<i>D</i> は全体のばらつきに張り付く。書き分けで取り返せる BMR はおよそ次の形になる（<i>s̄<sub>w</sub></i>＝バイトで重みを付けた平均の大きさ）。</p>
+<div class="f">ΔBMR(<i>R</i>) ≈ ΔBMR<sub>max</sub> × (1 − e<sup>−<i>R</i>/<i>s̄<sub>w</sub></i></sup>)</div>
+<p>RU のように大きく固定された単位では、この利得は上限に近い。<b>単位を小さくできないからこそ、書くときの書き分けが効く</b>。これが「一定の削除単位による一括削除は、三つの道具で改善できる」の理論的な根拠である。</p></div>
+
+<h3>2.7 モデルはどこまで合うか</h3>
+<table>
+<tr><th>確かめたこと</th><th>結果</th></tr>
+<tr><td>Region FIFO（補題 1・命題 2）</td><td>24 点で平均 0.1〜0.2 ポイント</td></tr>
+<tr><td>寿命の式（補題 3）を、追い出した Region の記録で直接</td><td>実効の <i>T</i> が実測の 1.00〜1.02 倍</td></tr>
+<tr><td>同居の独立性（命題 4）</td><td>温かいコンテンツの数の分散 ÷ 平均 0.97（独立なら 1.00）</td></tr>
+<tr><td>Region LRU の全体（24 構成、立ち上がりの隔離あり）</td><td>OHR 平均 0.2、BHR 0.1（分けない）／0.8（分ける）ポイント</td></tr>
+</table>
+<p class="sub">合成負荷（IRM）での検証。実トレースには時間の局所性があるので、モデルは「向きと大きさの見当」を与えるものとして使い、最終的な数字はシミュレーションで出す。</p>
+
+<h2>3. 物差し：1 バイトを 1 滞在置いたら何回リクエストされるか</h2>
+<p>BMR を下げるとは、オリジンから運ぶバイトを減らすことだ。あるコンテンツを SSD に置いて 1 回ヒットすると、その大きさのバイトを運ばずに済む。これを 1 バイトあたりに直すと大きさは消え、「置いている間に何回リクエストされたか」だけが残る。SSD の場所は「バイト × 時間」で使うので、時間の単位として「1 滞在」（入ってから捨てられるまで）を使う。</p>
+<div class="eq"><b>ヒット密度</b> ＝ ヒットしたバイト ÷（置いたバイト × 滞在の回数）<br><span class="sub">1 なら「書いた 1 バイトが 1 滞在の間に平均 1 回ヒットした」。三つの判断は、すべてこの量の大小で決まる。</span></div>
+<table>
+<tr><th>判断</th><th>いつ</th><th>見る密度</th><th>どう比べるか</th></tr>
+<tr><td>① 閾値（大津の式）</td><td>書くとき：どの組の Region に入れるか</td><td>大きさの段ごとの<b>平均</b></td><td>密度の似た段どうしが同じ組になるように、大きさに 1 本の線を引く</td></tr>
+<tr><td>② 配分（名簿）</td><td>捨てるとき：どの組の Region を捨てるか</td><td>組ごとの<b>端</b>（次に捨てられる辺り）</td><td>組どうしの端の密度がそろうように、大きい組の下限を動かす</td></tr>
+<tr><td>③ 再挿入（n=cb）</td><td>捨てるとき：中のコンテンツを書き直すか</td><td>そのコンテンツの<b>次の滞在の予測</b></td><td>② と同じ端の密度（＋書き込みの値段）より高ければ書き直す</td></tr>
+</table>
+<p><b>平均と端を使い分ける理由</b>：閾値は「同じ LRU に入れても損が少ないものをまとめる」問題なので、組の中身全体の密度（平均）がそろうことが大事だ。配分と再挿入は「あと 1 バイトの場所をどこに使うか」の問題なので、場所を足し引きしたときに出入りする端の密度が大事になる。</p>
+
+<h2>4. SplitThreshold（st）がうまく行っていた理由</h2>
+<p>大津の式の前は、大きさの閾値を SplitThreshold（st）の規則で決めていた。st はなぜそこそこ効いたのか、どこで外れたのかを §2 の言葉で整理する。ここを押さえると、大津の式が何を足したのかがはっきりする。</p>
+<h3>4.1 st の規則</h3>
+<div class="eq">書いたコンテンツの大きさを 2 倍ごとの段で数え、<b>数の中央値</b>（コンテンツの半分がそれより小さい大きさ）と<b>バイトの中央値</b>（バイトの半分がそれより小さい大きさ）を求める。<br>
+<b>閾値 ＝ 2 つの中央値の対数の真ん中</b>（幾何平均）。2 つが 2 段未満しか離れていない、または大の組のバイトが 5% 未満なら分けない。10 万書き込みごとに計算し直し、数は 15/16 ずつ減衰させる。</div>
+
+<h3>4.2 なぜ効いたか</h3>
+<div class="th"><h4>(1) 重い裾の大きさの分布を「数の山」と「バイトの山」に分ける</h4>
+<p>キャッシュのトレースでは、コンテンツの数は小さい物に、バイトは少数の大きい物に集まる（重い裾）。数の中央値とバイトの中央値はふつう何段も離れていて、その真ん中で切ると次の 2 組に分かれる。</p>
+<ul>
+<li>数は多いがバイトは少ない「小の組」</li>
+<li>数は少ないがバイトは多い「大の組」</li>
+</ul>
+<p>各組の中では大きさの幅が狭くなる。§2.6 (1) の触られる速さ <i>R</i>·<i>E</i>[<i>λ</i>/<i>s</i>] は、<i>s</i> の違いが最大の要因（大きさは 6 桁以上違う）なので、組の中の Region の触られ方がそろう。つまり、<b>OHR の密度 <i>λ</i>/<i>s</i> のばらつき <i>D</i> を、大きさだけで大きく減らせる</b>。</p></div>
+<div class="th"><h4>(2) BMR に効くのは「大きさと人気の相関」の分だけ</h4>
+<p>BMR の密度は <i>λ</i> そのもので、大きさは <i>λ</i> を直接は知らない。st が BMR を下げたのは、大きさと人気が相関するトレースだった。たとえば w01 では、1〜2 KiB と 1 MiB のコンテンツがほとんど再利用されない（再利用率 0〜1%）。大きさで分けると、死んだコンテンツがまとまりやすい。</p></div>
+<div class="th"><h4>(3) 下限（配分）と組で使うと、OHR への偏りが直る</h4>
+<p>§2.6 (1) のとおり、分けただけでは LRU が小の組に場所を寄せる。大の組に下限を付けて BMR の向きに戻すと、st でも CacheLib より良くなった（名簿の下限、n=1 での CacheLib との差）：w01 −1.81、nha −0.09、Tencent −0.87 ポイント。</p></div>
+<div class="th"><h4>(4) 安く、すぐ使える</h4>
+<p>必要なのは書くときの大きさのヒストグラムだけで、追い出しを待たずに最初から閾値が出る（メモリ約 1.2 KB）。<b>「書く時点で確実に分かる鍵で、Region の中身をそろえる」</b>という方針は正しく、大津の式もこれを引き継いでいる。</p></div>
+
+<h3>4.3 どこで外れたか</h3>
+<ul>
+<li><b>人気を見ていない</b>：線の位置は大きさの分布だけで決まる。大きさの山の境と人気の境が一致しないと、人気のコンテンツと一度きりのコンテンツが同じ組に入る。</li>
+<li><b>w01</b>：st の線は 8K〜16K 付近だった（記録の平均 2<sup>13.7</sup>）。大の組に、再利用の強い 128K〜512K と、一度きりの 1M（書き込みの 41%）が混ざった。</li>
+<li><b>nha</b>：st の線は 1M（2<sup>20</sup>）。最良の固定の線は 16M〜32M（2<sup>24</sup>〜2<sup>25</sup>）で、50 MiB ちょうどの塊（書き込みの 34%）の扱いが分かれ目だった。</li>
+</ul>
+
+<h2>5. 閾値：大津の式で線 t が選ばれる過程</h2>
+<p>書くときに手元で分かるのはコンテンツの大きさだけだ（人気は後にならないと分からない）。そこで大きさに線 t を 1 本引き、t より大きいコンテンツは「大の組」、それ以外は「小の組」の Region に書く。問題は線の位置だ。</p>
+
+<h3>5.1 段ごとの価値を数える</h3>
+<p>大きさを 2 倍ごとの段（1K〜2K、2K〜4K、…）に分け、段ごとに 2 つの量を数え続ける。</p>
+<ul>
+<li><b>書いたバイト</b>：SSD に書いた量。その段が SSD の場所をどれだけ使うかの重み。</li>
+<li><b>リクエストされたバイト</b>：その段へのリクエストの大きさの合計。</li>
+</ul>
+<div class="eq"><b>段の価値</b> ＝ 対数（リクエストされたバイト ÷ 書いたバイト）<br><span class="sub">書いた 1 バイトが何回リクエストされるか（再利用の強さ）。一度きりなら 1（対数で 0）、10 回なら 10（対数で 2.3）。再利用の強さは桁で違うので、対数で比べる。</span></div>
+
+<h3>5.2 具体例：w01（Wikipedia の CDN）の最後の値</h3>
+<p>棒の高さ＝書いたバイトの割合。棒の上の数字＝書いた 1 バイトあたりのリクエスト（対数を取る前の値）。下の折れ線＝その位置に線を引いたときの大津の得点。</p>
+<div class="wrap"><svg viewBox="0 0 860 470" role="img" aria-label="w01 の段ごとの書き込みの割合と大津の得点">
+<g transform="translate(20,10)">
+<text x="0" y="14" class="b">段ごとの書いたバイト（割合）と、書いた 1 バイトあたりのリクエスト</text>
+<line x1="40" y1="230" x2="760" y2="230" stroke="var(--line)"/>
+<g>
+<rect x="44" y="183" width="50" height="47" fill="var(--sm)"/><text x="69" y="177" text-anchor="middle">1.29</text><text x="69" y="246" text-anchor="middle" class="m">1K</text>
+<rect x="106" y="180" width="50" height="50" fill="var(--sm)"/><text x="131" y="174" text-anchor="middle">1.28</text><text x="131" y="246" text-anchor="middle" class="m">2K</text>
+<rect x="168" y="119" width="50" height="111" fill="var(--sm)"/><text x="193" y="113" text-anchor="middle">2.03</text><text x="193" y="246" text-anchor="middle" class="m">4K</text>
+<rect x="230" y="226" width="50" height="4" fill="var(--sm)"/><text x="255" y="220" text-anchor="middle">1.63</text><text x="255" y="246" text-anchor="middle" class="m">8K</text>
+<rect x="292" y="228" width="50" height="2" fill="var(--sm)"/><text x="317" y="220" text-anchor="middle">2.48</text><text x="317" y="246" text-anchor="middle" class="m">16K</text>
+<rect x="354" y="228" width="50" height="2" fill="var(--sm)"/><text x="379" y="220" text-anchor="middle">2.30</text><text x="379" y="246" text-anchor="middle" class="m">32K</text>
+<rect x="416" y="227" width="50" height="3" fill="var(--sm)"/><text x="441" y="220" text-anchor="middle">2.27</text><text x="441" y="246" text-anchor="middle" class="m">64K</text>
+<rect x="478" y="225" width="50" height="5" fill="var(--sm)"/><text x="503" y="218" text-anchor="middle">3.06</text><text x="503" y="246" text-anchor="middle" class="m">128K</text>
+<rect x="540" y="219" width="50" height="11" fill="var(--sm)"/><text x="565" y="212" text-anchor="middle">6.06</text><text x="565" y="246" text-anchor="middle" class="m">256K</text>
+<rect x="602" y="209" width="50" height="21" fill="var(--lg)"/><text x="627" y="202" text-anchor="middle">1.09</text><text x="627" y="246" text-anchor="middle" class="m">512K</text>
+<rect x="664" y="50" width="50" height="180" fill="var(--lg)"/><text x="689" y="44" text-anchor="middle">1.02</text><text x="689" y="246" text-anchor="middle" class="m">1M</text>
+<text x="689" y="140" text-anchor="middle" fill="#fff" class="b">41%</text><text x="193" y="180" text-anchor="middle" fill="#fff" class="b">26%</text>
+</g>
+<line x1="596" y1="30" x2="596" y2="440" stroke="var(--acc)" stroke-width="2.5"/>
+<text x="600" y="30" fill="var(--acc)" class="b">選ばれた線 t = 512K</text>
+<text x="300" y="70" class="m">小の組（青）：書いた 1 バイトが 1.8 回リクエストされる</text>
+<text x="300" y="88" class="m">大の組（茶）：1.03 回 ＝ ほぼ一度きり</text>
+<!-- score line: cuts at x between bars: cut k at 44+62*(k-10)-6 ; scale 0.0775 -> 120px, baseline 420 -->
+<text x="0" y="292" class="b">線をそこに引いたときの大津の得点</text>
+<line x1="40" y1="420" x2="760" y2="420" stroke="var(--line)"/>
+<polyline fill="none" stroke="var(--acc)" stroke-width="2" points="100,419 162,418 224,378 286,377 348,374 410,372 472,368 534,357 596,300 658,317"/>
+<g fill="var(--acc)"><circle cx="100" cy="419" r="3"/><circle cx="162" cy="418" r="3"/><circle cx="224" cy="378" r="3"/><circle cx="286" cy="377" r="3"/><circle cx="348" cy="374" r="3"/><circle cx="410" cy="372" r="3"/><circle cx="472" cy="368" r="3"/><circle cx="534" cy="357" r="3"/><circle cx="596" cy="300" r="6"/><circle cx="658" cy="317" r="3"/></g>
+<text x="604" y="296" class="b">0.077（最大）</text><text x="664" y="335" class="m">0.067</text><text x="540" y="350" class="m">0.041</text><text x="230" y="370" class="m">0.027</text>
+<text x="100" y="440" class="m" text-anchor="middle">2K</text><text x="224" y="440" class="m" text-anchor="middle">8K</text><text x="410" y="440" class="m" text-anchor="middle">64K</text><text x="596" y="440" class="m" text-anchor="middle">512K</text><text x="658" y="440" class="m" text-anchor="middle">1M</text>
+<text x="720" y="440" class="m">← 線の位置</text>
+</g></svg></div>
+
+<h3>5.3 得点の中身（大津の二値化）</h3>
+<div class="eq"><b>得点</b> ＝（小の組の書き込みの割合）×（大の組の書き込みの割合）×（2 組の平均の価値の差）の 2 乗</div>
+<p>得点が最大の線を選ぶ。これは「組の間のばらつきを最大にする（＝組の中のばらつきを最小にする）」ことと同じで、画像を白と黒に分ける大津の二値化と同じ式だ。w01 で線を変えると次のとおり（記録から計算。丸めの差がある）。</p>
+<table>
+<tr><th>線 t</th><th class="n">小の組の割合</th><th class="n">大の組の割合</th><th class="n">小の組の平均（リクエスト/書いた 1 バイト）</th><th class="n">大の組の平均</th><th class="n">得点</th></tr>
+<tr><td>4K</td><td class="n">0.22</td><td class="n">0.78</td><td class="n">1.29</td><td class="n">1.42</td><td class="n">0.002</td></tr>
+<tr><td>8K</td><td class="n">0.48</td><td class="n">0.52</td><td class="n">1.64</td><td class="n">1.19</td><td class="n">0.026</td></tr>
+<tr><td>256K</td><td class="n">0.52</td><td class="n">0.49</td><td class="n">1.68</td><td class="n">1.13</td><td class="n">0.040</td></tr>
+<tr class="key"><td><b>512K</b></td><td class="n">0.54</td><td class="n">0.46</td><td class="n">1.79</td><td class="n">1.03</td><td class="n"><b>0.076</b></td></tr>
+<tr><td>1M</td><td class="n">0.59</td><td class="n">0.41</td><td class="n">1.72</td><td class="n">1.02</td><td class="n">0.065</td></tr>
+</table>
+<p>512K に引くと、大の組には一度きりのコンテンツ（1.03）だけが集まり、小の組の平均（1.79）と最もはっきり分かれる。<b>一度きりのコンテンツを同じ Region に集めれば、その Region は丸ごと捨てても誰も巻き添えにならない</b>。§1 の (b) をデータから決めたことになる。</p>
+
+<h3>5.4 なぜ大津の式を採用したか</h3>
+<table>
+<tr><th>候補</th><th>何で線を引くか</th><th>結果（CacheLib との BMR の差）</th></tr>
+<tr><td>st（以前）</td><td>コンテンツの数の中央値と、バイトの中央値の真ん中。大きさの分布だけを見る</td><td>w01 −1.81、nha −0.09</td></tr>
+<tr><td>大津（再利用の割合）</td><td>書いたもののうち再利用された割合</td><td>nha で 50 MiB の塊（書き込みの 34%）を小の組に入れて外した</td></tr>
+<tr><td>大津（名簿の端の価値）</td><td>§6 の名簿の値</td><td>段ごとの数が少なく、平らで決まらない</td></tr>
+<tr class="key"><td><b>大津（再利用の強さ）</b></td><td>本節の価値</td><td><b>w01 −3.81、Tencent −0.76、nha −0.11</b>（最良の固定の線とほぼ同じ）</td></tr>
+</table>
+<p>線は<b>累積</b>の数で決め、候補が 4 回続けて同じ向きに出たときだけ動かす（hold=4）。線が動くたびに、書き込み中の Region を閉じ直し、配分と再挿入も測り直しになるからだ。線はいちばん遅く動く判断である（§8）。nha では最初に 16M に決まって 1 回も動かず、w01 は 7 回動いて 512K に落ち着いた。</p>
+
+<h3>5.5 理論式：大津の得点と、それが「分ける得」を近似する理由</h3>
+<div class="th"><h4>(1) 段の量と組の量</h4>
+<p>段 <i>b</i>（大きさ [2<sup><i>b</i></sup>, 2<sup><i>b</i>+1</sup>)）ごとに、<i>A<sub>b</sub></i>＝書いたバイト（書き直しも含む）、<i>Q<sub>b</sub></i>＝リクエストされたバイト を累積で数える。</p>
+<div class="f"><i>v<sub>b</sub></i> = ln(<i>Q<sub>b</sub></i> / <i>A<sub>b</sub></i>)　（段の価値＝再利用の強さの対数）</div>
+<p>線を「段 <i>k</i> から上が大の組」に引くと、次のようになる。</p>
+<div class="f"><i>ω<sub>S</sub></i> = Σ<sub><i>b</i>&lt;<i>k</i></sub> <i>A<sub>b</sub></i> / Σ<sub><i>b</i></sub> <i>A<sub>b</sub></i>，　<i>ω<sub>L</sub></i> = 1 − <i>ω<sub>S</sub></i>，　 <i>m<sub>S</sub></i> = Σ<sub><i>b</i>&lt;<i>k</i></sub> <i>A<sub>b</sub> v<sub>b</sub></i> / Σ<sub><i>b</i>&lt;<i>k</i></sub> <i>A<sub>b</sub></i>（<i>m<sub>L</sub></i> も同様）</div>
+<div class="f"><b>得点</b>(<i>k</i>) = <i>ω<sub>S</sub> ω<sub>L</sub></i> (<i>m<sub>S</sub></i> − <i>m<sub>L</sub></i>)<sup>2</sup>　→　最大の <i>k</i> を選び、<i>t</i> = 2<sup><i>k</i></sup> − 1</div>
+<p>大の組のバイトが 5% 未満になる線は使わない。w01 の 512K で確かめると、0.54 × 0.46 × (0.581 − 0.027)<sup>2</sup> = 0.076 で、記録の値と合う <span class="ok">✓</span>。</p></div>
+<div class="th"><h4>(2) 大津の得点は「組の中のばらつきを最小にする」と同じ</h4>
+<div class="f">全体のばらつき ＝ 組の中のばらつき ＋ <i>ω<sub>S</sub> ω<sub>L</sub></i> (<i>m<sub>S</sub></i> − <i>m<sub>L</sub></i>)<sup>2</sup></div>
+<p>左辺は線の位置によらない。だから得点（右の第 2 項）を最大にすることは、組の中のばらつきを最小にすることと同じだ。組の中の価値がそろえば、同じ Region に入るコンテンツの価値もそろい、巻き添えが減る（§1 の (b)）。</p></div>
+<div class="th"><h4>(3) 得点が「分けて配分を最適にしたときの得」の近似になる理由</h4>
+<p>分けない状態から、場所を Δ だけ大の組から小の組へ移したときのヒットの増え方を 2 次まで展開する。端の価値を <i>u<sub>S</sub></i>, <i>u<sub>L</sub></i>、曲がり具合（減っていく速さ）を <i>κ<sub>S</sub></i>, <i>κ<sub>L</sub></i> とする。</p>
+<div class="f">Δ<i>H</i> ≈ (<i>u<sub>S</sub></i> − <i>u<sub>L</sub></i>) Δ − ½ (<i>κ<sub>S</sub></i> + <i>κ<sub>L</sub></i>) Δ<sup>2</sup>　 ⇒ 　最大の得 ＝ (<i>u<sub>S</sub></i> − <i>u<sub>L</sub></i>)<sup>2</sup> / 2(<i>κ<sub>S</sub></i> + <i>κ<sub>L</sub></i>)</div>
+<p>仮定：各組のヒットの曲線は同じ形で、組の大きさ（書き込みの割合 <i>ω</i>）に比例して伸び縮みする。つまり <i>H<sub>c</sub></i>(<i>C</i>) = <i>ω<sub>c</sub></i> <i>h</i>(<i>C</i>/<i>ω<sub>c</sub></i>)。場所も書き込みの割合に比例して分かれている所（<i>C<sub>c</sub></i>/<i>ω<sub>c</sub></i> がそろう所）で曲がり具合を測ると、 <i>κ<sub>c</sub></i> = <i>κ</i>/<i>ω<sub>c</sub></i> なので：</p>
+<div class="f"><i>κ<sub>S</sub></i> + <i>κ<sub>L</sub></i> = <i>κ</i> (1/<i>ω<sub>S</sub></i> + 1/<i>ω<sub>L</sub></i>) = <i>κ</i> / (<i>ω<sub>S</sub> ω<sub>L</sub></i>)　 ⇒ 　最大の得 ＝ <i>ω<sub>S</sub> ω<sub>L</sub></i> (<i>u<sub>S</sub></i> − <i>u<sub>L</sub></i>)<sup>2</sup> / 2<i>κ</i></div>
+<p><b>大津の得点と同じ形</b>になる。違うのは、端の価値 <i>u</i> の代わりに、段の価値（再利用の強さの対数）の平均 <i>m</i> を使う点だけだ。<i>u</i> を段ごとに名簿で測ると、数が少なく平らになり、線が決まらなかった（§5.4）。そこで、数えやすく安定した再利用の強さを代わりに使う。対数にするのは、再利用の強さが桁で違い、平均が少数の極端な段に引っ張られないようにするため。</p>
+<p class="sub">この代わりがずれる例：w01 の 256K〜512K の段（書き込みの 2.5%）。再利用の強さは高く見えるが、その多くは DRAM のヒットで、SSD の場所あたりのヒットは小の組の 4 割だった。そのため 1 段ずれ、0.11 ポイントの損になった（<a href="w01_otsu_cut.html">w01_otsu_cut.html</a>）。</p></div>
+
+
+<h3>5.6 大津の式が st を上回る理由</h3>
+<div class="th"><h4>(1) 大津の価値は「λ × 滞在」の見積もり</h4>
+<p>§2.2 の補題 1 から、コンテンツ <i>i</i> の書き込み 1 回あたりのリクエストは 1 + <i>λ<sub>i</sub>L<sub>i</sub></i> だ。段 <i>b</i> で数えると：</p>
+<div class="f"><i>Q<sub>b</sub></i> / <i>A<sub>b</sub></i> = Σ<sub><i>i</i>∈<i>b</i></sub> <i>s<sub>i</sub>λ<sub>i</sub></i> ／ Σ<sub><i>i</i>∈<i>b</i></sub> <i>s<sub>i</sub>λ<sub>i</sub></i> / (1 + <i>λ<sub>i</sub>L<sub>i</sub></i>)　＝（1 + <i>λ<sub>i</sub>L<sub>i</sub></i> の、重み <i>s<sub>i</sub>λ<sub>i</sub></i> の調和平均）</div>
+<ul>
+<li>同じ組の中で <i>L</i> がそろっていれば、<i>v<sub>b</sub></i> = ln(<i>Q<sub>b</sub></i>/<i>A<sub>b</sub></i>) は <i>λ</i> について増加する。<b>BMR の密度 <i>λ</i> の、走りながら測れる見積もり</b>になる。</li>
+<li>冷たい段（<i>λL</i> ≪ 1）では <i>v</i> ≈ <i>λL</i>、熱い段では <i>v</i> ≈ ln(<i>λL</i>)。対数なので、少数の極端に熱い段に平均が引っ張られにくい。</li>
+<li>st が見ていたのは大きさの分布だけ。大津は<b>同じ「大きさの線」を、人気の見積もりで置く</b>。</li>
+</ul></div>
+<div class="th"><h4>(2) 大津の式は、損失の上界 D を直接小さくする</h4>
+<p>§2.6 (2) の上界 <i>D</i> は、Region の中の <i>λ</i> のばらつき（バイトで重みを付けた絶対偏差）だった。大津の式は、線 1 本で分ける分け方の中で、組の中の <i>v</i> のばらつき（書いたバイトで重みを付けた分散）を最小にする（§5.5 (2)）。<i>D</i> を 2 乗の形と対数の物差しに置き換えたものを最小にしている、と言える。st はこの量をまったく見ていない。</p></div>
+<div class="th"><h4>(3) 分けて配分を最適にしたときの得（§5.5 (3)）と同じ形</h4>
+<p>線の位置を変えたときの「分ける得」の 2 次の近似は、<i>ω<sub>S</sub>ω<sub>L</sub></i>(差)<sup>2</sup> になる。大津は、配分（§6）と組で使ったときの得を、線の候補ごとに見積もって最大を選んでいる。</p></div>
+<div class="th"><h4>(4) st の良い所は残す</h4>
+<p>鍵は大きさのままで、書く時点で確実に分かる。組の中の大きさがそろうので、§4.2 (1) の利点も残る。違うのは<b>切る位置だけ</b>だ。</p></div>
+<h4>実測：st と大津と、最良の固定の線（名簿の下限、n=1。CacheLib との BMR の差、ポイント）</h4>
+<table>
+<tr><th>トレース</th><th class="n">st</th><th class="n">大津（再利用の強さ）</th><th class="n">最良の固定の線</th><th>読み方</th></tr>
+<tr><td>w01</td><td class="n">−1.81</td><td class="n"><b>−3.59〜−3.63</b></td><td class="n">−3.78（256K）</td><td>一度きりの 1M を、人気の境で切り出せた。最良まで 0.15</td></tr>
+<tr><td>nha</td><td class="n">−0.09</td><td class="n"><b>−0.13</b></td><td class="n">−0.14（32M）</td><td>線が 1M から 16M へ。最良にほぼ届く</td></tr>
+<tr><td>Tencent（縮小）</td><td class="n"><b>−0.87</b></td><td class="n">−0.77</td><td class="n">−0.95（32K）</td><td>大津がわずかに負ける。st との差 0.1</td></tr>
+</table>
+<p>大津が大きく勝つのは、大きさを横切って人気が段のように変わるトレース（w01）だ。Tencent のように大きさと人気の関係がなだらかなトレースでは差がなく、わずかに st が良い。<b>「どのトレースでも st より良い」とは言えず、「大きく負けず、効くトレースで大きく勝つ」が正確な主張</b>である。w01 でも最良の線とは 1 段ずれることがある（§10）。</p>
+
+<h2>6. 配分：名簿で場所の分け方が決まる過程</h2>
+<p>組に分けると、次は「組ごとに Region をいくつ持たせるか」が問題になる。何もしなければ、組は Region LRU の中で場所を奪い合う（自然な配分）。ところが大きなコンテンツは 1 回の書き込みで場所を大きく取るので、自然な配分は BMR にとって最適とは限らない。</p>
+
+<h3>6.1 名簿：「あと 5% 場所があったらヒットしたか」を数える</h3>
+<p>SSD から捨てたコンテンツの名前と捨てた時を、組ごとに短い名簿に残す。名簿に載っている間（その組の平均の滞在の 5% の長さ）にそのコンテンツがリクエストされてミスしたら、「その組の場所がもう 5% あれば、まだ SSD にいてヒットした」とわかる。</p>
+<ul>
+<li>LRU では、場所を足すと端（次に捨てられる所）から順に救われる。だから名簿は組の<b>端の価値</b>を測っている。</li>
+<li>リトルの法則（中にいる量 ＝ 入る速さ × 滞在の長さ）を使うと、場所の量や時間の長さは消える。数えるのは「名簿で拾ったミスのバイト」と「その組から出たバイト」だけで済む。</li>
+</ul>
+<div class="eq"><b>組の端の価値</b> ＝ 名簿で拾ったミスのバイト ÷（0.05 × その組から出たバイト）<br>
+<b>傾き</b> ＝（大の組の端の価値 − ほかの組）÷（大の組 ＋ ほかの組）。−1〜+1。<br>
+窓（Region が半分入れ替わる間）ごとに傾きを平らにならし、大の組の<b>下限</b>を「傾き × 0.04」だけ動かす。</div>
+<p><b>端の価値がそろった所が最適</b>：片方の組の端の価値が高いなら、そちらへ 1 バイト移すと得をする。そろえば、どちらへ動かしても得がない（数理最適化の言葉ではラグランジュ乗数がそろう点、KKT 点）。</p>
+
+<h3>6.2 具体例：nha（Meta の CDN）での下限の動き</h3>
+<div class="wrap"><svg viewBox="0 0 860 330" role="img" aria-label="nha での大の組の下限の動き">
+<g transform="translate(60,20)">
+<line x1="0" y1="240" x2="760" y2="240" stroke="var(--line)"/><line x1="0" y1="0" x2="0" y2="240" stroke="var(--line)"/>
+<text x="-8" y="244" text-anchor="end" class="m">0</text><text x="-8" y="124" text-anchor="end" class="m">0.5</text><text x="-8" y="4" text-anchor="end" class="m">1</text>
+<line x1="0" y1="120" x2="760" y2="120" stroke="var(--line)" stroke-dasharray="3 4"/>
+<text x="380" y="270" text-anchor="middle" class="m">窓（Region が半分入れ替わるごと。全部で 381 窓）</text>
+<text x="0" y="262" class="m">0</text><text x="752" y="262" class="m">380</text>
+<!-- x = i*2 ; y = 240 - f*240 -->
+<polyline fill="none" stroke="var(--lg)" stroke-width="2.5" points="0,240 30,164 60,149 90,126 120,119 150,115 180,97 210,97 240,104 270,91 300,95 330,100 360,90 390,93 420,97 450,86 480,76 510,89 540,79 570,150 600,88 630,82 660,82 690,83 720,83 750,75 760,70"/>
+<text x="20" y="16" class="b" fill="var(--lg)">大の組（16M 以上）の下限（SSD の場所の割合）</text>
+<text x="14" y="196" class="m">最初の窓：大の組の端の価値は</text><text x="14" y="212" class="m">ほかの 256 倍 → 傾き +0.99</text>
+<text x="200" y="68" class="m">半ばからは傾きが ±0.2 で上下し、</text><text x="200" y="84" class="m">0.6〜0.7 で落ち着く（端の価値がそろう）</text>
+<path d="M570 150 v-20" stroke="var(--bad)" stroke-width="1.5"/><text x="576" y="166" class="m">傾きが強く負の窓が続き、</text><text x="576" y="182" class="m">下限を半分に（move=4）→ すぐ戻る</text>
+<text x="752" y="62" text-anchor="end" class="b">0.70</text>
+</g></svg></div>
+<p>下限 0（自然な配分）から出発し、名簿が「大の組にもっと場所があればヒットした」と言う間だけ下限を上げる。nha では大の組（16M 以上の大きな動画の塊）が最後に場所の 70% を持った。w01 では大の組は一度きりのコンテンツばかりなので、名簿はすぐ「要らない」と言い、下限は 0.06 に留まった（全部で 5 窓）。</p>
+
+<h3>6.3 なぜ名簿を採用したか</h3>
+<table>
+<tr><th>候補</th><th>弱点</th></tr>
+<tr><td>山登り（全体のヒット率を窓ごとに比べて、良くなった向きへ動く）</td><td>窓ごとの差は負荷の揺れに埋もれる（信号と雑音の比 0.001〜0.5）。でたらめに歩くのと変わらない。</td></tr>
+<tr><td>二分法</td><td>場所は捨てることでしか動かないので、試した点の結果が出るまで約 1 周かかる。遠い点（0.5）を試すと w01 で +0.73 ポイント損をする。一度向きを読み違えると最適を永久に捨てる。</td></tr>
+<tr class="key"><td><b>名簿の傾き</b></td><td>窓ごとの差ではなく、その窓の中で「場所を足したらどうなったか」を直接数える。負荷が揺れても向きを間違えにくい。</td></tr>
+</table>
+
+<h3>6.4 理論式：名簿で端の価値を測り、下限を動かす</h3>
+<div class="th"><h4>記号</h4>
+<table>
+<tr><th>記号</th><th>意味</th></tr>
+<tr><td class="v">D</td><td>測る期間の長さ（リクエストの回数）</td></tr>
+<tr><td class="v">E<sub>c</sub></td><td>期間中に組 <i>c</i> から出たバイト（捨てた分＋書き直した分）</td></tr>
+<tr><td class="v">γ</td><td>名簿の窓の幅＝組の平均の滞在の 0.05 倍（場所を少しだけ足す実験の幅）</td></tr>
+<tr><td class="v">G<sub>c</sub></td><td>名簿で拾ったミスのバイト（組 <i>c</i> から出てから <i>γT<sub>c</sub></i> 以内にリクエストされたコンテンツの大きさの合計）</td></tr>
+<tr><td class="v">f</td><td>大の組の下限（SSD の Region の数に対する割合）。次に捨てる Region が大の組のもので、大の組が <i>f</i>・<i>N</i> 個以下しか持っていなければ、代わりにほかの組のいちばん古い Region を捨てる</td></tr>
+</table></div>
+<div class="th"><h4>(1) リトルの法則から、名簿が端の価値を測ることを導く</h4>
+<div class="f"><i>C<sub>c</sub></i> = (<i>E<sub>c</sub></i> / <i>D</i>) × <i>T<sub>c</sub></i>　（中にいる量 ＝ 入る速さ × 滞在の長さ）</div>
+<p>場所を <i>γC<sub>c</sub></i> 足すと、滞在が <i>γT<sub>c</sub></i> 延びる。延びた分だけ長くいればヒットしたのは、出てから <i>γT<sub>c</sub></i> 以内にまたリクエストされたコンテンツなので、増えるヒットのバイトは <i>G<sub>c</sub></i> になる。足した場所を「バイト × 滞在」で数えると <i>γC<sub>c</sub>D</i>/<i>T<sub>c</sub></i> = <i>γE<sub>c</sub></i> だから：</p>
+<div class="f"><b>端の価値</b>　<i>v<sub>c</sub></i> = <i>G<sub>c</sub></i> / (<i>γ E<sub>c</sub></i>)　≈　d<i>H<sub>c</sub></i>/d<i>C<sub>c</sub></i>（§2.1 (2)、単位を「バイト・滞在あたり」にしたもの）</div>
+<p><i>C</i>・<i>T</i>・<i>D</i> は消えるので、数えるのは <i>G<sub>c</sub></i> と <i>E<sub>c</sub></i> だけで済む。</p></div>
+<div class="th"><h4>(2) 傾きと下限の更新（auto=2、move=4）</h4>
+<p>窓（Region が半分入れ替わる間）ごとに、組の Region 1 つあたりの名簿のヒットを比べる（<i>R</i>＝窓の中のリクエストのバイト、<i>N<sub>c</sub></i>＝組 <i>c</i> の Region の数）。</p>
+<div class="f"><i>m<sub>c</sub></i> = (<i>G<sub>c</sub></i> / <i>R</i>) / <i>N<sub>c</sub></i>，　 <i>g</i> = (<i>m<sub>L</sub></i> − <i>m<sub>O</sub></i>) / (<i>m<sub>L</sub></i> + <i>m<sub>O</sub></i>) ∈ [−1, 1]　（<i>O</i>＝大以外の組）</div>
+<div class="f"><i>g</i><sub>平</sub> ← ½ <i>g</i><sub>平</sub> + ½ <i>g</i>，　 <i>f</i> ← min(0.99, max(0, <i>f</i> + 2 × 0.02 × <i>g</i><sub>平</sub>))</div>
+<div class="f">move=4：<i>g</i><sub>平</sub> &lt; −0.5 のときは <i>f</i> ← ½ <i>f</i> + 2 × 0.02 × <i>g</i><sub>平</sub>（要らなくなった下限を速く下げる）</div>
+<p><b>止まる所</b>：<i>g</i><sub>平</sub> = 0、つまり <i>m<sub>L</sub></i> = <i>m<sub>O</sub></i>。Region 1 つあたりの端の価値がそろう点で、§2.1 (2) の KKT の条件そのものだ。比を [−1, 1] に正規化しているので、ヒットの量が窓ごとに揺れても歩幅は 0.04 を超えない。</p>
+<p><b>nha の最初の窓で確かめる</b>：<i>m<sub>L</sub></i> = 2.69×10<sup>−6</sup>、<i>m<sub>O</sub></i> = 1.05×10<sup>−8</sup> → <i>g</i> = 0.992 → <i>f</i> = 0 + 0.04 × 0.992 = 0.0397。記録の次の窓の下限 0.0397 と一致する <span class="ok">✓</span>。</p></div>
+
+
+<h3>6.5 Region LRU での導出：なぜ名簿でなければならないか</h3>
+<div class="th"><h4>(1) 自然な配分は BMR の最適からずれる</h4>
+<p>§2.6 (1) から、組 <i>k</i> の容量は次のように決まる。寿命は <i>Λ<sub>k</sub></i> = <i>R</i>·<i>E</i>[<i>λ</i>/<i>s</i>] に指数的に効くので、自然な配分は OHR の密度の高い組に寄る。</p>
+<div class="f"><i>C<sub>k</sub></i> ∝（組 <i>k</i> に書かれるバイトの速さ ÷ <i>R</i>）×（e<sup><i>Λ<sub>k</sub>T</i></sup> − 1）/ <i>Λ<sub>k</sub></i></div>
+<p>一方、BMR の最適は d<i>H<sub>k</sub></i>/d<i>C<sub>k</sub></i> をそろえる点（§2.1 (2)）にある。合成負荷 W1 では、自然な配分（小の組が 61%）は分けない場合より BHR が 4.8 ポイント低い。BMR の最適な配分（小の組が 5%）にすると、分けない場合より 0.4 ポイント良くなった。<b>差のほとんどは「自然な配分の損を取り消す」分</b>であり、下限が要る。</p></div>
+<div class="th"><h4>(2) 物単位なら「末尾のヒット」で限界値を測れるが、Region では測れない</h4>
+<p>物単位の LRU では、末尾（最も古い）のコンテンツへのリクエストを数えれば限界値になる。容量を少し足して救われるのは、そのリクエスト 1 回だけだからだ。Region LRU では、末尾の Region が 1 回触られると、中の全員がもう 1 寿命生き、その間に e<sup><i>ΛT</i></sup> − 1 回のヒットを受ける（補題 3）。触られた回数にはこの重みが乗らない。</p>
+<p>さらに、小さいコンテンツの Region（1 つに数千個）はほぼ全部が数百リクエストごとに触られるので、末尾が冷えていない。実測でも、末尾の密度で配る方式は固定の下限より 2.6 ポイント悪かった（付録 §M）。</p></div>
+<div class="th"><h4>(3) 名簿は「容量を足したらどうなったか」を直接数える</h4>
+<p>名簿は、捨てたコンテンツが「その組の平均の滞在の 5% 以内に」またリクエストされたかを数える。リトルの法則（<i>C<sub>k</sub></i> = 流れ × 滞在）から、容量を 5% 足すことは滞在を 5% 延ばすことに当たる。延びた分で救われるコンテンツを、反実仮想として直接数えている（§6.4 (1)）。</p>
+<p>Region では滞在が Region ごとにばらつくので、「全員の滞在を一様に 5% 延ばす」は近似だ。そのため名簿の値そのものは使わず、<b>大の組とほかの組の比の符号（傾き）</b>だけを使い、平らにならしてゆっくり動かす（§6.4 (2)）。</p></div>
+<div class="th"><h4>(4) 下限は、消す順番を壊さずに配分だけを変える</h4>
+<p>下限 <i>f</i> は、「次に消す Region が大の組のもので、大の組が <i>f</i>・<i>N</i> 個以下しかないなら、代わりにほかの組のいちばん古い Region を消す」という規則だ。組の中では LRU の順番のまま、組どうしの取り分だけを変えるので、§2 の寿命の式は組ごとにそのまま使える（組ごとに別の <i>T<sub>k</sub></i> を持つ）。</p></div>
+
+<h2>7. 再挿入：書き直すかどうかの閾値（n=cb）</h2>
+<p>組に分けても、捨てる Region の中にまだ人気のあるコンテンツは残る。CacheLib は「今の滞在で 1 回以上ヒットしたら書き直す（n=1）」という決め打ちを使う。n=cb は、書き直しの<b>損得</b>から同じ物差しで決める。</p>
+
+<h3>7.1 損得の式</h3>
+<p>捨てられそうなコンテンツ（大きさ s バイト、今の滞在で h 回ヒット）を書き直すとき：</p>
+<ul>
+<li><b>得</b>：次の滞在で「h 回ヒットしたコンテンツが次の滞在で 1 バイトあたり何回ヒットしたか（過去の実績）」× s。</li>
+<li><b>場所の費用</b>：SSD は満杯なので、書き直した s バイトの分、端の別のコンテンツが早く捨てられる。その価値は §6 の端の価値 × s。</li>
+<li><b>書き込みの費用</b>：書き込み 1 バイトの値段 λ × s（既定 0。寿命を気にするなら上げる）。</li>
+</ul>
+<div class="eq"><b>書き直す</b> ⇔ 次の滞在の予測（h 回の段）≥ 端の価値 ＋ 書き込みの値段<br><span class="sub">3 つとも s に比例するので、大きさは消える。比べるのは密度だけ。</span></div>
+
+<h3>7.2 具体例：nha の実測</h3>
+<p class="sub">棒＝今の滞在のヒット数ごとに、書き直したコンテンツが次の滞在で 1 バイトあたり何回ヒットしたか。</p>
+<div class="wrap"><svg viewBox="0 0 920 300" role="img" aria-label="nha の再挿入の判定">
+<g transform="translate(30,20)">
+<text x="0" y="0" class="b">小の組</text>
+<!-- scale: 1.0 -> 50px, cap 4 ; baseline 220; bars h=1..8 width 36 step 46 -->
+<line x1="0" y1="220" x2="370" y2="220" stroke="var(--line)"/>
+<g fill="var(--sm)">
+<rect x="10" y="200" width="36" height="20"/><rect x="56" y="174" width="36" height="46"/><rect x="102" y="151" width="36" height="69"/><rect x="148" y="121" width="36" height="99"/><rect x="194" y="98" width="36" height="122"/><rect x="240" y="68" width="36" height="152"/><rect x="286" y="46" width="36" height="174"/><rect x="332" y="20" width="36" height="200"/>
+</g>
+<g class="m" text-anchor="middle"><text x="28" y="194">0.40</text><text x="74" y="168">0.92</text><text x="120" y="145">1.38</text><text x="166" y="115">1.98</text><text x="212" y="92">2.44</text><text x="258" y="62">3.05</text><text x="304" y="40">3.48</text><text x="350" y="14">7.55↑</text>
+<text x="28" y="238">1</text><text x="74" y="238">2</text><text x="120" y="238">3</text><text x="166" y="238">4</text><text x="212" y="238">5</text><text x="258" y="238">6</text><text x="304" y="238">7</text><text x="350" y="238">8+</text></g>
+<line x1="0" y1="212" x2="370" y2="212" stroke="var(--good)" stroke-width="2"/><text x="372" y="216" fill="var(--good)">端 0.15</text>
+<line x1="0" y1="197" x2="370" y2="197" stroke="var(--bad)" stroke-width="2" stroke-dasharray="6 4"/><text x="372" y="194" fill="var(--bad)">＋値段 0.3</text>
+<text x="185" y="256" text-anchor="middle" class="m">今の滞在のヒット数</text>
+<g transform="translate(450,0)">
+<text x="0" y="0" class="b">大の組</text>
+<line x1="0" y1="220" x2="370" y2="220" stroke="var(--line)"/>
+<g fill="var(--lg)">
+<rect x="10" y="198" width="36" height="22"/><rect x="56" y="180" width="36" height="40"/><rect x="102" y="157" width="36" height="63"/><rect x="148" y="140" width="36" height="80"/><rect x="194" y="134" width="36" height="86"/><rect x="240" y="133" width="36" height="87"/><rect x="286" y="111" width="36" height="109"/><rect x="332" y="20" width="36" height="200"/>
+</g>
+<g class="m" text-anchor="middle"><text x="28" y="192">0.43</text><text x="74" y="174">0.81</text><text x="120" y="151">1.25</text><text x="166" y="134">1.61</text><text x="212" y="128">1.72</text><text x="258" y="127">1.75</text><text x="304" y="105">2.17</text><text x="350" y="14">4.07↑</text>
+<text x="28" y="238">1</text><text x="74" y="238">2</text><text x="120" y="238">3</text><text x="166" y="238">4</text><text x="212" y="238">5</text><text x="258" y="238">6</text><text x="304" y="238">7</text><text x="350" y="238">8+</text></g>
+<line x1="0" y1="210" x2="370" y2="210" stroke="var(--good)" stroke-width="2"/><text x="372" y="216" fill="var(--good)">端 0.20</text>
+<line x1="0" y1="195" x2="370" y2="195" stroke="var(--bad)" stroke-width="2" stroke-dasharray="6 4"/><text x="372" y="194" fill="var(--bad)">＋値段 0.5</text>
+<text x="185" y="256" text-anchor="middle" class="m">今の滞在のヒット数</text>
+</g></g></svg></div>
+<ul>
+<li><b>値段 0（既定）</b>：どの段も端の価値（緑の線：小の組 0.15、大の組 0.20）より上なので、1 回以上ヒットしたものは全部書き直す。CacheLib の経験則 n=1 が、損得の式からそのまま出てくる。</li>
+<li><b>値段 0.3</b>（赤の破線：端＋0.3）：1 回の段（0.40・0.43）が線を下回るので、2 回以上ヒットしたものだけ書き直す。同じ式のまま n=2 になり、書き込みが減る。</li>
+<li>負荷が変わって端の価値が上がれば（場所の取り合いが厳しくなれば）、線が上がり、自動で厳しくなる。</li>
+</ul>
+<p>n=cb は書き直しの閾値を決め打ちにせず、「次の滞在の予測」と「端の価値」の両方を走りながら測って決める。調べた範囲（CacheLib・Kangaroo・FairyWREN・Nemo などは決まった閾値）では、SSD キャッシュでこれを自動で決める例は見つからなかった。</p>
+
+<h3>7.3 理論式：書き直しの損得</h3>
+<div class="th"><h4>(1) 判定の式</h4>
+<p>捨てる Region の中のコンテンツ（大きさ <i>s</i>、組 <i>c</i>、今の滞在のヒット数の段 <i>b</i> ＝ 1, 2, …, 8 以上）について：</p>
+<div class="f">得 ＝ <i>ĥ<sub>c,b</sub></i> · <i>s</i>，　 場所の費用 ＝ <i>v<sub>c</sub></i> · <i>s</i>，　 書き込みの費用 ＝ <i>λ</i><sub>書</sub> · <i>s</i></div>
+<div class="f"><b>書き直す</b>　⇔　<i>ĥ<sub>c,b</sub></i> ≥ <i>v<sub>c</sub></i> + <i>λ</i><sub>書</sub></div>
+<ul>
+<li>得：書き直すと、次の滞在で 1 バイトあたり <i>ĥ</i> 回ヒットする見込み。</li>
+<li>場所の費用：SSD は満杯なので、書き直した <i>s</i> バイトが 1 滞在いる間、端の <i>s</i> バイトが代わりに早く捨てられる。その値打ちは §6.4 (1) の端の価値 <i>v<sub>c</sub></i> そのもの。</li>
+<li>書き込みの費用：書き込み 1 バイトの値段をヒットの回数に換算したもの（既定 0）。</li>
+<li>3 つとも <i>s</i> に比例するので、大きさは消える。</li>
+</ul></div>
+<div class="th"><h4>(2) 次の滞在の予測の作り方</h4>
+<div class="f"><i>ĥ<sub>c,b</sub></i> = Σ（<i>h</i> × <i>s</i>）/ Σ <i>s</i></div>
+<p>段 <i>b</i> で書き直したコンテンツが、次に捨てられるときまでにヒットした回数 <i>h</i> を、バイトで重みを付けて平均したもの。バイトで重みを付けるのは、BMR の目的と単位をそろえるため。段ごとに 32 件たまるまでは書き直す（学習中）。</p></div>
+<div class="th"><h4>(3) nha で確かめる</h4>
+<table>
+<tr><th>組</th><th class="n"><i>G<sub>c</sub></i>（名簿のヒット）</th><th class="n"><i>E<sub>c</sub></i>（出たバイト）</th><th class="n"><i>v<sub>c</sub></i> = <i>G</i>/(0.05<i>E</i>)</th><th class="n"><i>ĥ</i>（1 回の段）</th><th>判定（値段 0）</th></tr>
+<tr><td>小</td><td class="n">117 GB</td><td class="n">15.3 TB</td><td class="n">0.152</td><td class="n">0.40</td><td>0.40 ≥ 0.152 → 書き直す</td></tr>
+<tr><td>大</td><td class="n">244 GB</td><td class="n">24.1 TB</td><td class="n">0.203</td><td class="n">0.43</td><td>0.43 ≥ 0.203 → 書き直す</td></tr>
+</table>
+<p>計算した <i>v<sub>c</sub></i> は、記録された判定の基準（bar）0.152・0.203 と一致する <span class="ok">✓</span>。1 回の段が線を越えるので、結果は n=1 と同じになる。値段 0.3 では 0.40 &lt; 0.452、0.43 &lt; 0.503 となり、n=2 になる。</p></div>
+<div class="th"><h4>(4) 三つの式のまとめ</h4>
+<table>
+<tr><th>判断</th><th>式</th><th>止まる所・選ぶもの</th></tr>
+<tr><td>閾値</td><td><i>ω<sub>S</sub>ω<sub>L</sub></i>(<i>m<sub>S</sub></i> − <i>m<sub>L</sub></i>)<sup>2</sup> を最大に</td><td>分けて配分を最適にしたときの得（の近似）が最大の線</td></tr>
+<tr><td>配分</td><td><i>f</i> ← <i>f</i> + 0.04 · <i>g</i><sub>平</sub></td><td><i>m<sub>L</sub></i> = <i>m<sub>O</sub></i>（端の価値がそろう＝KKT）</td></tr>
+<tr><td>再挿入</td><td><i>ĥ<sub>c,b</sub></i> ≥ <i>v<sub>c</sub></i> + <i>λ</i><sub>書</sub></td><td>次の滞在の得が、場所と書き込みの費用を上回るものだけ</td></tr>
+</table>
+<p>3 つとも、もとは §2.1 の「場所 1 バイトの値打ち d<i>H</i>/d<i>C</i>」を、測れる量に置き換えたものだ。閾値は段の平均の再利用で（代わりの量）、配分と再挿入は名簿の端の価値で（直接）置き換えている。</p></div>
+
+
+<h3>7.4 Region LRU での導出：閾値の形が最適な理由と、測る理由</h3>
+<div class="th"><h4>補題 5（1 回の滞在のヒット数は幾何分布）</h4>
+<p>速さ <i>λ</i> のコンテンツが、触られる速さ <i>Λ</i>（自分を含む）の Region に封じられてから消えるまでのヒット数 <i>N</i> は：</p>
+<div class="f"><i>P</i>(<i>N</i> ≥ <i>n</i>) = <i>a<sup>n</sup></i>，　 <i>a</i> = (1−<i>p</i>)<i>π</i> / ((1−<i>p</i>)<i>π</i> + <i>p</i>)，　 <i>p</i> = e<sup>−<i>ΛT</i></sup>，　 <i>π</i> = <i>λ</i>/<i>Λ</i></div>
+<p><b>導出</b>：触られるたびに同じ状態から始まる（無記憶）。次の触れが <i>T</i> 以内に来て（確率 1−<i>p</i>）、それが自分（確率 <i>π</i>）ならヒットする。<i>T</i> を超えたら（確率 <i>p</i>）消える。ほかのコンテンツの触れなら、また同じ状態に戻る。ヒットが消えるより先に来る確率が <i>a</i> で、平均 <i>a</i>/(1−<i>a</i>) = <i>λ</i>(e<sup><i>ΛT</i></sup>−1)/<i>Λ</i> = <i>λE</i>[<i>D</i>] は補題 3 と一致する。</p></div>
+<div class="th"><h4>命題 6（「h 回以上なら書き直す」という形が最適）</h4>
+<p>組の中のコンテンツの <i>a</i> がばらついているとき、今回 <i>h</i> 回ヒットしたコンテンツが次の滞在で 1 回以上ヒットする見込みを <i>p</i>(<i>h</i>) = <i>E</i>[<i>a</i> | <i>N</i> = <i>h</i>] とすると：</p>
+<div class="f"><i>p</i>(<i>h</i>+1) − <i>p</i>(<i>h</i>) = Var<sub><i>h</i></sub>(<i>a</i>) / <i>E<sub>h</sub></i>[<i>a</i>] ≥ 0</div>
+<p><b>導出</b>：ベイズの定理で、<i>h</i> 回だった後の <i>a</i> の重みは（もとの重み）×(1−<i>a</i>)<i>a<sup>h</sup></i>。<i>h</i>+1 回の重みは、それに <i>a</i> を掛けたものなので、差は分散 ÷ 平均になる。</p>
+<p>よって <i>h</i> が多いほど次も当たりやすい。「見込みが基準以上の段だけ書き直す」は「<i>h</i> ≥ <i>n</i>* なら書き直す」という<b>閾値の形</b>になり、<i>h</i> だけを使う規則の中で最適である（CacheLib の n=1 もこの形）。組の中の人気がそろっていれば <i>p</i>(<i>h</i>) は一定で、<i>h</i> は選別に使えない。</p></div>
+<div class="th"><h4>(3) n=cb：基準を「方針の定数」から「場所の値段」に置き換えた</h4>
+<p>付録 §L では、基準 <i>p</i>* を方針として決める定数（0.5）にしていた。そこには「書き直したコンテンツが次の滞在の間、ほかのコンテンツの場所を取る」効果が入っていない。n=cb は、その場所の値段を名簿の端の価値 <i>v<sub>c</sub></i>（§6.4 (1)）で測り、基準を <i>v<sub>c</sub></i> + 書き込みの値段 にした（§7.3）。閾値の形（命題 6）はそのままで、段の線を損得で引く。</p></div>
+<div class="th"><h4>(4) 予測を式で計算せず、測る理由</h4>
+<p>補題 5 はコンテンツ 1 個の式だ。実際には、書き直したコンテンツどうしは同じ Region に集まるので、次の滞在の <i>Λ</i> は高くなる。再挿入が容量を使うので、<i>T</i> は短くなる。この帰還はモデルに入れていない。n=cb は次の滞在の実績 <i>ĥ<sub>c,b</sub></i> を段ごとに数えるので、この帰還も含めた値で判定できる。</p></div>
+
+<h2>8. 三つの組み合わせ：速さを分けてぶつけない</h2>
+<div class="wrap"><svg viewBox="0 0 860 300" role="img" aria-label="三つの判断のつながり">
+<g transform="translate(10,10)">
+<rect x="0" y="100" width="130" height="60" rx="8" fill="none" stroke="var(--line)" stroke-width="2"/><text x="65" y="126" text-anchor="middle" class="b">リクエスト</text><text x="65" y="146" text-anchor="middle" class="m">DRAM でミス</text>
+<path d="M130 130 h40" stroke="var(--fg)" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="175" y="90" width="170" height="80" rx="8" fill="none" stroke="var(--acc)" stroke-width="2.5"/><text x="260" y="116" text-anchor="middle" class="b">① 閾値（大津）</text><text x="260" y="136" text-anchor="middle" class="m">大きさ ≥ t → 大の組</text><text x="260" y="156" text-anchor="middle" class="m">いちばん遅い（累積）</text>
+<path d="M345 130 h40" stroke="var(--fg)" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="390" y="60" width="200" height="140" rx="8" fill="none" stroke="var(--line)" stroke-width="2"/><text x="490" y="84" text-anchor="middle" class="b">SSD（RU 単位の Region）</text>
+<rect x="405" y="96" width="80" height="34" fill="var(--sm)" opacity=".8"/><text x="445" y="118" text-anchor="middle" fill="#fff">小の組</text>
+<rect x="495" y="96" width="80" height="34" fill="var(--lg)" opacity=".8"/><text x="535" y="118" text-anchor="middle" fill="#fff">大の組</text>
+<text x="490" y="156" text-anchor="middle" class="m">Region ごとまとめて捨てる</text><text x="490" y="174" text-anchor="middle" class="m">（装置の GC なし）</text>
+<path d="M590 130 h40" stroke="var(--fg)" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="635" y="20" width="200" height="80" rx="8" fill="none" stroke="var(--good)" stroke-width="2.5"/><text x="735" y="46" text-anchor="middle" class="b">名簿</text><text x="735" y="66" text-anchor="middle" class="m">捨てたものへのミスから</text><text x="735" y="86" text-anchor="middle" class="m">組ごとの端の価値</text>
+<rect x="635" y="160" width="200" height="80" rx="8" fill="none" stroke="var(--bad)" stroke-width="2.5"/><text x="735" y="186" text-anchor="middle" class="b">③ 再挿入（n=cb）</text><text x="735" y="206" text-anchor="middle" class="m">予測 ≥ 端 ＋ 値段 なら書き直す</text><text x="735" y="226" text-anchor="middle" class="m">いちばん速い（1 個ごと）</text>
+<path d="M735 100 v56" stroke="var(--good)" stroke-width="2" marker-end="url(#ar)"/><text x="742" y="134" class="m" fill="var(--good)">端の価値</text>
+<path d="M635 60 C560 20 520 30 500 58" stroke="var(--good)" stroke-width="2" fill="none" marker-end="url(#ar)"/><text x="520" y="22" class="m">② 配分：大の組の下限（中くらいの速さ）</text>
+<path d="M635 220 C600 250 540 240 520 202" stroke="var(--bad)" stroke-width="2" fill="none" marker-end="url(#ar)"/><text x="470" y="262" class="m">書き直したものは同じ組に戻る</text>
+</g>
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--fg)"/></marker></defs>
+</svg></div>
+<p>三つは互いの結果を前提にしている。</p>
+<ul>
+<li>再挿入は、今の配分の端の価値を使う。</li>
+<li>配分は、今の組の分け方を前提に傾きを測る。</li>
+<li>閾値が変わると組が入れ替わり、配分も再挿入の統計も測り直しになる。</li>
+</ul>
+<p>同じ速さで動くと、互いの動きを雑音として拾って揺れる。そこで<b>内側ほど速く、外側ほど遅く</b>した。</p>
+<ul>
+<li>再挿入：捨てる 1 個ごと。</li>
+<li>配分：Region が半分入れ替わるごと。</li>
+<li>閾値：累積で、4 回続けて同じ向きなら。</li>
+</ul>
+<p>外側から見ると、内側はいつも落ち着いた状態に見える（時間尺度の分離）。名簿の端の価値（緑の線）は、配分と再挿入の両方で同じ物差しとして使っている。</p>
+
+<h2>9. 結果：RU 単位の一括削除はこれで改善する</h2>
+<p>CacheLib（256 MiB の Region、分けない、n=1）との BMR の差（ポイント。負が良い）と、SSD への書き込み量の比。Region は RU に合わせた大きさ（nha・w01・msr は 627 MiB、Tencent は縮小版の 25 MiB）。</p>
+<table>
+<tr><th>トレース</th><th class="n">CacheLib の BMR [%]</th><th class="n">RU にしただけ</th><th class="n"><b>提案</b></th><th class="n">提案＋篩</th><th class="n">書き込み 提案 / ＋篩</th></tr>
+<tr><td>nha（Meta CDN）</td><td class="n">4.705</td><td class="n">−0.04</td><td class="n"><b>−0.11</b></td><td class="n">−0.10</td><td class="n">0.98 / 0.59</td></tr>
+<tr><td>w01（Wikipedia CDN）</td><td class="n">69.50</td><td class="n">−0.40</td><td class="n"><b>−3.81</b></td><td class="n">−3.16</td><td class="n">0.93 / 0.29</td></tr>
+<tr><td>Tencent（ブロック、縮小）</td><td class="n">51.04</td><td class="n">+0.06</td><td class="n"><b>−0.76</b></td><td class="n">+1.50</td><td class="n">0.97 / 0.48</td></tr>
+<tr><td>msr（ブロック）</td><td class="n">48.49</td><td class="n">−0.37</td><td class="n">−0.32</td><td class="n">+0.52</td><td class="n">0.98 / 0.34</td></tr>
+</table>
+<svg viewBox="0 0 860 240" role="img" aria-label="CacheLib との BMR の差">
+<g transform="translate(160,20)">
+<line x1="360" y1="0" x2="360" y2="190" stroke="var(--fg)"/>
+<text x="360" y="206" text-anchor="middle" class="m">0（CacheLib）</text><text x="120" y="206" text-anchor="middle" class="m">−4</text><text x="480" y="206" text-anchor="middle" class="m">+2</text>
+<!-- scale 1pt = 60px -->
+<text x="-10" y="22" text-anchor="end">nha</text><rect x="358" y="8" width="2" height="12" fill="var(--cold)"/><rect x="353" y="22" width="7" height="12" fill="var(--acc)"/><rect x="354" y="36" width="6" height="12" fill="var(--good)"/>
+<text x="-10" y="70" text-anchor="end">w01</text><rect x="336" y="56" width="24" height="12" fill="var(--cold)"/><rect x="131" y="70" width="229" height="12" fill="var(--acc)"/><rect x="170" y="84" width="190" height="12" fill="var(--good)"/>
+<text x="-10" y="118" text-anchor="end">Tencent</text><rect x="360" y="104" width="4" height="12" fill="var(--cold)"/><rect x="315" y="118" width="45" height="12" fill="var(--acc)"/><rect x="360" y="132" width="90" height="12" fill="var(--good)"/>
+<text x="-10" y="166" text-anchor="end">msr</text><rect x="338" y="152" width="22" height="12" fill="var(--cold)"/><rect x="341" y="166" width="19" height="12" fill="var(--acc)"/><rect x="360" y="180" width="31" height="12" fill="var(--good)"/>
+<rect x="520" y="10" width="14" height="12" fill="var(--cold)"/><text x="540" y="21">RU にしただけ</text>
+<rect x="520" y="30" width="14" height="12" fill="var(--acc)"/><text x="540" y="41">提案</text>
+<rect x="520" y="50" width="14" height="12" fill="var(--good)"/><text x="540" y="61">提案＋篩</text>
+</g></svg>
+<p>読み方：</p>
+<ul>
+<li><b>RU にしただけ</b>（単位を大きくし、ほかは CacheLib のまま）では、ほとんど変わらない（±0.4）。単位を大きくすること自体の損は、この大きさではまだ小さい。</li>
+<li><b>提案</b>は同じ RU 単位のまま、どのトレースでも CacheLib と同等以上。効き目は「大きさと再利用の強さが強く結びついたトレース」ほど大きい。w01 は書き込みの 4 割が 1M ちょうどの一度きりのコンテンツで、これを別の Region に集めて丸ごと捨てるだけで 3.8 ポイント下がった。</li>
+<li><b>篩</b>は書き込みを 3〜7 割減らす（寿命・装置の負担に効く）。CDN のトレース（nha・w01）では BMR をほとんど保つ。ブロックのトレース（Tencent・msr）では、DRAM で一度ヒットするまで待つ分の損が大きく、BMR が悪くなる。</li>
+</ul>
+
+<h2>10. 限界と次の一手</h2>
+<ul>
+<li><b>大津の線は 1 段ずれることがある</b>：w01 では 512K を選ぶが、最良の固定の線は 256K（差 0.11 ポイント）。256K〜512K の段は書き込みの 2.5% しかなく、得点はほとんど変わらないが、小の組の場所を取る。詳しくは <a href="w01_otsu_cut.html">w01_otsu_cut.html</a>。</li>
+<li><b>負荷が途中で変わると線は追いつかない</b>（累積なので）。変化を検出して数え直す案は、誤検出は無害にできたが得にならず、採用していない（<a href="cross_trace.html">cross_trace.html</a>）。下限を速く下げる move=4 は採用した。</li>
+<li><b>単位をさらに大きくしたとき</b>（RU が数 GB）の感度は、キットの paper-sens（SSD・DRAM・RU の大きさを変える）で測る予定。</li>
+</ul>
+<p class="sub">関連：<a href="v2_unified.html">v2_unified.html</a>（三つの判断の統一言語と n=cb の導出）、<a href="ru_auto_v2_theory.html">ru_auto_v2_theory.html</a>（部品の詳細）、<a href="paper_story.html">paper_story.html</a>（論文の筋と計測）。数字は tools/synth/story_numbers.py（results/story_numbers.json）と results/nha_piece.json から。</p>
+
+<h2>11. 論文での書き方：10・15・20 ページで使える紙面と、ふさわしい説明</h2>
+<p>同じ内容でも、ページ数で「何を本文に残し、何を付録に回し、どこまで導出するか」が変わる。まず紙面の量を見積もり、次に節ごとの配分と、理論の書き込み方の段階を決める。</p>
+
+<h3>11.1 紙面の量の見積もり（2 段組み・10pt のシステム系の会議を想定）</h3>
+<table>
+<tr><th>もの</th><th class="n">1 ページあたり・1 つあたりの目安</th></tr>
+<tr><td>本文だけのページ</td><td class="n">英語 800〜900 語（日本語の 2 段組みの論文誌なら約 2,000 字）</td></tr>
+<tr><td>図表の入った実際のページ</td><td class="n">英語 550〜650 語</td></tr>
+<tr><td>1 段幅の図</td><td class="n">0.25〜0.3 ページ</td></tr>
+<tr><td>2 段幅の図</td><td class="n">0.45〜0.5 ページ</td></tr>
+<tr><td>表（5〜8 行）</td><td class="n">0.2〜0.3 ページ</td></tr>
+<tr><td>独立した数式 1 本</td><td class="n">本文 2〜3 行分</td></tr>
+<tr><td>補題 1 つ（主張＋証明の要点）</td><td class="n">0.2〜0.3 ページ</td></tr>
+<tr><td>参考文献</td><td class="n">1〜1.5 ページ（会議によっては数えない）</td></tr>
+</table>
+<p>本文に使える量は、10 ページで約 6,000 語、15 ページで約 9,000 語、20 ページで約 12,000 語。そのうち図表に、それぞれ 2.3・3.5・4.5 ページほどを使う。</p>
+
+<h3>11.2 節ごとの配分（ページ、参考文献を除く）</h3>
+<table>
+<tr><th>節</th><th class="n">10p</th><th class="n">15p</th><th class="n">20p</th><th>中身</th></tr>
+<tr><td>1 はじめに</td><td class="n">1.0</td><td class="n">1.25</td><td class="n">1.5</td><td>GC の問題 → 大きな単位で一括削除 → 巻き添えと書き直し（アプリの中の GC）→ 三つの道具と貢献</td></tr>
+<tr><td>2 背景と動機</td><td class="n">1.25</td><td class="n">1.75</td><td class="n">2.0</td><td>FDP と RU、CacheLib の Region、巻き添えの実測、書き直しの量（§1）</td></tr>
+<tr><td>3 モデル（Region 単位の Che 近似）</td><td class="n">1.25</td><td class="n">2.25</td><td class="n">3.5</td><td>§2：滞在、寿命、帰結の四つ</td></tr>
+<tr><td>4 設計</td><td class="n">2.5</td><td class="n">3.75</td><td class="n">5.0</td><td>物差し（§3）、閾値（§4・§5）、配分（§6）、再挿入（§7）、組み合わせと篩（§8）</td></tr>
+<tr><td>　4.1 物差し</td><td class="n">0.25</td><td class="n">0.25</td><td class="n">0.4</td><td></td></tr>
+<tr><td>　4.2 閾値（st の分析＋大津）</td><td class="n">0.75</td><td class="n">1.25</td><td class="n">1.75</td><td></td></tr>
+<tr><td>　4.3 配分（名簿）</td><td class="n">0.6</td><td class="n">0.9</td><td class="n">1.25</td><td></td></tr>
+<tr><td>　4.4 再挿入（n=cb）</td><td class="n">0.6</td><td class="n">0.9</td><td class="n">1.1</td><td></td></tr>
+<tr><td>　4.5 組み合わせ・篩</td><td class="n">0.3</td><td class="n">0.45</td><td class="n">0.5</td><td></td></tr>
+<tr><td>5 実装</td><td class="n">0.5</td><td class="n">0.75</td><td class="n">1.0</td><td>RegionFlash、使うメモリ、計算の量</td></tr>
+<tr><td>6 評価</td><td class="n">2.75</td><td class="n">4.0</td><td class="n">5.25</td><td>下の 11.4</td></tr>
+<tr><td>7 関連研究</td><td class="n">0.5</td><td class="n">0.75</td><td class="n">1.0</td><td>CacheLib・Kangaroo・FairyWREN・CacheLib-FDP・RIPQ・Flashield・S3-FIFO・AdaptSize など</td></tr>
+<tr><td>8 議論・限界</td><td class="n">（6 に含める）</td><td class="n">0.25</td><td class="n">0.5</td><td>§10</td></tr>
+<tr><td>9 まとめ</td><td class="n">0.25</td><td class="n">0.25</td><td class="n">0.25</td><td></td></tr>
+<tr><td><b>合計</b></td><td class="n"><b>10.0</b></td><td class="n"><b>15.0</b></td><td class="n"><b>20.0</b></td><td>図表は 10p で 7〜9 個、15p で 11〜13 個、20p で 15〜18 個</td></tr>
+</table>
+
+<h3>11.3 理論の書き込み方：三つの段階</h3>
+<p>理論 1 つを次の 4 つの要素で書き、ページ数に応じて要素を足していく。</p>
+<ol>
+<li><b>主張</b>（1 文）</li>
+<li><b>式</b>（1〜2 本）</li>
+<li><b>直感</b>（なぜそうなるかを 1〜2 文）</li>
+<li><b>確かめ</b>（数値 1 つ）</li>
+</ol>
+<p>10p は主張・式・確かめ、15p は直感と導出の要点を足し、20p は証明（または付録の証明への道筋）まで書く。<b>証明を省く場合も、仮定と、それをどこで使うかは必ず本文に残す</b>（査読で最初に突かれる所）。</p>
+<table>
+<tr><th>理論の部品（この文書の節）</th><th>10p</th><th>15p</th><th>20p</th></tr>
+<tr><td>補題 1 在籍率 <i>h</i> = <i>λL</i>/(1+<i>λL</i>)（§2.2）</td><td>式と 1 文</td><td>再生報酬の 3 行の導出</td><td>PASTA・Wald まで含めた証明</td></tr>
+<tr><td>命題 2 FIFO では書き分けが効かない（§2.3）</td><td>1 文（設計の前提として）</td><td>主張＋実測 ±0.5</td><td>同左＋詰め残しの議論</td></tr>
+<tr><td>補題 3 Region の寿命（§2.4）</td><td>式と数の感覚（1.7<i>T</i>・30<i>T</i>・2200<i>T</i>）</td><td>3 段の導出</td><td>完全な導出</td></tr>
+<tr><td>命題 4 滞在の式と不動点（§2.5）</td><td>本文は 1 行、詳細は付録・技術報告</td><td>式＋同居の独立性の検証</td><td>導出、解き方、検証の表（§2.7）</td></tr>
+<tr><td>帰結 (1) LRU は OHR の密度で配る（§2.6）</td><td colspan="3"><b>どの長さでも 1 段落</b>（配分が要る理由の核）</td></tr>
+<tr><td>帰結 (2) 損失の上界 <i>D</i>（§2.6）</td><td>主張のみ</td><td>主張＋図（巻き添えと居座り）</td><td>証明の要点</td></tr>
+<tr><td>帰結 (4) 単位が大きいほど書き分けが効く（§2.6）</td><td>1 文＋RU の感度の図</td><td>式</td><td>式＋RU を振った実測</td></tr>
+<tr><td>st の分析（§4）</td><td>比較の相手として 2〜3 文</td><td>1 段落＋表</td><td>1 小節（重い裾、相関、外れ方）</td></tr>
+<tr><td>大津（§5）</td><td>規則・価値の意味（1+<i>λL</i>）・w01 の図</td><td>＋分ける得の導出（3 行）＋st との表</td><td>＋<i>D</i> とのつながり、Tencent・1 段ずれの例</td></tr>
+<tr><td>名簿（§6）</td><td>規則・リトルの 1 行・下限の動きの図</td><td>＋末尾の密度が使えない理由、KKT</td><td>＋山登り・二分法との比較</td></tr>
+<tr><td>n=cb（§7）</td><td>判定の不等式＋図</td><td>＋補題 5・命題 6（閾値の形が最適）</td><td>＋証明、先行研究との違い</td></tr>
+<tr><td>時間尺度の分離（§8）</td><td>1 段落</td><td>＋図</td><td>＋ぶつかったときの実例</td></tr>
+</table>
+
+<h3>11.4 評価の図の選び方</h3>
+<table>
+<tr><th>図・表</th><th>10p</th><th>15p</th><th>20p</th><th>キットの出力</th></tr>
+<tr><td>主の結果（トレースごとの ΔBMR と書き込み）</td><td>○</td><td>○</td><td>○</td><td><code>--user-method</code> の <code>fig_summary.svg</code></td></tr>
+<tr><td>書き込みと BMR の交換関係（CacheLib の n=0〜3 の線）</td><td>○</td><td>○</td><td>○</td><td><code>fig_tradeoff.svg</code></td></tr>
+<tr><td>部品の寄与（RU のみ → ＋閾値 → ＋配分 → ＋n=cb）</td><td>○</td><td>○</td><td>○</td><td><code>figs_parts/</code></td></tr>
+<tr><td>RU の大きさの感度</td><td>○</td><td>○</td><td>○</td><td><code>paper-sens</code></td></tr>
+<tr><td>自動で決まる値の動き（1 トレース）</td><td>○</td><td>○</td><td>○（複数）</td><td><code>fig_knobs_&lt;trace&gt;.svg</code></td></tr>
+<tr><td>書き込みの値段 λ の線</td><td></td><td>○</td><td>○</td><td><code>figs_lambda/</code></td></tr>
+<tr><td>篩との 2×2</td><td>1 文</td><td>○</td><td>○</td><td><code>figs_adm/</code>・<code>table_orth</code></td></tr>
+<tr><td>SSD・DRAM の大きさの感度</td><td></td><td>○</td><td>○</td><td><code>paper-sens</code></td></tr>
+<tr><td>書き直しの閾値の理由</td><td></td><td>○</td><td>○</td><td><code>fig_rewrite_*.svg</code></td></tr>
+<tr><td>頑健性（種・チャンク・部分トレース）</td><td></td><td>1 段落</td><td>○</td><td><code>paper-robust</code>・<code>fig_marks</code></td></tr>
+<tr><td>負荷が途中で変わる場合</td><td></td><td></td><td>○</td><td><a href="cross_trace.html">cross_trace.html</a></td></tr>
+<tr><td>使うメモリと計算の量</td><td>1 文</td><td>1 段落</td><td>表</td><td></td></tr>
+</table>
+
+<h3>11.5 例：閾値の節を 3 つの長さで書く</h3>
+<div class="card"><b>10p 版（0.75 ページ ≈ 450 語＋1 段幅の図 1 枚）</b>
+<ol>
+<li>問題：書く時点で分かるのは大きさだけ。線をどこに引くか。</li>
+<li>価値：段ごとに ln（リクエストのバイト ÷ 書いたバイト）。補題 1 から、これは 1+<i>λL</i>（書いた 1 バイトが何回リクエストされるか）で、BMR の密度 <i>λ</i> の見積もり。</li>
+<li>規則：大津の得点 <i>ω<sub>S</sub>ω<sub>L</sub></i>(<i>m<sub>S</sub></i>−<i>m<sub>L</sub></i>)<sup>2</sup> が最大の線。累積で数え、4 回続いたら動かす。</li>
+<li>図：w01 の段ごとの書き込みと価値、選ばれた線（§5.2）。</li>
+<li>結果 1 文：w01 で st の −1.8 に対し −3.6 ポイント。</li>
+</ol></div>
+<div class="card"><b>15p 版（1.25 ページ ≈ 650 語＋図 1＋表 1）</b>
+<p>10p 版に足すもの：</p>
+<ul>
+<li>st が効いた理由と外れ方を 1 段落（§4.2・§4.3）。</li>
+<li>得点が「分けて配分を最適にした得」の 2 次の近似であることを 3 行で（§5.5 (3)）。</li>
+<li>st・大津・最良の固定の線の表（§5.6）。</li>
+</ul></div>
+<div class="card"><b>20p 版（1.75 ページ ≈ 850 語＋図 2＋表 1）</b>
+<p>15p 版に足すもの：</p>
+<ul>
+<li>大津が損失の上界 <i>D</i> を小さくすること（§5.6 (2)）。</li>
+<li>Tencent でわずかに負ける理由。</li>
+<li>w01 で 1 段ずれる理由：DRAM のヒットを数えること、書き込み 2.5% の段が得点を動かさないこと（<a href="w01_otsu_cut.html">w01_otsu_cut.html</a>）。</li>
+<li>ヒステリシスと累積を選んだ理由（減衰させると w01 で 57 回往復して −2.33）。</li>
+</ul></div>
+
+<h3>11.6 どの長さでも守ること</h3>
+<ul>
+<li><b>一つの物語で通す</b>：閾値は w01、配分と再挿入は nha、と例のトレースを固定し、数字が節をまたいでつながるようにする（この文書と同じ）。</li>
+<li><b>1 図 1 主張</b>：キャプションの最初の文に結論を書く（「提案は 4 トレース中 3 本で CacheLib と RU のみを上回る」など）。系列は 6〜7 個まで（<code>PAPER_USER_METHODS</code>）。</li>
+<li><b>主張の強さを数字に合わせる</b>：「どのトレースでも最良」とは書かない。msr は RU のみとほぼ同じ、篩はブロックのトレースで悪くなる、Tencent では st とほぼ同じ。こうした事実を限界の節に書くと、かえって信頼される。</li>
+<li><b>モデルの役割をはっきりさせる</b>：§2 のモデルは「なぜ効くか」と「どの向きにどれだけ」を言うためのもので、評価の数字はシミュレーションで出す、と最初に書く。</li>
+<li><b>短い版で落とした導出の置き場所を示す</b>：付録か技術報告（この文書と <a href="region_model_appendix.html">region_model_appendix.html</a>）を引用し、本文では「仮定と結果の式」だけ残す。</li>
+</ul>
+</main></body></html>
