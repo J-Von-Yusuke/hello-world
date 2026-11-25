@@ -518,6 +518,7 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
   - `fig_summary_main.svg`（BMR・書き込み・OHR の値）と `fig_summary_rel.svg`（ΔBMR・書き込みの比・ΔOHR）。`fig_main`・`fig_rel` と同じ並び。
   - 1 面ずつ：`fig_summary_bmr / _write / _ohr`（値）、`fig_summary_dbmr / _nwrite / _dohr`（CacheLib 比）。
   - 値と CacheLib 比の対：`fig_summary_bmr_pair`（BMR・ΔBMR）、`_ohr_pair`（OHR・ΔOHR）、`_write_pair`（書き込み・書き込みの比）。
+  - 書き込みの面（write・nwrite）は `fig_write`・`fig_nwrite` と同じく、取得（濃い）＋再書き込み（薄い）に分けて積む（詰め物は描かず表に残す）。nwrite は CacheLib の書き込み全体 = 1 で割り、CacheLib 自身の内訳も出す。
   - 行は基準（CacheLib）＋方式。値の面は目盛りがトレースごと（桁が違うため）、差と比の面は全トレース共通。並べる指標は `paper_figs.py` の `SUMM_FIGS`。
 - 説明用の組は図の組（`figs_<名前>/`）には分けない。場所を変えれば、別の組み合わせの組を並べて残せる（`PAPER_USER_METHODS="…" ./run.sh paper-figs --user-method talk2`）。
 

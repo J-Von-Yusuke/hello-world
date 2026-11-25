@@ -2,6 +2,7 @@
 
 新しい順。README の節番号はその時点のもの。
 
+- **11-25 まとめの図の書き込みを取得＋再書き込みに**：`fig_summary*` の write・nwrite の面を、`fig_write`・`fig_nwrite` と同じく濃い（取得）＋薄い（再書き込み）の積み上げにし、段の中に各量、端に合計を書く。nwrite の面には CacheLib 自身の内訳も描く。
 - **11-25 まとめの図を指標ごとに**：`fig_summary` と同じ横棒の形で、`fig_summary_main`（BMR・書き込み・OHR）・`fig_summary_rel`（ΔBMR・書き込みの比・ΔOHR）、1 面ずつの 6 枚、値と CacheLib 比の対 3 枚（BMR・OHR・書き込み）も出す。行に基準も入れ、値の面はトレースごとの目盛り。`paper_figs.py` の `summary_fig`・`SUMM_FIGS`。
 - **11-25 説明用の組（--user-method）**：比べる方式が多すぎて、見せたときに読めないため、`config.sh` に `PAPER_USER_METHODS` を足した（既定は CacheLib n=3・CacheLib＋篩・RU のみ・以前の提案・提案・提案＋篩）。`./run.sh paper-figs --user-method [場所]` で、その方式だけの一式を `work/paper/<場所>/`（既定 users）に出す。回さず、traces.tsv のトレースで結果のあるもの全部を使い、群ごとの一式も出す。説明用の 1 枚 `fig_summary.svg` も足した。トレースごとの横棒で、左が ΔBMR、右が書き込みの比。説明用の組と図の組だけで描く。`paper_figs.py --out <場所>`。`tools/synth/kit_user_test.sh` で確かめた。
 - **11-24 図の組**：方式が多い組（final2 は 24 方式）の図で凡例が場所を取り、軸の高さが負になって棒が潰れていた。`config.sh` の `PAPER_FIGSETS`（main・parts・lambda・adm・prior）ごとに、選んだ方式と基準だけの一式を `<組>/figs_<名前>/` にも出す（`paper_figs.py --figset`、run.sh の `figs_one`）。色は図の組をまたいで同じ。`figures.py` の `Fig`：軸の置き方は凡例 3 行までとして決め、超えた分は図を縦に伸ばして軸を下へずらす。計測には触れないので回し直しは要らない。`tools/synth/kit_figset_test.sh`。

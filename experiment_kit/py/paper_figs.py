@@ -554,11 +554,13 @@ if mrows:
 SUMM_M = {   # 指標 → (面の題, 種類 val|diff|ratio, 値の関数(行, 基準の行), 書式)
     "bmr": (T("BMR [%]（左が良い）", "BMR [%] (left is better)"), "val", lambda r, b: BMR(r), ".2f"),
     "ohr": (T("OHR [%]（右が良い）", "OHR [%] (right is better)"), "val", lambda r, b: OHR(r), ".1f"),
-    "write": (T("SSD 書き込み [TB]（左が良い）", "SSD writes [TB] (left is better)"), "val", lambda r, b: TB(r), ".3g"),
+    "write": (T("SSD 書き込み [TB]（左が良い）", "SSD writes [TB] (left is better)"), "val", lambda r, b: ATB(r) + RTB(r), ".3g"),
     "dbmr": (T("ΔBMR [pt]（CacheLib との差。左が良い）", "ΔBMR [pt] vs CacheLib (left is better)"), "diff", lambda r, b: BMR(r) - BMR(b), "+.2f"),
     "dohr": (T("ΔOHR [pt]（CacheLib との差。右が良い）", "ΔOHR [pt] vs CacheLib (right is better)"), "diff", lambda r, b: OHR(r) - OHR(b), "+.2f"),
-    "nwrite": (T("SSD 書き込み（CacheLib = 1。左が良い）", "SSD writes (CacheLib = 1, left is better)"), "ratio", lambda r, b: TB(r) / TB(b), ".2f"),
+    "nwrite": (T("SSD 書き込み（CacheLib = 1。左が良い）", "SSD writes (CacheLib = 1, left is better)"), "ratio", lambda r, b: (ATB(r) + RTB(r)) / TB(b), ".2f"),
 }
+# 11-25 書き込みの面は fig_write・fig_nwrite と同じく 取得（濃い）＋ 再書き込み（薄い）に分けて積む。nwrite は基準の書き込み全体 = 1 で割る
+SUMM_STACK = {"write": lambda r, b: (ATB(r), RTB(r)), "nwrite": lambda r, b: (ATB(r) / TB(b), RTB(r) / TB(b))}
 SUMM_FIGS = {"fig_summary": ["dbmr", "nwrite"], "fig_summary_main": ["bmr", "write", "ohr"], "fig_summary_rel": ["dbmr", "nwrite", "dohr"],
              **{f"fig_summary_{k}": [k] for k in SUMM_M},
              "fig_summary_bmr_pair": ["bmr", "dbmr"], "fig_summary_ohr_pair": ["ohr", "dohr"], "fig_summary_write_pair": ["write", "nwrite"]}
@@ -566,7 +568,10 @@ SUMM_FIGS = {"fig_summary": ["dbmr", "nwrite"], "fig_summary_main": ["bmr", "wri
 def summary_fig(keys):
     rowh, gap, top0, NX, RX = 30, 34, 70, 230, 1570   # 行の高さ、トレースの間、凡例の下、面の左端（左はトレースの名前）、右端
     rows = [BASE] + others
-    f = Fig(1600, 900); f.add_legend([(nm(c), colr(c), "box") for c in rows]); f.LEG_ROWS = 99; top = f.legend_h() + top0
+    f = Fig(1600, 900); f.add_legend([(nm(c), colr(c), "box") for c in rows])
+    if any(k in SUMM_STACK for k in keys):
+        f.add_legend([(T("書き込み：濃い = 取得（ミス）、薄い = 再書き込み。数字 = 段の中が各量、端が合計", "writes: dark = admitted (misses), light = rewritten; numbers = each part inside, total at the end"), "#bbbbbb", "box")])
+    f.LEG_ROWS = 99; top = f.legend_h() + top0
     tr_ = [n for n in names if any(c in runs[n]["runs"] for c in others) and TB(runs[n]["runs"][BASE])]
     f.H = top + len(tr_) * (len(rows) * rowh + gap) + 60
     V = {k: {(n, c): SUMM_M[k][2](runs[n]["runs"][c], runs[n]["runs"][BASE]) for n in tr_ for c in rows if c in runs[n]["runs"]} for k in keys}
@@ -592,10 +597,17 @@ def summary_fig(keys):
                 a0, a1, rng = ax[k]; lo, hi = rng(n); X = lambda v: a0 + (v - lo) / (hi - lo) * (a1 - a0); kind = SUMM_M[k][1]
                 if (n, c) not in V[k]:   # このトレースでは未計測（空の行を 0 と読まれないように）
                     f.t(X(0 if kind != "ratio" else 0) + 8, y + rowh - 9, T("結果なし", "no result"), 17, col="#999"); continue
-                if c == BASE and kind != "val":   # 差・比の面では基準そのもの（0 / 1）
+                if c == BASE and kind == "diff":   # 差の面では基準そのもの（0）。比の面（書き込み）は基準も取得＋再書き込みに分けて描く（fig_nwrite と同じ）
                     f.t(X(0 if kind == "diff" else 1) + 8, y + rowh - 9, T("基準", "baseline"), 17, col="#777"); continue
                 v = V[k][(n, c)]; b0, b1 = sorted((X(0), X(v)))
-                f.e.append(f'<rect x="{b0:.1f}" y="{y + 3}" width="{max(b1 - b0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
+                if k in SUMM_STACK:   # 取得（濃い）＋ 再書き込み（薄い）。段の中に入る長さなら各量も書く
+                    pa, pr = SUMM_STACK[k](runs[n]["runs"][c], runs[n]["runs"][BASE]); xa = X(pa); col = colr(c)
+                    f.e.append(f'<rect x="{b0:.1f}" y="{y + 3}" width="{max(xa - b0, 1.5):.1f}" height="{rowh - 6}" fill="{col}"/>')
+                    f.e.append(f'<rect x="{xa:.1f}" y="{y + 3}" width="{max(b1 - xa, 0):.1f}" height="{rowh - 6}" fill="{col}" fill-opacity="0.35" stroke="{col}" stroke-width="1.5"/>')
+                    for txt, l_, r_, tc in ((format(pa, SUMM_M[k][3]), b0, xa, "#fff"), (format(pr, SUMM_M[k][3]), xa, b1, INK)):
+                        if r_ - l_ >= tw(txt, 15) + 10: f.t((l_ + r_) / 2, y + rowh - 10, txt, 15, "middle", tc)
+                else:
+                    f.e.append(f'<rect x="{b0:.1f}" y="{y + 3}" width="{max(b1 - b0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
                 txt = format(v, SUMM_M[k][3]); txt = format(0.0, SUMM_M[k][3]) if float(txt) == 0 else txt   # −0.00 と書かない
                 neg = v < 0 and float(txt) != 0
                 f.t(b0 - 8 if neg else b1 + 8, y + rowh - 9, txt, 19, "end" if neg else "start")
