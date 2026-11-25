@@ -2,6 +2,7 @@
 
 新しい順。README の節番号はその時点のもの。
 
+- **11-25 まとめの図を指標ごとに**：`fig_summary` と同じ横棒の形で、`fig_summary_main`（BMR・書き込み・OHR）・`fig_summary_rel`（ΔBMR・書き込みの比・ΔOHR）、1 面ずつの 6 枚、値と CacheLib 比の対 3 枚（BMR・OHR・書き込み）も出す。行に基準も入れ、値の面はトレースごとの目盛り。`paper_figs.py` の `summary_fig`・`SUMM_FIGS`。
 - **11-25 説明用の組（--user-method）**：比べる方式が多すぎて、見せたときに読めないため、`config.sh` に `PAPER_USER_METHODS` を足した（既定は CacheLib n=3・CacheLib＋篩・RU のみ・以前の提案・提案・提案＋篩）。`./run.sh paper-figs --user-method [場所]` で、その方式だけの一式を `work/paper/<場所>/`（既定 users）に出す。回さず、traces.tsv のトレースで結果のあるもの全部を使い、群ごとの一式も出す。説明用の 1 枚 `fig_summary.svg` も足した。トレースごとの横棒で、左が ΔBMR、右が書き込みの比。説明用の組と図の組だけで描く。`paper_figs.py --out <場所>`。`tools/synth/kit_user_test.sh` で確かめた。
 - **11-24 図の組**：方式が多い組（final2 は 24 方式）の図で凡例が場所を取り、軸の高さが負になって棒が潰れていた。`config.sh` の `PAPER_FIGSETS`（main・parts・lambda・adm・prior）ごとに、選んだ方式と基準だけの一式を `<組>/figs_<名前>/` にも出す（`paper_figs.py --figset`、run.sh の `figs_one`）。色は図の組をまたいで同じ。`figures.py` の `Fig`：軸の置き方は凡例 3 行までとして決め、超えた分は図を縦に伸ばして軸を下へずらす。計測には触れないので回し直しは要らない。`tools/synth/kit_figset_test.sh`。
 - **11-20 夜 名簿の配分の既定を move=4 に**：`ghost` = move=0 ＋ 名簿の傾きが強く負（平滑値 < −0.5）なら下限を毎窓半分にする（上げる向きは move=0 のまま）。nha と w01 をつないだトレース（nha → w01）で、nha の区間で上がった下限を w01 の区間で 0 まで下げ、w01 の区間の後半の BMR を 65.3% → 59.8% にした。単独の w01・Tencent・msr は move=0 と同じ（−3.81 / −0.755 / −0.32）、nha は −0.128 → −0.112。move=0 は `ghost.m0`。C 側には、閾値の変化の検出を「検出したら累積をやり直すが閾値は保ち、落ち着いたら採用」にする st_otsu の `cdhold=1`・`cdstable`・`cdturn`・`cdfill` も入れた（既定では使わない：誤検出は無害になったが、追従しても w01 の区間で得にならず、msr で −0.32 → −0.18。tools/synth/cdhold.sh・floor4.sh・results/floor4.json）。

@@ -546,43 +546,77 @@ if mrows:
     open(f"{D}/table_marks.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
         "各セル = ΔBMR [pt]（構成 − CacheLib）/ 書き込みの比（構成 ÷ CacheLib）。印 = CacheLib の累積 SSD 書き込みがその量に達した時点（先頭の割合 = そこまでの要求の割合）。✗ = 全量と差の向きが違う。\n",
         "Each cell: ΔBMR [pt] (config − CacheLib) / write ratio (config ÷ CacheLib), at the point where CacheLib has written that much to the SSD. ✗ = sign differs from the full trace.\n"))
-# ---------------------------------------------------------------- 説明用の 1 枚（11-25）：fig_summary.svg
-#   トレースごとに方式を横棒で並べる。左 = ΔBMR（CacheLib n=1 との差、負＝左が良い）、右 = SSD 書き込み（CacheLib = 1、左が良い）。
-#   系列の少ない組（--out の説明用の組と図の組）だけで描く（多いと読めないため）
-summ = []
-if (OUT or FIGSET) and others:
-    rowh, gap, top0 = 30, 34, 70
-    f = Fig(1600, 900); f.add_legend([(nm(c), colr(c), "box") for c in others])
-    f.LEG_ROWS = 99; top = f.legend_h() + top0   # 凡例の行は全部見込んで、図の高さを決める
+# ---------------------------------------------------------------- 説明用のまとめ（11-25）：fig_summary*.svg
+#   トレースごとに方式を横棒で並べる（行 = 基準＋方式、面 = 指標）。系列の少ない組（--out の説明用の組と図の組）だけで描く。
+#   値の面（BMR・OHR・書き込み）はトレースごとの目盛り（トレースで桁が違うため）、CacheLib との差・比の面は全トレース共通の目盛り。
+#   fig_summary（ΔBMR・書き込みの比）、fig_summary_main / _rel（fig_main・fig_rel と同じ 3 面）、指標ごとの 1 面 fig_summary_<指標>、
+#   値と CacheLib 比の対 fig_summary_<bmr|ohr|write>_pair
+SUMM_M = {   # 指標 → (面の題, 種類 val|diff|ratio, 値の関数(行, 基準の行), 書式)
+    "bmr": (T("BMR [%]（左が良い）", "BMR [%] (left is better)"), "val", lambda r, b: BMR(r), ".2f"),
+    "ohr": (T("OHR [%]（右が良い）", "OHR [%] (right is better)"), "val", lambda r, b: OHR(r), ".1f"),
+    "write": (T("SSD 書き込み [TB]（左が良い）", "SSD writes [TB] (left is better)"), "val", lambda r, b: TB(r), ".3g"),
+    "dbmr": (T("ΔBMR [pt]（CacheLib との差。左が良い）", "ΔBMR [pt] vs CacheLib (left is better)"), "diff", lambda r, b: BMR(r) - BMR(b), "+.2f"),
+    "dohr": (T("ΔOHR [pt]（CacheLib との差。右が良い）", "ΔOHR [pt] vs CacheLib (right is better)"), "diff", lambda r, b: OHR(r) - OHR(b), "+.2f"),
+    "nwrite": (T("SSD 書き込み（CacheLib = 1。左が良い）", "SSD writes (CacheLib = 1, left is better)"), "ratio", lambda r, b: TB(r) / TB(b), ".2f"),
+}
+SUMM_FIGS = {"fig_summary": ["dbmr", "nwrite"], "fig_summary_main": ["bmr", "write", "ohr"], "fig_summary_rel": ["dbmr", "nwrite", "dohr"],
+             **{f"fig_summary_{k}": [k] for k in SUMM_M},
+             "fig_summary_bmr_pair": ["bmr", "dbmr"], "fig_summary_ohr_pair": ["ohr", "dohr"], "fig_summary_write_pair": ["write", "nwrite"]}
+
+def summary_fig(keys):
+    rowh, gap, top0, NX, RX = 30, 34, 70, 230, 1570   # 行の高さ、トレースの間、凡例の下、面の左端（左はトレースの名前）、右端
+    rows = [BASE] + others
+    f = Fig(1600, 900); f.add_legend([(nm(c), colr(c), "box") for c in rows]); f.LEG_ROWS = 99; top = f.legend_h() + top0
     tr_ = [n for n in names if any(c in runs[n]["runs"] for c in others) and TB(runs[n]["runs"][BASE])]
-    blk = len(others) * rowh + gap; f.H = top + len(tr_) * blk + 60
-    db = {(n, c): BMR(runs[n]["runs"][c]) - BMR(runs[n]["runs"][BASE]) for n in tr_ for c in others if c in runs[n]["runs"]}
-    wr = {(n, c): TB(runs[n]["runs"][c]) / TB(runs[n]["runs"][BASE]) for n in tr_ for c in others if c in runs[n]["runs"]}
-    lo, hi = min([0] + list(db.values())), max([0] + list(db.values())); pad = 0.12 * (hi - lo or 1); lo, hi = lo - pad, hi + pad
-    wmax = max([1.0] + list(wr.values())) * 1.12
-    L0, L1, R0, R1 = 330, 930, 1040, 1560   # 左の面・右の面の横の範囲（左端の 330 まではトレースの名前）
-    X = lambda v: L0 + (v - lo) / (hi - lo) * (L1 - L0); XW = lambda v: R0 + v / wmax * (R1 - R0)
-    f.t((L0 + L1) / 2, top - 22, T("ΔBMR [pt]（CacheLib との差。左が良い）", "ΔBMR [pt] vs CacheLib (left is better)"), 26, "middle", weight="bold")
-    f.t((R0 + R1) / 2, top - 22, T("SSD 書き込み（CacheLib = 1。左が良い）", "SSD writes (CacheLib = 1, left is better)"), 26, "middle", weight="bold")
+    f.H = top + len(tr_) * (len(rows) * rowh + gap) + 60
+    V = {k: {(n, c): SUMM_M[k][2](runs[n]["runs"][c], runs[n]["runs"][BASE]) for n in tr_ for c in rows if c in runs[n]["runs"]} for k in keys}
+    pg = 70; pw = (RX - NX - pg * (len(keys) - 1)) / len(keys)   # 面の間と、面の幅
+    ax = {}
+    for p, k in enumerate(keys):
+        x0 = NX + p * (pw + pg); kind = SUMM_M[k][1]; vs = list(V[k].values())
+        a0, a1 = x0 + (55 if kind == "diff" else 0), x0 + pw - 70   # 値の文字の余白（負の差は左に、ほかは右に書く）
+        if kind == "diff":
+            lo, hi = min([0] + vs), max([0] + vs); pad = 0.1 * (hi - lo or 1); rng = lambda n, lo=lo - pad, hi=hi + pad: (lo, hi)
+        elif kind == "ratio":
+            mx = max([1.0] + vs) * 1.05; rng = lambda n, mx=mx: (0, mx)
+        else:   # 値：トレースごとの目盛り
+            rng = lambda n, k=k: (0, max([V[k][(n, c)] for c in rows if (n, c) in V[k]] + [1e-12]) * 1.05)
+        ax[k] = (a0, a1, rng)
+        f.t((x0 + x0 + pw) / 2, top - 22, SUMM_M[k][0], 26 if len(keys) < 3 else 20, "middle", weight="bold")
     y = top
     for n in tr_:
-        f.t(L0 - 20, y + len(others) * rowh / 2 + 9, n, 26, "end", weight="bold")
-        for c in others:
-            if (n, c) in db:
-                v, w_ = db[(n, c)], wr[(n, c)]; x0, x1 = sorted((X(0), X(v)))
-                f.e.append(f'<rect x="{x0:.1f}" y="{y + 3}" width="{max(x1 - x0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
-                f.t(x1 + 8 if v >= 0 else x0 - 8, y + rowh - 9, f"{v:+.2f}", 19, "start" if v >= 0 else "end")
-                f.e.append(f'<rect x="{R0}" y="{y + 3}" width="{max(XW(w_) - R0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
-                f.t(XW(w_) + 8, y + rowh - 9, f"{w_:.2f}", 19)
-            else:   # このトレースでは未計測（空の行を 0 と読まれないように）
-                f.t(X(0) + 8, y + rowh - 9, T("結果なし", "no result"), 17, col="#999"); f.t(R0 + 8, y + rowh - 9, T("結果なし", "no result"), 17, col="#999")
+        f.t(NX - 20, y + len(rows) * rowh / 2 + 9, n, 26, "end", weight="bold")
+        y0 = y
+        for c in rows:
+            for k in keys:
+                a0, a1, rng = ax[k]; lo, hi = rng(n); X = lambda v: a0 + (v - lo) / (hi - lo) * (a1 - a0); kind = SUMM_M[k][1]
+                if (n, c) not in V[k]:   # このトレースでは未計測（空の行を 0 と読まれないように）
+                    f.t(X(0 if kind != "ratio" else 0) + 8, y + rowh - 9, T("結果なし", "no result"), 17, col="#999"); continue
+                if c == BASE and kind != "val":   # 差・比の面では基準そのもの（0 / 1）
+                    f.t(X(0 if kind == "diff" else 1) + 8, y + rowh - 9, T("基準", "baseline"), 17, col="#777"); continue
+                v = V[k][(n, c)]; b0, b1 = sorted((X(0), X(v)))
+                f.e.append(f'<rect x="{b0:.1f}" y="{y + 3}" width="{max(b1 - b0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
+                txt = format(v, SUMM_M[k][3]); txt = format(0.0, SUMM_M[k][3]) if float(txt) == 0 else txt   # −0.00 と書かない
+                neg = v < 0 and float(txt) != 0
+                f.t(b0 - 8 if neg else b1 + 8, y + rowh - 9, txt, 19, "end" if neg else "start")
             y += rowh
-        f.e.append(f'<line x1="40" x2="1560" y1="{y + gap / 2:.1f}" y2="{y + gap / 2:.1f}" stroke="#e3e3e3" stroke-width="1.5"/>'); y += gap
-    for x_, lab in ((X(0), "0"), (XW(1), "1")):
-        f.e.append(f'<line x1="{x_:.1f}" x2="{x_:.1f}" y1="{top - 8}" y2="{y - gap / 2:.1f}" stroke="#222" stroke-width="2"/>')
-        f.t(x_, y + 6, lab + T("（CacheLib）", " (CacheLib)"), 20, "middle", col="#666")
-    f.e.append(f'<line x1="{R0}" x2="{R0}" y1="{top - 8}" y2="{y - gap / 2:.1f}" stroke="#999" stroke-width="1.5"/>')
-    open(f"{D}/fig_summary.svg", "w", encoding="utf-8").write(f.svg()); summ.append("fig_summary")
+        for k in keys:   # 基準の線：差は 0、比は 1、値は 0（トレースごと）
+            a0, a1, rng = ax[k]; lo, hi = rng(n); kind = SUMM_M[k][1]
+            for v, col, w in ([(0, "#222", 2)] if kind == "diff" else [(1, "#222", 2), (0, "#999", 1.5)] if kind == "ratio" else [(0, "#999", 1.5)]):
+                x_ = a0 + (v - lo) / (hi - lo) * (a1 - a0)
+                f.e.append(f'<line x1="{x_:.1f}" x2="{x_:.1f}" y1="{y0}" y2="{y:.1f}" stroke="{col}" stroke-width="{w}"/>')
+        f.e.append(f'<line x1="40" x2="{RX}" y1="{y + gap / 2:.1f}" y2="{y + gap / 2:.1f}" stroke="#e3e3e3" stroke-width="1.5"/>'); y += gap
+    for k in keys:   # 面の下に目盛りの説明
+        a0, a1, rng = ax[k]; kind = SUMM_M[k][1]
+        lab = T("黒線 = CacheLib（0）", "black line = CacheLib (0)") if kind == "diff" else T("黒線 = CacheLib（1）", "black line = CacheLib (1)") if kind == "ratio" \
+              else T("目盛りはトレースごと（0 から）", "scale per trace (from 0)")
+        f.t((a0 + a1) / 2, y + 6, lab, 18, "middle", col="#666")
+    return f.svg()
+
+summ = []
+if (OUT or FIGSET) and others:
+    for slug, keys in SUMM_FIGS.items():
+        open(f"{D}/{slug}.svg", "w", encoding="utf-8").write(summary_fig(keys)); summ.append(slug)
 # ---------------------------------------------------------------- 書き直しの閾値がなぜその値か（11-20、n=cb の方式）：P.reauto.json の最終値
 #   分類ごとの面に、今の滞在で当たった回数の段（1〜8 以上）ごとの「書き直した物が次の滞在で 1 バイトあたり何回当たったか」の棒と、
 #   比べる相手（名簿で測った端の密度 bar ＋ 書き込みの値段 λ）の横線。線を越えた段は書き直す（濃い棒）、越えない段は書き直さない（薄い棒）。
@@ -634,7 +668,11 @@ body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sa
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
 <h1>{f"［{GROUP}］" if GROUP else ""}{f"〈図の組 {FS_NAME}〉" if FIGSET else ""}{f"頑健性の条件 {COND} での比較" if COND else f"説明用の比較（{OUT}：config.sh の PAPER_USER_METHODS）" if OUT else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final2：現在の提案 ru-otsu-ghost-cb）" if FINAL2 else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
 """ + ("<h2>まとめ：fig_summary.svg</h2><img src='fig_summary.svg' alt='CacheLib との BMR の差と書き込みの比'>"
-       "<p class='m'>トレースごとに方式を横棒で並べた。左 = BMR の CacheLib（R=256MiB、n=1）との差（ポイント、負が良い）、右 = SSD 書き込み（CacheLib = 1、1 未満が良い）。</p>" if summ else "") + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
+       "<p class='m'>トレースごとに方式を横棒で並べた。左 = BMR の CacheLib（R=256MiB、n=1）との差（ポイント、負が良い）、右 = SSD 書き込み（CacheLib = 1、1 未満が良い）。"
+       "値の面（BMR・OHR・書き込み）は目盛りがトレースごと、差と比の面は全トレース共通。</p>"
+       "<h2>まとめの 3 面：fig_summary_main.svg（値）・fig_summary_rel.svg（CacheLib 比）</h2><img src='fig_summary_main.svg' alt='BMR・書き込み・OHR'><img src='fig_summary_rel.svg' alt='ΔBMR・書き込みの比・ΔOHR'>"
+       "<h2>値と CacheLib 比の対：fig_summary_bmr_pair / _ohr_pair / _write_pair.svg</h2><img src='fig_summary_bmr_pair.svg' alt='BMR と ΔBMR'><img src='fig_summary_ohr_pair.svg' alt='OHR と ΔOHR'><img src='fig_summary_write_pair.svg' alt='書き込みと書き込みの比'>"
+       "<p class='m'>1 面ずつの図：fig_summary_bmr / _ohr / _write（値）、fig_summary_dbmr / _dohr / _nwrite（CacheLib 比）。</p>" if summ else "") + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
        "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
        "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"
        "点が灰の線より左下にあれば、同じ BMR を少ない書き込みで出している。"

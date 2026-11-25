@@ -514,7 +514,11 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 ```
 - **回さない**：`work/paper`・`work/paper/ext` に済んだ結果を、final と同じ読み方で使う。結果の無い方式は図に出ない（先に `./run.sh paper <名前>` などで回す）。
 - **トレース**：traces.tsv のトレースのうち、結果のあるもの全部。群ごとの一式も `groups/<category>__<source>/` に出る。
-- **`fig_summary.svg`**：説明用の 1 枚。トレースごとに方式を横棒で並べる。左は BMR の CacheLib との差（ポイント、負が良い）、右は SSD 書き込みの比（CacheLib = 1）。これは説明用の組と図の組（`figs_<名前>/`）でだけ描く。
+- **`fig_summary.svg`**：説明用の 1 枚。トレースごとに方式を横棒で並べる。左は BMR の CacheLib との差（ポイント、負が良い）、右は SSD 書き込みの比（CacheLib = 1）。これは説明用の組と図の組（`figs_<名前>/`）でだけ描く。同じ形で、指標の組み合わせを変えた図も出す：
+  - `fig_summary_main.svg`（BMR・書き込み・OHR の値）と `fig_summary_rel.svg`（ΔBMR・書き込みの比・ΔOHR）。`fig_main`・`fig_rel` と同じ並び。
+  - 1 面ずつ：`fig_summary_bmr / _write / _ohr`（値）、`fig_summary_dbmr / _nwrite / _dohr`（CacheLib 比）。
+  - 値と CacheLib 比の対：`fig_summary_bmr_pair`（BMR・ΔBMR）、`_ohr_pair`（OHR・ΔOHR）、`_write_pair`（書き込み・書き込みの比）。
+  - 行は基準（CacheLib）＋方式。値の面は目盛りがトレースごと（桁が違うため）、差と比の面は全トレース共通。並べる指標は `paper_figs.py` の `SUMM_FIGS`。
 - 説明用の組は図の組（`figs_<名前>/`）には分けない。場所を変えれば、別の組み合わせの組を並べて残せる（`PAPER_USER_METHODS="…" ./run.sh paper-figs --user-method talk2`）。
 
 **図の組（11-24）**：final2 は 24 方式あり、1 枚に全部並べると凡例が図の半分を占め棒が潰れる。そこで `config.sh` の `PAPER_FIGSETS` に並べた図の組ごとに、その方式と基準だけの同じ一式（図・表・`index.html`）を `<組のフォルダ>/figs_<名前>/` に出す（例：`work/paper/final2/figs_main/`）。群ごとの一式の中にも同じく `figs_<名前>/` ができる。全方式の図と表（`table_main.csv` など）は今までどおり組のフォルダにある。組の選択に無い方式は飛ばし、1 つも無い図の組は出さない。色は組全体の並びで決めるので、どの図の組でも 1 方式 1 色。全方式の図も、凡例が 3 行を超えた分だけ図を縦に伸ばすので軸は潰れない。回し直しは要らない（`./run.sh paper-figs` で作り直せる）。
