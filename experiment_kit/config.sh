@@ -42,6 +42,11 @@ PAPER_FIGSETS=(
   "adm:ru-none-nat-cb ru-otsu-ghost-cb ru-none-nat-cb-adm ru-otsu-ghost-cb-adm r256-none-nat-n1-adm"                  # Q5 篩との 2×2
   "prior:ru-otsu-ghost-cb ru-st-climb-nauto ru-st-climb-n1 r256-st-climb-n1 ru-none-nat-nauto ru-dram.t1-climb-nauto ru-st-climb-nauto-adm ru-st-climb-n1-adm r256-st-climb-n1-adm r256-none-nat-cb.first ru-st-climb-cb.first"   # 以前の提案・先行研究の手がかり
 )
+# 説明用の組（11-25）：./run.sh paper-figs --user-method [場所] が、ここに並べた方式だけの図と表を work/paper/<場所>/（既定 users）に出す。
+# 回さない（work/paper・work/paper/ext に済んだ結果を使う）。基準 r256-none-nat-n1 は必ず入る。並べた順が図の順。
+# fig_summary.svg = トレースごとに方式を横棒で並べた 1 枚（左 ΔBMR、右 書き込みの比）。traces.tsv の群ごとの一式も groups/ に出る
+PAPER_USER_METHODS=${PAPER_USER_METHODS:-"
+  r256-none-nat-n3 r256-none-nat-n1-adm ru-none-nat-n1 ru-st-climb-nauto ru-otsu-ghost-cb ru-otsu-ghost-cb-adm"}
 GROUP_FIGS=${GROUP_FIGS:-1}                # 1 = paper 系の図と表を、全体（work/paper/<組>/）に加えてトレースの群（traces.tsv の category × source）ごとにも
                                            #     work/paper/<組>/groups/<category>__<source>/ に出す（11-20）。run は共有なので回す量は変わらない
 

@@ -26,6 +26,7 @@
 #   tune-figs              tune の図                                              → work/tune/figs/
 #   che-report             che の表と図                                            → work/che/report.html
 #   paper-figs [--final2 | --final | --ext | --robust | --sens]  paper の図と表（引数なし = 結果のあるもの全部）
+#   paper-figs --user-method [場所]  説明用：PAPER_USER_METHODS の方式だけの図と表（fig_summary.svg つき）→ work/paper/<場所>/（既定 users）
 #
 # 止め方（誤って裏で回したときなど。11-20）: 実験のコマンドは回っている間、work/running/<番号> を置き、GUARD_SEC 秒ごとに
 #   この run.sh のファイルと work/running/<番号> があるかを見る。どちらかを消すと、その run.sh から生まれたプロセス
@@ -442,6 +443,7 @@ paper_refresh() {  # 11-20: 図の系列 = いまの config.sh の選択。結�
 }
 figs_one() {  # figs_one [paper_figs の引数..]: 全体の一式と、図の組（PAPER_FIGSETS）ごとの一式
   python3 "$KIT/py/paper_figs.py" "$WORK" "$@" || return
+  [[ " $* " == *" --out "* ]] && return 0   # 説明用の組（--user-method）はそれ自体が小さいので、図の組には分けない
   local fs; for fs in "${PAPER_FIGSETS[@]}"; do
     python3 "$KIT/py/paper_figs.py" "$WORK" "$@" --figset "$fs" | sed "s|^|  図の組 ${fs%%:*}: |" >&2 || log "図の組 ${fs%%:*} に失敗"
   done
@@ -458,6 +460,13 @@ figs_set() {  # figs_set [--ext | --final | --final2 | --cond c]: その組の�
 }
 paper_figs() {  # 引数なし = 全部（paper、あれば ext と robust）。--ext / --robust ならその部分だけ
   local robust_all=0
+  if [ "${1:-}" = --user-method ]; then   # 11-25 説明用：PAPER_USER_METHODS だけを work/paper/<場所>/ に（回さない。結果は paper・paper/ext のもの）
+    local u=${2:-users}; [[ $u == -* ]] && u=users
+    [[ $u =~ ^[A-Za-z0-9_.-]+$ ]] || die "--user-method の場所は英数字と _ . - だけ: $u"
+    [ -n "$(ids_of "$PAPER_USER_METHODS")" ] || die "config.sh の PAPER_USER_METHODS が空"
+    paper_pick "$PAPER_USER_METHODS" "$WORK/paper/$u" base
+    figs_set --out "paper/$u"; return
+  fi
   paper_refresh
   if [ $# -eq 0 ]; then
     figs_set || return

@@ -23,7 +23,10 @@ from ids import BASE, PROPOSAL, CURVE, LCURVE, PT_BIG, PT_HOLLOW, ORTH, VAR, COL
 WORK = sys.argv[1]; EN = os.environ.get("PAPER_LANG", "ja") == "en"
 EXT = "--ext" in sys.argv   # paper-ext: CacheLib の n=0・n=3（work/paper/ext/）を足した比較。図と表は work/paper/ext/ に出す
 FINAL2 = "--final2" in sys.argv   # paper-final2: 同じ読み方で、図と表は work/paper/final2/
-FINAL = "--final" in sys.argv or FINAL2   # paper-final: work/paper と work/paper/ext の結果から final/methods.tsv の方式だけ。図と表は work/paper/final/
+# 11-25 説明用の組：--out <work からの場所> = そこにある methods.tsv（run.sh paper-figs --user-method が PAPER_USER_METHODS から作る）の方式だけを、
+# final と同じ読み方（work/paper と work/paper/ext の結果）で描き、図と表をその場所に出す。fig_summary.svg（説明用の 1 枚）も出す
+OUT = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else ""
+FINAL = "--final" in sys.argv or FINAL2 or bool(OUT)   # paper-final: work/paper と work/paper/ext の結果から final/methods.tsv の方式だけ。図と表は work/paper/final/
 COND = sys.argv[sys.argv.index("--cond") + 1] if "--cond" in sys.argv else ""   # 頑健性の条件（c0 / f1 / s2 / s3）
 # 11-20 トレースの群ごと：--group <category>/<source> = traces.tsv の category・source がそれの物だけで同じ一式を <図の場所>/groups/<category>__<source>/ に。
 # --list-groups = 結果のある群を 1 行ずつ出して終わる（run.sh paper-figs が群ごとに呼ぶ）。群をまたいだ全体は今まで通り <図の場所> に
@@ -37,7 +40,7 @@ if COND:   # work/paper/robust の <構成>_<条件> だけを <構成> とし�
     SRC = [f"{WORK}/paper/robust"]; D = f"{WORK}/paper/robust/{COND}"
 else:
     SRC = [f"{WORK}/paper"] + ([f"{WORK}/paper/ext"] if EXT or FINAL else [])   # 結果を読む場所（同じ構成は後の場所が優先）
-    D = f"{WORK}/paper/final2" if FINAL2 else f"{WORK}/paper/final" if FINAL else SRC[-1]                             # 図と表を書く場所
+    D = f"{WORK}/{OUT}" if OUT else f"{WORK}/paper/final2" if FINAL2 else f"{WORK}/paper/final" if FINAL else SRC[-1]                             # 図と表を書く場所
 # 系列 = config.sh の組で選んだ方式のうち、どれか 1 本のトレースで結果がある物（下の SEL。並べた順が図と表の順）。
 # ここには方式の一覧を持たない（11-20：以前は ext・頑健性の並びをここに手で書いていた）。
 NAME = {}   # id → (日本語, 英語) の図の名前。カタログの 3 番目の欄、無ければ指定から method_label で作る（11-20）
@@ -55,7 +58,7 @@ for _m in ([f"{WORK}/paper/robust/methods.tsv"] if COND else ([f"{WORK}/paper/me
         if c not in SEL: SEL.append(c)
         if len(r) > 1 and r[1]: NAME[c] = (r[1], r[1]); CATNAME.add(c)
         if len(r) > 2: SPEC[c] = r[2]
-if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（./run.sh paper-final{'2' if FINAL2 else ''} で作る）")
+if FINAL and not SEL: sys.exit(f"{D}/methods.tsv が無い（" + ("./run.sh paper-figs --user-method で作る" if OUT else f"./run.sh paper-final{'2' if FINAL2 else ''} で作る") + "）")
 if BASE in SEL: SEL.remove(BASE)
 ORDER = [BASE] + SEL
 PAL_ORDER = list(ORDER)   # 色の割り当ては図の組で絞る前の並びで
@@ -543,6 +546,43 @@ if mrows:
     open(f"{D}/table_marks.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
         "各セル = ΔBMR [pt]（構成 − CacheLib）/ 書き込みの比（構成 ÷ CacheLib）。印 = CacheLib の累積 SSD 書き込みがその量に達した時点（先頭の割合 = そこまでの要求の割合）。✗ = 全量と差の向きが違う。\n",
         "Each cell: ΔBMR [pt] (config − CacheLib) / write ratio (config ÷ CacheLib), at the point where CacheLib has written that much to the SSD. ✗ = sign differs from the full trace.\n"))
+# ---------------------------------------------------------------- 説明用の 1 枚（11-25）：fig_summary.svg
+#   トレースごとに方式を横棒で並べる。左 = ΔBMR（CacheLib n=1 との差、負＝左が良い）、右 = SSD 書き込み（CacheLib = 1、左が良い）。
+#   系列の少ない組（--out の説明用の組と図の組）だけで描く（多いと読めないため）
+summ = []
+if (OUT or FIGSET) and others:
+    rowh, gap, top0 = 30, 34, 70
+    f = Fig(1600, 900); f.add_legend([(nm(c), colr(c), "box") for c in others])
+    f.LEG_ROWS = 99; top = f.legend_h() + top0   # 凡例の行は全部見込んで、図の高さを決める
+    tr_ = [n for n in names if any(c in runs[n]["runs"] for c in others) and TB(runs[n]["runs"][BASE])]
+    blk = len(others) * rowh + gap; f.H = top + len(tr_) * blk + 60
+    db = {(n, c): BMR(runs[n]["runs"][c]) - BMR(runs[n]["runs"][BASE]) for n in tr_ for c in others if c in runs[n]["runs"]}
+    wr = {(n, c): TB(runs[n]["runs"][c]) / TB(runs[n]["runs"][BASE]) for n in tr_ for c in others if c in runs[n]["runs"]}
+    lo, hi = min([0] + list(db.values())), max([0] + list(db.values())); pad = 0.12 * (hi - lo or 1); lo, hi = lo - pad, hi + pad
+    wmax = max([1.0] + list(wr.values())) * 1.12
+    L0, L1, R0, R1 = 330, 930, 1040, 1560   # 左の面・右の面の横の範囲（左端の 330 まではトレースの名前）
+    X = lambda v: L0 + (v - lo) / (hi - lo) * (L1 - L0); XW = lambda v: R0 + v / wmax * (R1 - R0)
+    f.t((L0 + L1) / 2, top - 22, T("ΔBMR [pt]（CacheLib との差。左が良い）", "ΔBMR [pt] vs CacheLib (left is better)"), 26, "middle", weight="bold")
+    f.t((R0 + R1) / 2, top - 22, T("SSD 書き込み（CacheLib = 1。左が良い）", "SSD writes (CacheLib = 1, left is better)"), 26, "middle", weight="bold")
+    y = top
+    for n in tr_:
+        f.t(L0 - 20, y + len(others) * rowh / 2 + 9, n, 26, "end", weight="bold")
+        for c in others:
+            if (n, c) in db:
+                v, w_ = db[(n, c)], wr[(n, c)]; x0, x1 = sorted((X(0), X(v)))
+                f.e.append(f'<rect x="{x0:.1f}" y="{y + 3}" width="{max(x1 - x0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
+                f.t(x1 + 8 if v >= 0 else x0 - 8, y + rowh - 9, f"{v:+.2f}", 19, "start" if v >= 0 else "end")
+                f.e.append(f'<rect x="{R0}" y="{y + 3}" width="{max(XW(w_) - R0, 1.5):.1f}" height="{rowh - 6}" fill="{colr(c)}"/>')
+                f.t(XW(w_) + 8, y + rowh - 9, f"{w_:.2f}", 19)
+            else:   # このトレースでは未計測（空の行を 0 と読まれないように）
+                f.t(X(0) + 8, y + rowh - 9, T("結果なし", "no result"), 17, col="#999"); f.t(R0 + 8, y + rowh - 9, T("結果なし", "no result"), 17, col="#999")
+            y += rowh
+        f.e.append(f'<line x1="40" x2="1560" y1="{y + gap / 2:.1f}" y2="{y + gap / 2:.1f}" stroke="#e3e3e3" stroke-width="1.5"/>'); y += gap
+    for x_, lab in ((X(0), "0"), (XW(1), "1")):
+        f.e.append(f'<line x1="{x_:.1f}" x2="{x_:.1f}" y1="{top - 8}" y2="{y - gap / 2:.1f}" stroke="#222" stroke-width="2"/>')
+        f.t(x_, y + 6, lab + T("（CacheLib）", " (CacheLib)"), 20, "middle", col="#666")
+    f.e.append(f'<line x1="{R0}" x2="{R0}" y1="{top - 8}" y2="{y - gap / 2:.1f}" stroke="#999" stroke-width="1.5"/>')
+    open(f"{D}/fig_summary.svg", "w", encoding="utf-8").write(f.svg()); summ.append("fig_summary")
 # ---------------------------------------------------------------- 書き直しの閾値がなぜその値か（11-20、n=cb の方式）：P.reauto.json の最終値
 #   分類ごとの面に、今の滞在で当たった回数の段（1〜8 以上）ごとの「書き直した物が次の滞在で 1 バイトあたり何回当たったか」の棒と、
 #   比べる相手（名簿で測った端の密度 bar ＋ 書き込みの値段 λ）の横線。線を越えた段は書き直す（濃い棒）、越えない段は書き直さない（薄い棒）。
@@ -592,8 +632,9 @@ html = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name
 <style>:root{{--bg:#fbfaf7;--fg:#22211e;--mut:#6b675f;--line:#d9d4c9}}@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#1b1a18;--fg:#ebe7df;--mut:#a39d92;--line:#3a3732}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.75 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0}}main{{max-width:1100px;margin:0 auto;padding:20px 16px 60px}}
 img{{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}}pre{{overflow-x:auto;border:1px solid var(--line);padding:8px;font-size:12.5px}}.m{{color:var(--mut);font-size:13px}}</style></head><body><main>
-<h1>{f"［{GROUP}］" if GROUP else ""}{f"〈図の組 {FS_NAME}〉" if FIGSET else ""}{f"頑健性の条件 {COND} での比較" if COND else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final2：現在の提案 ru-otsu-ghost-cb）" if FINAL2 else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
-""" + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
+<h1>{f"［{GROUP}］" if GROUP else ""}{f"〈図の組 {FS_NAME}〉" if FIGSET else ""}{f"頑健性の条件 {COND} での比較" if COND else f"説明用の比較（{OUT}：config.sh の PAPER_USER_METHODS）" if OUT else "追加の比較：CacheLib の n=0・n=3 と提案" if EXT else "論文の本番用の比較（paper-final2：現在の提案 ru-otsu-ghost-cb）" if FINAL2 else "論文の本番用の比較（paper-final）" if FINAL else "論文用の比較（図 1 枚・表 1 つ）"}</h1><p class="m">トレース {len(names)} 本：{", ".join(names)}。</p>
+""" + ("<h2>まとめ：fig_summary.svg</h2><img src='fig_summary.svg' alt='CacheLib との BMR の差と書き込みの比'>"
+       "<p class='m'>トレースごとに方式を横棒で並べた。左 = BMR の CacheLib（R=256MiB、n=1）との差（ポイント、負が良い）、右 = SSD 書き込み（CacheLib = 1、1 未満が良い）。</p>" if summ else "") + ("<h2>交換関係：fig_tradeoff.svg（トレースごとは fig_tradeoff_&lt;trace&gt;.svg）</h2><img src='fig_tradeoff.svg' alt='SSD 書き込みと BMR の交換関係'>"
        "<p class='m'>横 = SSD 書き込み（CacheLib n=1 = 1、0 から）、縦 = ΔBMR [pt]（CacheLib n=1 との差、下が良い）。灰の線 = CacheLib（R=256MiB）の n=0〜3。"
        "書き直しを増やす（n を下げる）ほど書き込みが増えて BMR が下がる、という CacheLib の交換関係。濃い青 = RU＋分類（自動）、白抜き = RU＋分類（手動）と分類なしの n=auto。"
        "点が灰の線より左下にあれば、同じ BMR を少ない書き込みで出している。"

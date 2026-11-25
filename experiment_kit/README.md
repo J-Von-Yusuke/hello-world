@@ -146,6 +146,7 @@ bash のファイル。どの項目も環境変数で上書きできる（例 `P
 | `WRITE_MARKS_TB` | `1.5` | 「先頭から SSD に W TB 書いた時点」で効果を測る W（TB = 10^12 B） |
 | `INTERVAL` | `1000000` | 先頭 N 曲線・時間変化・自分で決める値の動き（`P.knobs.csv`）の刻み（要求数）。11-20 に 10000 → 100 万（Wiki・Tencent CDN で区間ごとの CSV が大きくなりすぎたため）。1000 万要求未満のトレースや細かく見たいときは小さく（`INTERVAL=10000 ./run.sh …`）。書き込み予算つき（`dwpd`）の構成は区間の終わりごとに λ を動かすので、刻みが粗いと追従も粗くなる |
 | `NREQ` | 空 | 数字を入れると各 run を先頭 NREQ 要求で打ち切る（試運転）。`cmd.txt` に入るので、本番では試運転の結果を使わず回し直す |
+| `PAPER_USER_METHODS` | CacheLib n=3・CacheLib＋篩・RU のみ・以前の提案・提案・提案＋篩 | 説明用の組：`./run.sh paper-figs --user-method [場所]` が、ここに並べた方式（＋基準）だけの図と表と `fig_summary.svg` を `work/paper/<場所>/`（既定 `users`）に出す。回さない（§6.5.5） |
 | `PAPER_FIGSETS` | main・parts・lambda・adm・prior | 図の組：方式が多くて図が潰れるので、目的ごとに選んだ方式（＋基準）だけの同じ一式を `<組>/figs_<名前>/` にも出す。1 つ = `"名前:方式 方式 .."`。色はどの図の組でも同じ（§6.5.5） |
 | `GROUP_FIGS` | `1` | paper 系の図と表を、全体に加えてトレースの群（`category` × `source`）ごとにも `<組>/groups/<category>__<source>/` に出す（§6.5.5） |
 | `GUARD_SEC` | `5` | 止め方の見張りの間隔 [秒]（§3.2） |
@@ -415,6 +416,7 @@ FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限�
 ./run.sh paper-ext            # CacheLib の n=0・2・3 だけ（§6.5.3）→ work/paper/ext/
 ./run.sh paper-sens           # 感度：SSD 容量・DRAM・RU を一つずつ変える（§6.5.6）→ work/paper/sens/
 ./run.sh paper-figs           # 図と表を全部作り直す（--final2 / --final / --ext / --robust でその組だけ）。PAPER_LANG=en で英語
+./run.sh paper-figs --user-method        # 説明用：PAPER_USER_METHODS の方式だけ → work/paper/users/（場所を変えるなら --user-method talk など）
 python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.5.5）
 ```
 
@@ -504,6 +506,16 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 #### 6.5.5 出力と確かめ方
 
 出力（各組のフォルダ。`index.html` に図と表と要点）：
+
+**説明用の組（11-25）**：教授や読者に見せる図は、方式を絞らないと読めない。`config.sh` の `PAPER_USER_METHODS` に並べた方式（基準 `r256-none-nat-n1` は必ず入る）だけで、同じ一式（図・表・`index.html`）を `work/paper/<場所>/` に出す。
+```
+./run.sh paper-figs --user-method          # → work/paper/users/
+./run.sh paper-figs --user-method talk     # → work/paper/talk/（場所は英数字と _ . -）
+```
+- **回さない**：`work/paper`・`work/paper/ext` に済んだ結果を、final と同じ読み方で使う。結果の無い方式は図に出ない（先に `./run.sh paper <名前>` などで回す）。
+- **トレース**：traces.tsv のトレースのうち、結果のあるもの全部。群ごとの一式も `groups/<category>__<source>/` に出る。
+- **`fig_summary.svg`**：説明用の 1 枚。トレースごとに方式を横棒で並べる。左は BMR の CacheLib との差（ポイント、負が良い）、右は SSD 書き込みの比（CacheLib = 1）。これは説明用の組と図の組（`figs_<名前>/`）でだけ描く。
+- 説明用の組は図の組（`figs_<名前>/`）には分けない。場所を変えれば、別の組み合わせの組を並べて残せる（`PAPER_USER_METHODS="…" ./run.sh paper-figs --user-method talk2`）。
 
 **図の組（11-24）**：final2 は 24 方式あり、1 枚に全部並べると凡例が図の半分を占め棒が潰れる。そこで `config.sh` の `PAPER_FIGSETS` に並べた図の組ごとに、その方式と基準だけの同じ一式（図・表・`index.html`）を `<組のフォルダ>/figs_<名前>/` に出す（例：`work/paper/final2/figs_main/`）。群ごとの一式の中にも同じく `figs_<名前>/` ができる。全方式の図と表（`table_main.csv` など）は今までどおり組のフォルダにある。組の選択に無い方式は飛ばし、1 つも無い図の組は出さない。色は組全体の並びで決めるので、どの図の組でも 1 方式 1 色。全方式の図も、凡例が 3 行を超えた分だけ図を縦に伸ばすので軸は潰れない。回し直しは要らない（`./run.sh paper-figs` で作り直せる）。
 
