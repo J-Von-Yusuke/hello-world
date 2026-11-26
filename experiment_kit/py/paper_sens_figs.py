@@ -7,7 +7,7 @@ SSD 容量・DRAM・RU（Region の大きさ）を一つずつ変えたとき、
 同じ向きに残るかを見る。既定の点は work/paper の結果、変えた点は work/paper/sens/<点>/ の結果（<点> = ssd_x<倍>・dram_<SSD÷DRAM>・
 ru_<MiB>M）。RU の点では CacheLib は回さない（Region の大きさを自分で持つので既定の点と同じ run）ので、既定の点の値と比べる。
 方式は sens/methods.tsv（run.sh が config.sh の PAPER_SENS_METHODS から作る）の順と名前。
-出力: fig_sens_<トレース>.svg（上 = ΔBMR [pt]、下 = SSD 書き込みの比。左から SSD 容量・DRAM・RU）、table_sens.csv / .md。
+出力: fig_sens_<トレース>.svg（上から ΔBMR [pt]・SSD 書き込みの比・ΔOHR [pt]（11-26）。左から SSD 容量・DRAM・RU）、table_sens.csv / .md。
 書き込みはアプリ層（Region に書いたバイト）。CacheLib 側の DLWA（実機で R=256 MiB・RU 626.5 MiB のとき 1.4）は掛けていない。
 RU を変えると CacheLib の DLWA も変わるので、NAND 書き込みで比べるときは RU ごとに実機の値か見積りを掛ける。標準ライブラリだけ。"""
 import csv, glob, json, os, re, sys
@@ -65,18 +65,20 @@ for n in names:
 
 made = []
 for n in names:
-    f = Fig(1600, 980); f.add_legend([(NAME[m], COL[m], "line") for m in METH])
+    FH = 1320; f = Fig(1600, FH); f.add_legend([(NAME[m], COL[m], "line") for m in METH])
     top = f.legend_h() + 60
     for j, (a, xl, _) in enumerate(AXES):
         rs = [r for r in rows if r["trace"] == n and r["axis"] == a]
         if not rs: continue
         xs = sorted({r["x"] for r in rs}); xr = (min(xs) * 0.9, max(xs) * 1.05) if len(xs) > 1 else (xs[0] * 0.5, xs[0] * 1.5)
         x0 = 140 + j * 490
+        RH = (FH - top - 70) // 3   # 1 段の高さ
         for i, (key, yl, ref) in enumerate((("d_bmr_pt", T("ΔBMR [pt]（下 = 良い）", "ΔBMR [pt] (lower is better)"), 0.0),
-                                             ("write_ratio", T("書き込みの比（CacheLib = 1）", "Write ratio (CacheLib = 1)"), 1.0))):
+                                             ("write_ratio", T("書き込みの比（CacheLib = 1）", "Write ratio (CacheLib = 1)"), 1.0),
+                                             ("d_ohr_pt", T("ΔOHR [pt]（上 = 良い）", "ΔOHR [pt] (higher is better)"), 0.0))):
             ys = [r[key] for r in rs if r[key] is not None] + [ref]
-            y0 = top + i * ((980 - top - 70) // 2)
-            ax = Ax(f, (x0, y0 + 30, x0 + 400, y0 + (980 - top - 70) // 2 - 50), xr=xr, yr=span(ys, zero=(i == 0)),
+            y0 = top + i * RH
+            ax = Ax(f, (x0, y0 + 30, x0 + 400, y0 + RH - 50), xr=xr, yr=span(ys, zero=(i != 1)),
                     ylabel=yl if j == 0 else "", title=xl if i == 0 else None)
             ax.hline(ref, col="#4d4d4d", dash=True)
             dx = [r["x"] for r in rs if r["default"]]
@@ -84,7 +86,7 @@ for n in names:
             for m in METH:
                 pts = sorted((r["x"], r[key]) for r in rs if r["method"] == m)
                 if pts: ax.line([p[0] for p in pts], [p[1] for p in pts], COL[m], marker=True)
-    f.t(800, 970, T(f"{n}：縦の灰線 = 既定の点。RU の点の CacheLib は既定の点の値。書き込みは DLWA を掛けていない",
+    f.t(800, FH - 10, T(f"{n}：縦の灰線 = 既定の点。RU の点の CacheLib は既定の点の値。書き込みは DLWA を掛けていない",
                     f"{n}: grey vertical = default point. CacheLib at RU points = default point. Writes without DLWA"), 20, "middle")
     slug = f"fig_sens_{re.sub(r'[^A-Za-z0-9_]', '_', n)}"
     open(f"{S}/{slug}.svg", "w", encoding="utf-8").write(f.svg()); made.append(slug)
@@ -97,9 +99,9 @@ for a, *_ in AXES:
         for x in sorted({r["x"] for r in rows if r["axis"] == a and r["trace"] == n}):
             c = {r["method"]: r for r in rows if r["axis"] == a and r["trace"] == n and r["x"] == x}
             md.append(f"| {a} | {x:g}{'*' if any(r['default'] for r in c.values()) else ''} | {n} | " + " | ".join(
-                f"{c[m]['d_bmr_pt']:+.3f} / {c[m]['write_ratio']:.3f}" if m in c and c[m]["write_ratio"] is not None else "–" for m in METH) + " |")
+                f"{c[m]['d_bmr_pt']:+.3f} / {c[m]['write_ratio']:.3f} / {c[m]['d_ohr_pt']:+.2f}" if m in c and c[m]["write_ratio"] is not None else "–" for m in METH) + " |")
 open(f"{S}/table_sens.md", "w", encoding="utf-8").write("\n".join(md) + "\n\n" + T(
-    "各セル = ΔBMR [pt]（方式 − CacheLib、負 = 良い）/ 書き込みの比（方式 ÷ CacheLib、DLWA なし）。* = 既定の点。\n",
-    "Each cell: ΔBMR [pt] (method − CacheLib; negative = better) / write ratio (method ÷ CacheLib, no DLWA). * = default point.\n"))
+    "各セル = ΔBMR [pt]（方式 − CacheLib、負 = 良い）/ 書き込みの比（方式 ÷ CacheLib、DLWA なし）/ ΔOHR [pt]（正 = 良い）。* = 既定の点。\n",
+    "Each cell: ΔBMR [pt] (method − CacheLib; negative = better) / write ratio (method ÷ CacheLib, no DLWA) / ΔOHR [pt] (positive = better). * = default point.\n"))
 to_png(S, made)
 print(f"paper-sens: {len(names)} 本 × {len(METH)} 方式 → {S}/" + "、".join(f"{s}.svg" for s in made) + "、table_sens.(csv|md)")

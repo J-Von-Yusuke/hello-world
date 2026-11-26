@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>効くワークロードの指標</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1f2328;--mut:#5b6470;--line:#d9d6cf;--card:#fff;--good:#2f855a;--bad:#c53030;--acc:#6b46c1;--hl:#fff4d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#e6e6e6;--mut:#a0a8b3;--line:#3a3f47;--card:#1f2228;--good:#68c99a;--bad:#f07a7a;--acc:#b49cf0;--hl:#3a3420}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#e6e6e6;--mut:#a0a8b3;--line:#3a3f47;--card:#1f2228;--good:#68c99a;--bad:#f07a7a;--acc:#b49cf0;--hl:#3a3420}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.8 "Noto Sans JP","Yu Gothic UI",Meiryo,sans-serif}
+main{max-width:900px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.5rem;margin:.2em 0}h2{font-size:1.15rem;margin:2em 0 .5em;border-bottom:2px solid var(--line);padding-bottom:.2em}
+.sub{color:var(--mut);font-size:.9rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}.key{background:var(--hl)}
+table{border-collapse:collapse;width:100%;font-size:.9rem;margin:8px 0}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left}th{color:var(--mut);font-weight:600}
+td.n{text-align:right;font-variant-numeric:tabular-nums}.g{color:var(--good);font-weight:700}.b{color:var(--bad);font-weight:700}
+img{width:100%;background:#fff;border:1px solid var(--line);border-radius:6px}
+.wrap{overflow-x:auto}
+</style></head><body><main>
+<h1>提案が効くワークロードを事前に見分ける指標（4 トレースでの第一歩）</h1>
+<p class="sub">2026-11-26。この PC の 4 トレース（nha・w01・Tencent・msr）、全量。分類の得＝提案（ru-otsu-ghost-cb）−分類なしの RU（ru-none-nat-cb）、篩ありは両方に篩（-adm）。予言は og_che（コンテンツ単位の Che 近似、篩は「一度きりのコンテンツを入れない」で近似）。</p>
+
+<div class="card key"><b>分かったこと</b>
+<ol>
+<li><b>篩で効果が消えるかどうかは「篩の後に SSD がどれだけ入れ替わるか」で決まっていた</b>。w01 は篩で入れ替わりが 3.9 回 → 1.1 回に落ち、ほとんど追い出しが起きなくなるので、分類の得が −3.48 → −0.01 ポイントに消えた。nha（198 → 121 回）と Tencent（42 → 21 回）は圧力が残り、得も残った（nha −0.07 → −0.07、Tencent −0.79 → −0.25）。</li>
+<li><b>「篩が λ のばらつきを取り去る」という前の予想は外れた</b>。篩の後の、大きさで分けられるばらつき（SSD のヒットで測る）は、4 本とも篩でむしろ増えた。</li>
+<li><b>コンテンツ単位のモデル（og_che）は w01 をよく当てた</b>（予言 −4.30 対 実測 −3.48、篩ありは 0.00 対 −0.01）。一方、Tencent（予言 0.00 対 −0.79）と nha（−0.71 対 −0.07）は外れた。Tencent は Region の巻き添えの効果がモデルに無く、nha はコンテンツを分割して持つ巨大なコンテンツと小さな容量（足跡の 1.3%）がモデルの外。</li>
+<li>指標は二つの積の形になる見込み：<b>(1) 圧力</b>（容量が何回入れ替わるか。篩を使うなら篩の後）と、<b>(2) 大きさで分けられる λ のばらつき</b>。(1) は事前にきれいに取れる。(2) は、分類しない run の表から測ると、混ぜたキャッシュのせいで人気のコンテンツもヒットできず、潜在的な得が隠れてしまう（w01 で小さく出る）。トレースだけから測る形が要る。</li>
+</ol></div>
+
+<h2>1. 実測：分類の得（BMR・OHR、ポイント）と SSD の入れ替わり</h2>
+<table>
+<tr><th>トレース</th><th class="n">ΔBMR 篩なし</th><th class="n">ΔBMR 篩あり</th><th class="n">ΔOHR 篩なし</th><th class="n">ΔOHR 篩あり</th><th class="n">入れ替わり 篩なし</th><th class="n">入れ替わり 篩あり</th></tr>
+<tr><td>nha（Meta CDN）</td><td class="n g">−0.072</td><td class="n g">−0.065</td><td class="n">+0.08</td><td class="n">+0.31</td><td class="n">198 回</td><td class="n">121 回</td></tr>
+<tr><td>w01（Wikipedia CDN）</td><td class="n g">−3.475</td><td class="n">−0.013</td><td class="n g">+7.87</td><td class="n">+0.13</td><td class="n">3.9 回</td><td class="n b">1.1 回</td></tr>
+<tr><td>Tencent（ブロック）</td><td class="n g">−0.788</td><td class="n g">−0.252</td><td class="n g">+2.09</td><td class="n g">+1.22</td><td class="n">42 回</td><td class="n">21 回</td></tr>
+<tr><td>msr（ブロック）</td><td class="n">+0.041</td><td class="n b">+0.412</td><td class="n">+0.07</td><td class="n">−0.22</td><td class="n">3.6 回</td><td class="n b">1.2 回</td></tr>
+</table>
+<p class="sub">入れ替わり＝分類しない run の SSD 書き込み ÷ SSD の容量。msr は篩ありで分類が少し悪くする（+0.41）。名簿の配分が msr を読み違えることは以前から分かっている（未解決）。</p>
+
+<h2>2. 予言と実測</h2>
+<img src="pred_vs_meas.svg" alt="予言と実測の対応">
+<table>
+<tr><th>トレース</th><th>篩</th><th class="n">予言 ΔBMR（提案の線で）</th><th class="n">実測 ΔBMR</th><th class="n">予言 ΔOHR</th><th class="n">実測 ΔOHR</th><th>当たり外れ</th></tr>
+<tr><td>w01</td><td>なし</td><td class="n">−4.30</td><td class="n">−3.48</td><td class="n">+21.7</td><td class="n">+7.9</td><td class="g">向きと大きさ</td></tr>
+<tr><td>w01</td><td>あり</td><td class="n">0.00</td><td class="n">−0.01</td><td class="n">0.0</td><td class="n">+0.1</td><td class="g">消えることを当てた</td></tr>
+<tr><td>msr</td><td>なし</td><td class="n">−0.04</td><td class="n">+0.04</td><td class="n">+1.6</td><td class="n">+0.1</td><td>どちらも 0 近く</td></tr>
+<tr><td>msr</td><td>あり</td><td class="n">0.00</td><td class="n">+0.41</td><td class="n">0.0</td><td class="n">−0.2</td><td class="b">配分の読み違い（モデルの外）</td></tr>
+<tr><td>Tencent</td><td>なし／あり</td><td class="n">0.00 / 0.00</td><td class="n">−0.79 / −0.25</td><td class="n">+0.2 / +0.1</td><td class="n">+2.1 / +1.2</td><td class="b">Region の巻き添えがモデルに無い</td></tr>
+<tr><td>nha</td><td>なし／あり</td><td class="n">−0.71 / −0.64</td><td class="n">−0.07 / −0.07</td><td class="n">−3.6 / −3.4</td><td class="n">+0.1 / +0.3</td><td class="b">分割して持つ巨大なコンテンツ・容量 1.3%</td></tr>
+</table>
+<p>相関は BMR で 0.94・OHR で 0.95 だが、w01 の 1 点に引っ張られている（順位の相関は 0.5・0.4）。<b>4 本では指標の境目を言えない</b>。</p>
+
+<h2>3. 大津の目で見た「大きさで分けられる λ のばらつき」（分類しない run の表から）</h2>
+<table>
+<tr><th>トレース</th><th>篩</th><th class="n">ln(Q/A)（大津が使う値）</th><th class="n">ln(1＋SSD ヒット/A)（篩の後の値）</th></tr>
+<tr><td>nha</td><td>なし／あり</td><td class="n">1.050 / 0.605</td><td class="n">0.0099 / 0.0149</td></tr>
+<tr><td>w01</td><td>なし／あり</td><td class="n">0.041 / 0.089</td><td class="n">0.0041 / 0.0698</td></tr>
+<tr><td>Tencent</td><td>なし／あり</td><td class="n">0.033 / 0.045</td><td class="n">0.0645 / 0.1522</td></tr>
+<tr><td>msr</td><td>なし／あり</td><td class="n">0.025 / 0.025</td><td class="n">0.0086 / 0.0183</td></tr>
+</table>
+<ul>
+<li>値は「線 1 本で分けたときの組の間のばらつき」（大津の得点）。A＝書いたバイト、Q＝リクエストのバイト（篩で弾かれたコンテンツへのリクエストと DRAM のヒットを含む）。</li>
+<li>大津が使う ln(Q/A) は、nha では DRAM のヒットが大半を占める（1.05 対 0.0099）。篩のある run では、Q に弾かれたコンテンツへのリクエストが入るので、一度きりのコンテンツの多い段の価値が水増しされる。キットの <code>-adm</code> の run の中の大津も同じ。</li>
+<li>篩の後の値（SSD のヒットで測る）は、4 本とも篩で増えた。</li>
+<li>w01 の篩なしは 0.004 と小さいのに、得は最大だった。混ぜたキャッシュでは一度きりの 1M に押し出されて人気の小さいコンテンツもヒットできず、run の中では潜在的な差が見えないため。指標の (2) は run からではなく、トレースから測る必要がある。</li>
+</ul>
+
+<h2>4. トレースだけから測った指標（og_ind、キットの <code>./run.sh indicator</code>）</h2>
+<p>DRAM を前段の LRU とし、コンテンツ単位の Che 近似で、paper と同じ SSD・DRAM の大きさから計算した（シミュレーションなし）。</p>
+<table>
+<tr><th>トレース</th><th>篩</th><th class="n">入れ替わり 予言（run の実測）</th><th class="n">大きさで分けられるばらつき</th><th class="n">η</th><th class="n">実測 ΔBMR</th></tr>
+<tr><td>w01</td><td>なし</td><td class="n">3.5（3.9）</td><td class="n">0.035</td><td class="n">0.57</td><td class="n g">−3.48</td></tr>
+<tr><td>w01</td><td>あり</td><td class="n b">0.87（1.1）</td><td class="n">0</td><td class="n">–</td><td class="n">−0.01</td></tr>
+<tr><td>msr</td><td>なし</td><td class="n">3.4（3.6）</td><td class="n">0.013</td><td class="n">0.82</td><td class="n">+0.04</td></tr>
+<tr><td>msr</td><td>あり</td><td class="n b">0.41（1.2）</td><td class="n">0</td><td class="n">–</td><td class="n">+0.41</td></tr>
+<tr><td>Tencent</td><td>なし／あり</td><td class="n">14 / 13（42 / 21）</td><td class="n">0.035 / 0.042</td><td class="n">0.54 / 0.57</td><td class="n g">−0.79 / −0.25</td></tr>
+<tr><td>nha</td><td>なし／あり</td><td class="n">1647 / 1616（198 / 121）</td><td class="n">0.18 / 0.19</td><td class="n">0.85</td><td class="n g">−0.07 / −0.07</td></tr>
+</table>
+<ul>
+<li><b>入れ替わり</b>は、篩で圧力が消えるトレース（w01・msr）を事前に当てた（どちらも 1 回未満と予言）。篩なしの w01・msr は run とほぼ同じ値。</li>
+<li><b>ばらつき</b>は w01・Tencent（効く、0.035）と msr（効かない、0.013）を正しく分けた。run の表からは w01 が 0.004 と小さく出て分けられなかったので、トレースから測る意味がある。</li>
+<li><b>nha は範囲外</b>：巨大なコンテンツを分割して持ち、容量が足跡の 1.3% しかないので、入れ替わりの水準が合わない。ばらつきは最大なのに得は小さいが、基準の BMR が 4.7% しかないため、基準に対する割合（−1.5%）で見れば Tencent（−1.5%）と同じ。キットの図は、差（ポイント）と割合（%）の両方を描く。</li>
+</ul>
+
+<h2>5. 次の一手</h2>
+<ol>
+<li><b>（済み、§4）トレースだけから (2) を測る</b>：大きさの段ごとに「リクエストのバイト ÷ 異なるコンテンツのバイト」を、キャッシュが一巡する程度の長さの窓で数え、篩を使うなら一度きりのコンテンツを除いて大津の得点を出す（og_che の数え方を広げれば作れる）。</li>
+<li><b>(1) 圧力</b>は、篩なしならトレースの足跡と容量から、篩ありなら「2 回以上リクエストされるコンテンツの足跡」から事前に出せる。</li>
+<li><b>キットに入れた（<code>./run.sh indicator</code>、11-26）</b>。別の PC の全トレースで指標と実測の得を並べ、境目（「入れ替わりが 2 回以上で、(2) が○○以上なら効く」）を探す。paper-final2 の結果があれば、それだけで report.html に並ぶ。</li>
+<li>大津の価値を「書いた 1 バイトあたりの SSD ヒット」に変える案は、篩のある構成の水増しと w01 の 1 段ずれの両方を直す見込み。</li>
+</ol>
+<p class="sub">再現：tools/synth/pred_measure.sh（実測の run）、pred_che.sh（og_che の予言、og_che に -a 篩を追加）、pred_compare.py（results/pred_vs_meas.json・この図）、otsu_view.py（results/otsu_view.json）。</p>
+</main></body></html>

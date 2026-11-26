@@ -13,6 +13,8 @@
 #   tune [name..]          自動推定の実験（TUNE_JOBS のうち TUNE_METHODS）          → work/tune/
 #   tune-synth             同じ実験を合成の 95:5・3:1 で（答えが分かっている負荷）    → work/tune/
 #   che [name..]           Zipf の傾きと分類の利得（付録 §N.5）                     → work/che/
+#   indicator [name..]     提案が効くかの事前の指標（容量の入れ替わり・大きさで分けられる再利用のばらつき。回さない）→ work/indicator/
+#   indicator --sens [name..]  同じ指標を paper-sens の SSD・DRAM の点でも（RU の点は既定の点の指標）→ work/indicator/sens/
 #   paper-final2 [name..]  論文の本番：CacheLib と現在の提案 ru-otsu-ghost-cb ほか（PAPER_FINAL2_METHODS）→ work/paper/final2/
 #   paper-final [name..]   同じ組で提案を以前の ru-st-climb-nauto にしたもの（PAPER_FINAL_METHODS）     → work/paper/final/
 #   paper-robust [name..]  頑健性の確認（PAPER_ROBUST_METHODS）                    → work/paper/robust/
@@ -25,6 +27,7 @@
 #   aggregate [--by category,source]   validity・tune の集計（CSV と report.html）  → work/results/
 #   tune-figs              tune の図                                              → work/tune/figs/
 #   che-report             che の表と図                                            → work/che/report.html
+#   indicator-report [--sens]  指標と、paper の結果の分類の得（提案 − 分類なしの RU）を並べた表と図 → work/indicator/report.html（--sens は sens/report.html）
 #   paper-figs [--final2 | --final | --ext | --robust | --sens]  paper の図と表（引数なし = 結果のあるもの全部）
 #   paper-figs --user-method [場所]  説明用：PAPER_USER_METHODS の方式だけの図と表（fig_summary.svg つき）→ work/paper/<場所>/（既定 users）
 #
@@ -112,6 +115,7 @@ setup() {
   gcc -O2 -o "$B/og_sample" "$s/og_sample.c" -lzstd &&
   gcc -O3 -march=native -pthread -o "$B/og_trace_stats" "$s/og_trace_stats.c" -lzstd -lm &&
   gcc -O3 -march=native -o "$B/og_che" "$s/og_che.c" -lzstd -lm &&
+  gcc -O3 -march=native -o "$B/og_ind" "$s/og_ind.c" -lzstd -lm &&
   gcc -O3 -march=native -o "$WORK/synth/synth_gen" "$s/synth_gen.c" -lm &&
   gcc -O3 -march=native -fopenmp -o "$WORK/synth/synth_model" "$s/synth_model.c" -lm || die "C ツールのコンパイル失敗（libzstd-dev が要る）"
   log "setup OK: $CACHESIM"
@@ -412,6 +416,30 @@ che_one() {  # name path fmt params category source ssd → work/che/<name>.json
   python3 "$KIT/py/che_one.py" "$O" "$T" "$name" "$5" "$6" "$var" "$TUNE_W" > "$WORK/che/$name.json" || log "che $name: 要約に失敗"
 }
 che_report() { python3 "$KIT/py/che_report.py" "$WORK/che" "$@"; }
+ind_one() {  # name path fmt params category source ssd → work/indicator/<name>.json（11-26）。paper と同じ SSD・DRAM・変種で、トレースだけから
+  local name=$1 path=$2 tr var TP SENV fp SSD DRAM R CH u O=${IND_DIR:-$WORK/indicator} want
+  [ -r "$path" ] || { log "$name: $path が読めない。飛ばす"; return; }
+  trace_cfg "$name" "$path" "$3" "$4" "$7"
+  [ "${TR_AMP_KEY:-1}/${TR_AMP_SIZE:-1}" = 1/1 ] || log "$name: 増幅（amp_key / amp_size）は指標に入らない（元のトレースで数える）"
+  mkdir -p "$O"; want="og_ind $(sha256sum "$KIT/src/og_ind.c" | cut -c1-12) $tr $SSD $DRAM n=${NREQ:-} $SENV"
+  if [ -s "$O/$name.json" ] && [ "$(cat "$O/$name.cmd" 2>/dev/null)" = "$want" ]; then
+    json_tag "$O/$name.json" category="$5" source="$6"; return   # 済み（category・source だけ今の traces.tsv に）
+  fi
+  log "indicator $name/$var: SSD=$SSD DRAM=$DRAM"
+  env $SENV "$B/og_ind" -C "$SSD" -D "$DRAM" -a 2 ${NREQ:+-n $NREQ} "$tr" > "$O/$name.json.tmp" && mv "$O/$name.json.tmp" "$O/$name.json" || { log "$name: og_ind 失敗"; return; }
+  echo "$want" > "$O/$name.cmd"
+  json_tag "$O/$name.json" category="$5" source="$6" variant="$var"
+}
+indicator_report() { python3 "$KIT/py/indicator_report.py" "$WORK" "$@"; }
+indicator_cmd() {  # indicator [--sens] [name..]: 既定の点（と --sens なら paper-sens の SSD・DRAM の点）で指標を計算し、表と図を作る
+  local sens=0 x; [ "${1:-}" = --sens ] && { sens=1; shift; }
+  mkdir -p "$WORK/indicator"; each_trace ind_one "$@"
+  if [ $sens = 1 ]; then   # paper_sens と同じ点（RU の点は og_ind に効かないので、既定の点の指標を使う）
+    for x in $SENS_SSD; do ( SSD_MULT=$x; IND_DIR=$WORK/indicator/sens/ssd_x$x; mkdir -p "$IND_DIR"; each_trace ind_one "$@" ) || return; done
+    for x in $SENS_DRAM; do ( DRAM_DIV=$x; IND_DIR=$WORK/indicator/sens/dram_$x; mkdir -p "$IND_DIR"; each_trace ind_one "$@" ) || return; done
+    indicator_report; indicator_report --sens
+  else indicator_report; fi
+}
 
 tune_synth() {  # 合成の 95:5 と 3:1（1/64 縮小の SSD）。答え（固定の下限の最良）が分かっている負荷で、自動推定が届くかを見る
   local S=$WORK/synth w name spec av
@@ -635,7 +663,7 @@ need_build() {  # キットのパッチが当てたものと違う（キット�
 need_traces() { check >/dev/null || { check; die "traces.tsv を直す"; }; }
 usage() { awk 'NR > 1 && /^set -u/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; }
 cmd=${1:-help}; [ $# -gt 0 ] && shift
-case $cmd in help|-h|--help|check|methods|stop|aggregate|tune-figs|che-report|paper-figs) ;; *) guard "$cmd $*" ;; esac
+case $cmd in help|-h|--help|check|methods|stop|aggregate|tune-figs|che-report|indicator-report|paper-figs) ;; *) guard "$cmd $*" ;; esac
 case $cmd in
   # 準備
   setup)        setup ;;
@@ -661,6 +689,8 @@ case $cmd in
   aggregate)    aggregate "$@" ;;
   tune-figs)    tune_figs "$@" ;;
   che-report)   che_report "$@" ;;
+  indicator)    need_traces; [ -x "$B/og_ind" ] || setup; indicator_cmd "$@" ;;
+  indicator-report) indicator_report "$@" ;;
   paper-figs)   paper_figs "$@" ;;
   help|-h|--help) usage ;;
   *)            usage; die "知らないコマンド: $cmd" ;;

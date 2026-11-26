@@ -1,0 +1,3 @@
+/root/tc/w01.oracleGeneral.zst RegionFlash-lru-lru cache size   192GiB,        215796257 req, miss ratio 0.7278, byte miss ratio 0.6916, throughput 0.90 MQPS
+/root/tc/w01.oracleGeneral.zst RegionFlash-lru-lru cache size   192GiB,        215796257 req, miss ratio 0.6802, byte miss ratio 0.6635, throughput 0.98 MQPS
+/root/tc/w01.oracleGeneral.zst RegionFlash-lru-lru cache size   192GiB,        215796257 req, miss ratio 0.6790, byte miss ratio 0.6634, throughput 1.00 MQPS

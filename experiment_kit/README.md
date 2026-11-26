@@ -402,6 +402,25 @@ CHE_SIM=0 ./run.sh che       # RegionFlash を回さず、Che の予測だけ（
 - 増幅つきのトレースでは、Che は容量を K·F で割って同じ答えを出す。素の LRU は回さない。
 - `og_che` のメモリは物 1 個あたり約 50 B（w01：物 1.2 億個で 6.4 GB、18 秒）。
 
+### 6.6 indicator：提案が効くワークロードを事前に見分ける（11-26）
+
+```
+./run.sh indicator           # traces.tsv の全トレースで指標を計算し（回さない）、paper の結果と並べる → work/indicator/report.html
+./run.sh indicator-report    # 表と図だけ作り直す
+./run.sh indicator --sens    # paper-sens の点（SSD・DRAM・RU を一つずつ変えた点）でも → work/indicator/sens/report.html
+```
+
+**感度の点（`--sens`、11-26）**：paper-sens と同じ点（`SENS_SSD`・`SENS_DRAM`。RU の点は Region の大きさがモデルに入らないので既定の点の指標）で指標を計算し、`work/paper/sens/<点>/` の結果の分類の得（`ru-otsu-ghost-cb` − `ru-none-nat-cb`。どちらも `PAPER_SENS_METHODS` の既定に入っている）と並べる。トレースごとの図 `fig_sens_<trace>.svg` は、列 = SSD 容量・DRAM・RU、段 = 入れ替わり（実線＝予言、破線＝分類しない run の実測、赤の破線＝2 回）・大きさで分けられるばらつき・分類の得 ΔBMR・分類の得 ΔOHR。容量を増やして得が消える（逆転する）トレースで、入れ替わりやばらつきが同じ向きに下がっていれば、指標で事前に予言できたことになる。表は `table_indicator_sens.csv`。予言の入れ替わりは、Region 単位の追い出しで戻ってくる人気のコンテンツの書き直しや再挿入を数えないので、実測より小さく出る（Tencent で約 1/3）。水準より、点の間の向きを見る。
+
+トレースだけから、paper と同じ SSD・DRAM の大きさ（と `NREQ`）で 2 つの指標を出す（`src/og_ind.c`。コンテンツ単位の Che 近似で、DRAM は前段の LRU）。篩なしと篩あり（2 回以上リクエストされるコンテンツだけ入れる近似）の両方。
+
+- **入れ替わり**：SSD の容量が何回書かれるか（圧力）。2 回より小さいと追い出しがほとんど起きず、書き分けも配分も効かない。篩で効果が消えるのは、篩でここが落ちるトレース（この PC の w01：3.9 → 1.1 回）。
+- **ばらつき**：大きさの段（大津と同じ [2^b, 2^(b+1))）ごとの ln（SSD に届くリクエスト ÷ 書いたバイト）を、大きさの線 1 本で分けたときの大津の得点（と、全体に対する割合 η、切れ目）。混ぜたキャッシュの run から測ると、人気のコンテンツが一度きりのコンテンツに押し出されて差が隠れるので、トレースから測る。
+
+`report.html` は指標と、paper の結果の分類の得（`ru-otsu-ghost-cb` − `ru-none-nat-cb`、篩ありは両方に `-adm`。BMR の差とその基準の BMR に対する割合、OHR の差）を並べる（`fig_indicator.svg`・`table_indicator.csv`）。この 4 方式は paper-final2 の組に入っている。同じ大きさ・`NREQ`・og_ind で計算済みなら飛ばし、category・source だけ今の traces.tsv に書き直す。
+
+限界：コンテンツ単位のモデルなので Region の巻き添えは入らない。巨大なコンテンツを分割して持つトレース（nha）や、容量が足跡のごく一部のトレースでは入れ替わりの水準が合わない（nha：予言 1,647 回、実測 198 回）。時間局所性も入らない。この PC の 4 トレースでは、入れ替わりが篩の後の効果の消え方を当て、ばらつきが w01・Tencent（効く）と msr（効かない）を分けた。境目は全トレースで決める（docs/Che-sim/workload_indicator.html）。
+
 ### 6.5 paper：論文用の比較
 
 FDP SSD の RU（GC の単位、626.5 MiB）は、CacheLib の Region の上限（256 MiB）より大きい。Region を RU に合わせると DLWA = 1 になるが、Region が大きいぶん道連れと書き直し（アプリ層の GC）が増える。書き込み時の分類と容量の配分がその増加を抑え、さらに BMR を下げるかを測る。DLWA は実機と CacheLib で測るので、ここでは測らない（NAND 書き込みを比べるときは R=256 MiB 側に 1.4 を掛ける）。SSD・DRAM・chunk は validity と同じ、変種は埋め値を除いた主の変種。
@@ -561,7 +580,7 @@ python3 py/paper_check.py work [トレース名..]   # 結果の確かめ（§6.
 - 方式は `PAPER_SENS_METHODS`（既定 `r256-none-nat-n1 ru-none-nat-n1 ru-otsu-ghost-cb ru-otsu-ghost-n1 ru-none-nat-cb`）。`ru-none-nat-cb` は分類なしで書き直しだけ n=cb（`ru-otsu-ghost-cb` との差が分類＋配分の効果）。
 - **既定の点は `work/paper` の結果を共有**する（paper で回した方式は回し直さない）。変えた点だけが `work/paper/sens/<点>/` に増える。
 - **RU の点では CacheLib を回さない**：`r256-none-nat-n1` は Region を 256 MiB に固定して持つので、RU を変えても既定の点と同じ run になる。図と表では既定の点の値と比べる。
-- 出力（`work/paper/sens/`）：`fig_sens_<トレース>.svg`（上 = ΔBMR [pt]、下 = SSD 書き込みの比。左から SSD 容量・DRAM・RU。縦の灰線 = 既定の点）、`table_sens.csv` / `.md`（ΔBMR・ΔOHR・書き込みの比）。
+- 出力（`work/paper/sens/`）：`fig_sens_<トレース>.svg`（上から ΔBMR [pt]・SSD 書き込みの比・ΔOHR [pt]。左から SSD 容量・DRAM・RU。縦の灰線 = 既定の点）、`table_sens.csv` / `.md`（ΔBMR・ΔOHR・書き込みの比）。
 - **書き込みは DLWA を掛けていない**（アプリ層の書き込み）。CacheLib 側の DLWA は RU によって違う（実機で測ったのは R=256 MiB・RU 626.5 MiB の 1.4 だけ）。NAND 書き込みで比べるときは、RU ごとに実機の値か見積りを掛ける。
 - 規模：トレース × 点 × 方式。既定ではトレースあたり 7 点 × 5 方式から、既定の点の共有分と RU の点の CacheLib を除いた約 30 run。重いトレースだけ外すなら `./run.sh paper-sens meta_nha wiki_cdn` のように名前を並べる。点を減らすなら `SENS_RU="1342177280" ./run.sh paper-sens`、空にすればその軸を回さない（`SENS_DRAM= ./run.sh paper-sens`）。
 - 見たいこと：SSD が大きいほど端の価値が下がり分けた得は小さくなるはず。RU が大きいほど巻き添えが増え、書き直しと分類の効き目は増すはず。DRAM が大きいと SSD に来る要求が冷えるので、得の大きさが変わるか。

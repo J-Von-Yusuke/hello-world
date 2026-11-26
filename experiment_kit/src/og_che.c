@@ -8,6 +8,8 @@
  *       τ は 1/4 オクターブの格子に丸める（出力の taus_eff）
  *   -w  目的 J = BHR + w·OHR の w（既定 0.03,0.1,0.3,1）
  *   環境変数 SAT_DROP=<size>：その大きさの要求は無かったことにする（og_info と同じ。drop / delete 変種用）
+ *   -a K  受け入れの篩（11-26）：トレース全体で K 回以上要求される物だけがキャッシュに入れる（K=2 = 一度きりの物を入れない。
+ *         S3-FIFO 型の篩の 1 次の近似）。入れない物の要求はミスのまま数える。既定 1 = 篩なし
  * build: gcc -O3 -march=native -o og_che og_che.c -lzstd -lm
  * 出力: JSON 1 個（標準出力）
  */
@@ -43,12 +45,14 @@ static int qkey(uint32_t c) { return c <= QX ? (int)c : QX + 1 + (int)floor(log(
 typedef struct { int b; double n, c, s, lam; } bin_t; /* 物の数、回数の和、バイトの和、λ（平均回数 ÷ 全要求） */
 static bin_t *B; static int NBIN; static double NREQ, LB; /* LB = Σ λ s（要求バイトの率） */
 static int *CL; /* ビン → 分類（τ の組ごとに入れ直す） */
+static double AMIN = 1; /* -a：物あたりの要求回数がこれ未満のビンはキャッシュに入れない */
+#define ADM(i) (B[i].c >= AMIN * B[i].n - 1e-9)
 
 /* 分類 k（k < 0 なら全部）の、T での 容量・ヒット・ヒットバイト と 限界値の分子・分母 */
 static void che(double T, int k, double *C, double *H, double *BH, double wo, double wb, double *mnum, double *mden) {
   double c = 0, h = 0, bh = 0, a = 0, d = 0;
   for (int i = 0; i < NBIN; i++) {
-    if (k >= 0 && CL[i] != k) continue;
+    if ((k >= 0 && CL[i] != k) || !ADM(i)) continue;
     double l = B[i].lam, e = exp(-l * T), p = 1 - e;
     c += B[i].s * p; h += B[i].n * l * p; bh += B[i].s * l * p;
     a += l * l * e * (wo * B[i].n + wb * B[i].s / LB); d += l * e * B[i].s;
@@ -60,7 +64,7 @@ static void che(double T, int k, double *C, double *H, double *BH, double wo, do
   if (mden) *mden = d;
 }
 static double occ(double T, int k) { double c; che(T, k, &c, 0, 0, 0, 0, 0, 0); return c; }
-static double full(int k) { double s = 0; for (int i = 0; i < NBIN; i++) if (k < 0 || CL[i] == k) s += B[i].s; return s; }
+static double full(int k) { double s = 0; for (int i = 0; i < NBIN; i++) if ((k < 0 || CL[i] == k) && ADM(i)) s += B[i].s; return s; }
 static double T_of_C(double C, int k) { /* 占有 = C となる T（log T の二分法） */
   if (C <= 0) return 0;
   if (C >= full(k) * (1 - 1e-12)) return INFINITY;
@@ -91,7 +95,7 @@ static void eval_alloc(int K, const double *Tk, double *ohr, double *bhr) {
   for (int k = 0; k < K; k++) {
     double h, bh;
     if (isinf(Tk[k])) { /* 全部在籍 */
-      h = bh = 0; for (int i = 0; i < NBIN; i++) if (CL[i] == k) h += B[i].n * B[i].lam, bh += B[i].s * B[i].lam / LB;
+      h = bh = 0; for (int i = 0; i < NBIN; i++) if (CL[i] == k && ADM(i)) h += B[i].n * B[i].lam, bh += B[i].s * B[i].lam / LB;
     } else che(Tk[k], k, 0, &h, &bh, 0, 0, 0, 0);
     *ohr += h; *bhr += bh;
   }
@@ -99,10 +103,11 @@ static void eval_alloc(int K, const double *Tk, double *ohr, double *bhr) {
 static int cmp_d(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x < y) - (x > y); }
 static void knap(double C, int byte, double *ohr, double *bhr) { /* λ/s（OHR）または λ（BHR）の大きい順に詰める（IRM の上限） */
   double *key = malloc(sizeof(double) * 2 * NBIN), left = C;
-  for (int i = 0; i < NBIN; i++) key[2 * i] = byte ? B[i].lam : B[i].lam * B[i].n / (B[i].s > 0 ? B[i].s : 1e-9), key[2 * i + 1] = i;
+  for (int i = 0; i < NBIN; i++) key[2 * i] = !ADM(i) ? -1 : byte ? B[i].lam : B[i].lam * B[i].n / (B[i].s > 0 ? B[i].s : 1e-9), key[2 * i + 1] = i;
   qsort(key, NBIN, 2 * sizeof(double), cmp_d);
   *ohr = *bhr = 0;
   for (int j = 0; j < NBIN && left > 0; j++) {
+    if (key[2 * j] < 0) break;
     bin_t *q = &B[(int)key[2 * j + 1]]; double f = q->s > 0 ? fmin(1, left / q->s) : 1;
     *ohr += f * q->n * q->lam; *bhr += f * q->s * q->lam / LB; left -= f * q->s;
   }
@@ -149,6 +154,7 @@ int main(int argc, char **argv) {
   for (int a = 1; a < argc; a++) {
     if (!strcmp(argv[a], "-C") && a + 1 < argc) { for (char *t = strtok(argv[++a], ","); t && ncap < 16; t = strtok(0, ",")) caps[ncap++] = atof(t); }
     else if (!strcmp(argv[a], "-t") && a + 1 < argc) { if (nt < 16) tset[nt++] = argv[++a]; else a++; }
+    else if (!strcmp(argv[a], "-a") && a + 1 < argc) AMIN = atof(argv[++a]);
     else if (!strcmp(argv[a], "-w") && a + 1 < argc) { nw = 0; for (char *t = strtok(argv[++a], ","); t && nw < 8; t = strtok(0, ",")) ws[nw++] = atof(t); }
     else path = argv[a];
   }
@@ -198,8 +204,8 @@ int main(int argc, char **argv) {
     LB += B[NBIN].lam * B[NBIN].s; NBIN++;
   }
   CL = calloc(NBIN, sizeof(int));
-  printf("{\"n\":%llu,\"dropped\":%llu,\"uniq\":%zu,\"footprint\":%.0f,\"one_hit_frac\":%.6f,\"compulsory_miss\":%.6f,\"bins\":%d,\"w\":[",
-         n, dropped, used, fp, one / used, used / NREQ, NBIN);
+  printf("{\"admit_min\":%g,\"n\":%llu,\"dropped\":%llu,\"uniq\":%zu,\"footprint\":%.0f,\"one_hit_frac\":%.6f,\"compulsory_miss\":%.6f,\"bins\":%d,\"w\":[",
+         AMIN, n, dropped, used, fp, one / used, used / NREQ, NBIN);
   for (int i = 0; i < nw; i++) printf("%s%g", i ? "," : "", ws[i]);
   {
     double a, rh, r2; zipf(-1, &a, &rh, &r2);

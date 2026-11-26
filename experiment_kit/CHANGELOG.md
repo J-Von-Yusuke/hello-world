@@ -2,6 +2,9 @@
 
 新しい順。README の節番号はその時点のもの。
 
+- **11-26 OHR を感度と指標の図に**：paper-sens の `fig_sens_<trace>.svg` に ΔOHR の段を足し（上から ΔBMR・書き込みの比・ΔOHR）、`table_sens.md` のセルを「ΔBMR / 書き込みの比 / ΔOHR」にした（CSV には前から `d_ohr_pt` があった）。indicator の `fig_indicator.svg` に分類の得 ΔOHR の段、`--sens` の `fig_sens_<trace>.svg` に ΔOHR の段を足した。`indicator --sens` は既定の点の report.html も作る。
+- **11-26 indicator --sens**：paper-sens の SSD・DRAM の点でも指標を計算し（`work/indicator/sens/<点>/`）、点ごとの分類の得と、分類しない run の実測の入れ替わりと並べる（`work/indicator/sens/report.html`・`fig_sens_<trace>.svg`・`table_indicator_sens.csv`）。RU の点は既定の点の指標。`./run.sh indicator-report --sens` で表と図だけ。wiki2019u の SSD 2 倍で分類が分類なしに負けた件を、指標で予言できるかを見るため。`tools/synth/kit_ind_sens_test.sh`（Tencent 300 万要求、各軸 1 点）で確かめた。
+- **11-26 indicator：効くワークロードの事前の指標**：`./run.sh indicator` / `indicator-report`。`src/og_ind.c`（トレースだけから、SSD の入れ替わりと、大きさで分けられる再利用のばらつき＝大津の得点。DRAM を前段に、篩なし／ありの両方、`NREQ` に合わせる）と `py/indicator_report.py`（paper の結果の分類の得と並べた表と図）。この PC の 4 トレースで、篩で効果が消えるのは篩で SSD がほとんど入れ替わらなくなるトレースだけ（w01）と分かったため。`tools/synth/kit_ind_test.sh` で確かめた（NREQ・飛ばし・category の書き直し）。
 - **11-25 まとめの図の書き込みを取得＋再書き込みに**：`fig_summary*` の write・nwrite の面を、`fig_write`・`fig_nwrite` と同じく濃い（取得）＋薄い（再書き込み）の積み上げにし、段の中に各量、端に合計を書く。nwrite の面には CacheLib 自身の内訳も描く。
 - **11-25 まとめの図を指標ごとに**：`fig_summary` と同じ横棒の形で、`fig_summary_main`（BMR・書き込み・OHR）・`fig_summary_rel`（ΔBMR・書き込みの比・ΔOHR）、1 面ずつの 6 枚、値と CacheLib 比の対 3 枚（BMR・OHR・書き込み）も出す。行に基準も入れ、値の面はトレースごとの目盛り。`paper_figs.py` の `summary_fig`・`SUMM_FIGS`。
 - **11-25 説明用の組（--user-method）**：比べる方式が多すぎて、見せたときに読めないため、`config.sh` に `PAPER_USER_METHODS` を足した（既定は CacheLib n=3・CacheLib＋篩・RU のみ・以前の提案・提案・提案＋篩）。`./run.sh paper-figs --user-method [場所]` で、その方式だけの一式を `work/paper/<場所>/`（既定 users）に出す。回さず、traces.tsv のトレースで結果のあるもの全部を使い、群ごとの一式も出す。説明用の 1 枚 `fig_summary.svg` も足した。トレースごとの横棒で、左が ΔBMR、右が書き込みの比。説明用の組と図の組だけで描く。`paper_figs.py --out <場所>`。`tools/synth/kit_user_test.sh` で確かめた。
