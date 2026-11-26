@@ -2,6 +2,7 @@
 
 新しい順。README の節番号はその時点のもの。
 
+- **11-26 che_sens.sh**：`./che_sens.sh <trace>`。og_che（物単位 LRU、DRAM・Region なし）で、SSD 容量 ×`CHE_X`（既定 0.33 1 2）の混ぜた LRU と、大津の区切り（work/indicator/<trace>.json の cut_log2）で 2 クラスに分けた LRU（BMR 最小の配分）の BMR と T を表にする → work/che_sens/<trace>.json。容量を増やすと分類の得が消えるかを、シミュレーションなしで見るため。`SSD_BYTES`・`TAU` で直接指定も可。
 - **11-26 OHR を感度と指標の図に**：paper-sens の `fig_sens_<trace>.svg` に ΔOHR の段を足し（上から ΔBMR・書き込みの比・ΔOHR）、`table_sens.md` のセルを「ΔBMR / 書き込みの比 / ΔOHR」にした（CSV には前から `d_ohr_pt` があった）。indicator の `fig_indicator.svg` に分類の得 ΔOHR の段、`--sens` の `fig_sens_<trace>.svg` に ΔOHR の段を足した。`indicator --sens` は既定の点の report.html も作る。
 - **11-26 indicator --sens**：paper-sens の SSD・DRAM の点でも指標を計算し（`work/indicator/sens/<点>/`）、点ごとの分類の得と、分類しない run の実測の入れ替わりと並べる（`work/indicator/sens/report.html`・`fig_sens_<trace>.svg`・`table_indicator_sens.csv`）。RU の点は既定の点の指標。`./run.sh indicator-report --sens` で表と図だけ。wiki2019u の SSD 2 倍で分類が分類なしに負けた件を、指標で予言できるかを見るため。`tools/synth/kit_ind_sens_test.sh`（Tencent 300 万要求、各軸 1 点）で確かめた。
 - **11-26 indicator：効くワークロードの事前の指標**：`./run.sh indicator` / `indicator-report`。`src/og_ind.c`（トレースだけから、SSD の入れ替わりと、大きさで分けられる再利用のばらつき＝大津の得点。DRAM を前段に、篩なし／ありの両方、`NREQ` に合わせる）と `py/indicator_report.py`（paper の結果の分類の得と並べた表と図）。この PC の 4 トレースで、篩で効果が消えるのは篩で SSD がほとんど入れ替わらなくなるトレースだけ（w01）と分かったため。`tools/synth/kit_ind_test.sh` で確かめた（NREQ・飛ばし・category の書き直し）。

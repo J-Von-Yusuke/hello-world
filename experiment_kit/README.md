@@ -408,6 +408,7 @@ CHE_SIM=0 ./run.sh che       # RegionFlash を回さず、Che の予測だけ（
 ./run.sh indicator           # traces.tsv の全トレースで指標を計算し（回さない）、paper の結果と並べる → work/indicator/report.html
 ./run.sh indicator-report    # 表と図だけ作り直す
 ./run.sh indicator --sens    # paper-sens の点（SSD・DRAM・RU を一つずつ変えた点）でも → work/indicator/sens/report.html
+./che_sens.sh wiki2019u      # Che モデルで SSD ×0.33・×1・×2 の「混ぜた LRU」と「大津の区切りで分けた LRU」の BMR を比べる（11-26）
 ```
 
 **感度の点（`--sens`、11-26）**：paper-sens と同じ点（`SENS_SSD`・`SENS_DRAM`。RU の点は Region の大きさがモデルに入らないので既定の点の指標）で指標を計算し、`work/paper/sens/<点>/` の結果の分類の得（`ru-otsu-ghost-cb` − `ru-none-nat-cb`。どちらも `PAPER_SENS_METHODS` の既定に入っている）と並べる。トレースごとの図 `fig_sens_<trace>.svg` は、列 = SSD 容量・DRAM・RU、段 = 入れ替わり（実線＝予言、破線＝分類しない run の実測、赤の破線＝2 回）・大きさで分けられるばらつき・分類の得 ΔBMR・分類の得 ΔOHR。容量を増やして得が消える（逆転する）トレースで、入れ替わりやばらつきが同じ向きに下がっていれば、指標で事前に予言できたことになる。表は `table_indicator_sens.csv`。予言の入れ替わりは、Region 単位の追い出しで戻ってくる人気のコンテンツの書き直しや再挿入を数えないので、実測より小さく出る（Tencent で約 1/3）。水準より、点の間の向きを見る。
