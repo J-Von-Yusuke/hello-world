@@ -10,6 +10,8 @@
  *   環境変数 SAT_DROP=<size>：その大きさの要求は無かったことにする（og_info と同じ。drop / delete 変種用）
  *   -a K  受け入れの篩（11-26）：トレース全体で K 回以上要求される物だけがキャッシュに入れる（K=2 = 一度きりの物を入れない。
  *         S3-FIFO 型の篩の 1 次の近似）。入れない物の要求はミスのまま数える。既定 1 = 篩なし
+ *   -D  DRAM [B]（11-26）：SSD の前の物単位 LRU（全部の物を入れる、og_ind と同じ）。1 個なら全容量に、-C と同じ個数なら容量ごとに。
+ *       SSD に届く率 r_i = λ_i e^{−λ_i T_D} で SSD の Che を解き、出力の ohr・bhr は DRAM のヒットを足した全体の値。既定 0 = DRAM なし（以前と同じ）
  * build: gcc -O3 -march=native -o og_che og_che.c -lzstd -lm
  * 出力: JSON 1 個（標準出力）
  */
@@ -42,18 +44,36 @@ static void grow(void) {
 #define NQ 2400
 static int sbucket(uint32_t s) { return s <= 1 ? 0 : 1 + (int)floor(4 * log2((double)s - 1)); } /* s ≤ 2^(m/4) ⟺ b ≤ m */
 static int qkey(uint32_t c) { return c <= QX ? (int)c : QX + 1 + (int)floor(log((double)c / QX) / log(1.01)); }
-typedef struct { int b; double n, c, s, lam; } bin_t; /* 物の数、回数の和、バイトの和、λ（平均回数 ÷ 全要求） */
+typedef struct { int b; double n, c, s, lam, r; } bin_t; /* 物の数、回数の和、バイトの和、λ（平均回数 ÷ 全要求）、r = SSD に届く率（DRAM の後） */
 static bin_t *B; static int NBIN; static double NREQ, LB; /* LB = Σ λ s（要求バイトの率） */
 static int *CL; /* ビン → 分類（τ の組ごとに入れ直す） */
 static double AMIN = 1; /* -a：物あたりの要求回数がこれ未満のビンはキャッシュに入れない */
 #define ADM(i) (B[i].c >= AMIN * B[i].n - 1e-9)
+static double DH, DBH, TD; /* DRAM のヒット（要求の割合・バイトの割合）と DRAM の T */
+static void set_dram(double D) { /* DRAM の T_D を解いて、各ビンの SSD に届く率 r を入れる */
+  double fp = 0; for (int i = 0; i < NBIN; i++) fp += B[i].s;
+  TD = D <= 0 ? 0 : INFINITY;
+  if (D > 0 && D < fp * (1 - 1e-12)) {
+    double lo = -5, hi = log(1e4 * NREQ);
+    for (int it = 0; it < 64; it++) {
+      double m = (lo + hi) / 2, c = 0; for (int i = 0; i < NBIN; i++) c += B[i].s * (1 - exp(-B[i].lam * exp(m)));
+      if (c < D) lo = m; else hi = m;
+    }
+    TD = exp((lo + hi) / 2);
+  }
+  DH = DBH = 0;
+  for (int i = 0; i < NBIN; i++) {
+    B[i].r = isinf(TD) ? 0 : B[i].lam * exp(-B[i].lam * TD);
+    DH += B[i].n * (B[i].lam - B[i].r); DBH += B[i].s * (B[i].lam - B[i].r) / LB;
+  }
+}
 
 /* 分類 k（k < 0 なら全部）の、T での 容量・ヒット・ヒットバイト と 限界値の分子・分母 */
 static void che(double T, int k, double *C, double *H, double *BH, double wo, double wb, double *mnum, double *mden) {
   double c = 0, h = 0, bh = 0, a = 0, d = 0;
   for (int i = 0; i < NBIN; i++) {
     if ((k >= 0 && CL[i] != k) || !ADM(i)) continue;
-    double l = B[i].lam, e = exp(-l * T), p = 1 - e;
+    double l = B[i].r, e = exp(-l * T), p = 1 - e;
     c += B[i].s * p; h += B[i].n * l * p; bh += B[i].s * l * p;
     a += l * l * e * (wo * B[i].n + wb * B[i].s / LB); d += l * e * B[i].s;
   }
@@ -95,23 +115,25 @@ static void eval_alloc(int K, const double *Tk, double *ohr, double *bhr) {
   for (int k = 0; k < K; k++) {
     double h, bh;
     if (isinf(Tk[k])) { /* 全部在籍 */
-      h = bh = 0; for (int i = 0; i < NBIN; i++) if (CL[i] == k && ADM(i)) h += B[i].n * B[i].lam, bh += B[i].s * B[i].lam / LB;
+      h = bh = 0; for (int i = 0; i < NBIN; i++) if (CL[i] == k && ADM(i)) h += B[i].n * B[i].r, bh += B[i].s * B[i].r / LB;
     } else che(Tk[k], k, 0, &h, &bh, 0, 0, 0, 0);
     *ohr += h; *bhr += bh;
   }
+  *ohr += DH; *bhr += DBH;
 }
 static int cmp_d(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x < y) - (x > y); }
 static void knap(double C, int byte, double *ohr, double *bhr) { /* λ/s（OHR）または λ（BHR）の大きい順に詰める（IRM の上限） */
   double *key = malloc(sizeof(double) * 2 * NBIN), left = C;
-  for (int i = 0; i < NBIN; i++) key[2 * i] = !ADM(i) ? -1 : byte ? B[i].lam : B[i].lam * B[i].n / (B[i].s > 0 ? B[i].s : 1e-9), key[2 * i + 1] = i;
+  for (int i = 0; i < NBIN; i++) key[2 * i] = !ADM(i) ? -1 : byte ? B[i].r : B[i].r * B[i].n / (B[i].s > 0 ? B[i].s : 1e-9), key[2 * i + 1] = i;
   qsort(key, NBIN, 2 * sizeof(double), cmp_d);
   *ohr = *bhr = 0;
   for (int j = 0; j < NBIN && left > 0; j++) {
     if (key[2 * j] < 0) break;
     bin_t *q = &B[(int)key[2 * j + 1]]; double f = q->s > 0 ? fmin(1, left / q->s) : 1;
-    *ohr += f * q->n * q->lam; *bhr += f * q->s * q->lam / LB; left -= f * q->s;
+    *ohr += f * q->n * q->r; *bhr += f * q->s * q->r / LB; left -= f * q->s;
   }
   free(key);
+  *ohr += DH; *bhr += DBH;
 }
 
 /* Zipf の傾き：順位 r と回数 c の両対数の最小二乗。r = 10 から「2 回以上」の最後の順位まで、1 桁 20 点に間引く */
@@ -150,15 +172,16 @@ static const char *num(double x) { /* JSON の数（NaN・∞ は null） */
 }
 
 int main(int argc, char **argv) {
-  double caps[16]; int ncap = 0; char *tset[16]; int nt = 0; double ws[8] = {0.03, 0.1, 0.3, 1}; int nw = 4; const char *path = 0;
+  double caps[16], drs[16] = {0}; int ncap = 0, ndr = 0; char *tset[16]; int nt = 0; double ws[8] = {0.03, 0.1, 0.3, 1}; int nw = 4; const char *path = 0;
   for (int a = 1; a < argc; a++) {
     if (!strcmp(argv[a], "-C") && a + 1 < argc) { for (char *t = strtok(argv[++a], ","); t && ncap < 16; t = strtok(0, ",")) caps[ncap++] = atof(t); }
     else if (!strcmp(argv[a], "-t") && a + 1 < argc) { if (nt < 16) tset[nt++] = argv[++a]; else a++; }
     else if (!strcmp(argv[a], "-a") && a + 1 < argc) AMIN = atof(argv[++a]);
+    else if (!strcmp(argv[a], "-D") && a + 1 < argc) { for (char *t = strtok(argv[++a], ","); t && ndr < 16; t = strtok(0, ",")) drs[ndr++] = atof(t); }
     else if (!strcmp(argv[a], "-w") && a + 1 < argc) { nw = 0; for (char *t = strtok(argv[++a], ","); t && nw < 8; t = strtok(0, ",")) ws[nw++] = atof(t); }
     else path = argv[a];
   }
-  if (!path || !ncap) { fprintf(stderr, "usage: og_che -C cap[,cap..] [-t tau[,tau..]]... [-w w,..] file.zst\n"); return 1; }
+  if (!path || !ncap || (ndr > 1 && ndr != ncap)) { fprintf(stderr, "usage: og_che -C cap[,cap..] [-D dram[,dram..]] [-t tau[,tau..]]... [-w w,..] [-a K] file.zst（-D は 1 個か -C と同じ個数）\n"); return 1; }
   FILE *f = fopen(path, "rb"); if (!f) { perror(path); return 1; }
   tab = calloc(cap, sizeof(ent_t));
   ZSTD_DCtx *d = ZSTD_createDCtx();
@@ -200,7 +223,7 @@ int main(int argc, char **argv) {
   B = malloc(sizeof(bin_t) * 200000); NBIN = 0; LB = 0;
   for (int b = 0; b < NB_S; b++) for (int q = 0; q < NQ; q++) {
     size_t j = (size_t)b * NQ + q; if (!gn[j]) continue;
-    B[NBIN] = (bin_t){b, gn[j], gc[j], gs[j], gc[j] / gn[j] / NREQ};
+    B[NBIN] = (bin_t){b, gn[j], gc[j], gs[j], gc[j] / gn[j] / NREQ, gc[j] / gn[j] / NREQ};
     LB += B[NBIN].lam * B[NBIN].s; NBIN++;
   }
   CL = calloc(NBIN, sizeof(int));
@@ -212,11 +235,14 @@ int main(int argc, char **argv) {
     printf("],\"zipf_all\":{\"alpha\":%s,\"r_hi\":%.0f,\"r2\":%s},\"capacities\":[", num(a), rh, num(r2));
   }
   for (int ci = 0; ci < ncap; ci++) {
+    double Dr = ndr > 1 ? drs[ci] : drs[0]; set_dram(Dr);
     double C = caps[ci], T = T_of_C(C, -1), H, BH;
-    che(T, -1, 0, &H, &BH, 0, 0, 0, 0);
+    che(T, -1, 0, &H, &BH, 0, 0, 0, 0); H += DH; BH += DBH;
     double ko, kb, ko2, kb2; knap(C, 0, &ko, &kb); knap(C, 1, &ko2, &kb2);
-    printf("%s{\"C\":%.0f,\"C_over_fp\":%.5f,\"lru\":{\"T\":%s,\"ohr\":%.5f,\"bhr\":%.5f},\"knap_ohr\":{\"ohr\":%.5f,\"bhr\":%.5f},\"knap_bhr\":{\"ohr\":%.5f,\"bhr\":%.5f},\"splits\":[",
-           ci ? "," : "", C, C / fp, num(T), H, BH, ko, kb, ko2, kb2);
+    printf("%s{\"C\":%.0f,\"C_over_fp\":%.5f,", ci ? "," : "", C, C / fp);
+    if (Dr > 0) printf("\"D\":%.0f,\"dram\":{\"T\":%s,\"ohr\":%.5f,\"bhr\":%.5f},", Dr, num(TD), DH, DBH);
+    printf("\"lru\":{\"T\":%s,\"ohr\":%.5f,\"bhr\":%.5f},\"knap_ohr\":{\"ohr\":%.5f,\"bhr\":%.5f},\"knap_bhr\":{\"ohr\":%.5f,\"bhr\":%.5f},\"splits\":[",
+           num(T), H, BH, ko, kb, ko2, kb2);
     for (int ti = 0; ti < nt + 1; ti++) {
       /* ti == nt は「分けない」（1 分類）。τ を 1/4 オクターブの格子 m に丸める（s ≤ 2^(m/4) ⟺ b ≤ m） */
       int m4[16], K = 1; char buf[256];
